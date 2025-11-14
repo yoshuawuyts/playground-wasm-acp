@@ -1,0 +1,17 @@
+[package]
+name = "guest"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+publish = { workspace = true }
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+wit-bindgen-rt = { workspace = true, features = ["bitflags"] }
+ox = { workspace = true }
+
+[package.metadata.component]
+package = "component:guest"
+
+[package.metadata.component.dependencies]

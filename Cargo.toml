@@ -1,0 +1,37 @@
+[workspace]
+members = ["crates/guest", "crates/host", "crates/ox", "crates/xtask"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "Apache-2.0 WITH LLVM-exception"
+publish = false
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+debug = false
+strip = true
+lto = true
+
+[workspace.dependencies]
+# Shared
+clap = "4.5.50"
+ox = { path = "./crates/ox" }
+
+# Guest
+wit-bindgen-rt = "0.44.0"
+
+# Host
+wasmtime = "38.0.2"
+wasmtime-wasi = "38.0.2"
+tokio = "1.48.0"
+sacp = "1.0.0"
+
+# Ox
+wasi = "0.14.7"
+slab = "0.4.11"
+
+# Xtask
+xshell = "0.2.7"
