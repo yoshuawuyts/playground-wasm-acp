@@ -1,9 +1,0 @@
-package local:demo;
-
-interface main {
-    run: func(input: string) -> result<string>;
-}
-
-world hello {
-    export main;
-}
