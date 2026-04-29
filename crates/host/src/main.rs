@@ -6,9 +6,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use agent_client_protocol::role::acp::Agent as AgentRole;
+use agent_client_protocol::{ByteStreams, schema};
+use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -17,12 +21,10 @@ use wasmtime_wasi_http::p2::{WasiHttpCtxView, WasiHttpView, default_hooks};
 
 mod translate;
 
-// Generate wasmtime component bindings for the `agent-plugin` world (the world
-// the wasm guest implements). From the host's perspective:
-// - the `client` interface is imported by the guest, so we must provide a
-//   `Host` trait impl on our state type.
-// - the `agent` interface is exported by the guest, so we get callable
-//   functions on the generated bindings struct.
+// Generate wasmtime component bindings for the `agent-plugin` world. From the
+// host's perspective, bindgen flips imports/exports: the `client` interface
+// becomes a Host trait we implement, and the `agent` interface becomes
+// callable methods on the bindings struct.
 wasmtime::component::bindgen!({
     path: "../../vendor/wit",
     world: "agent-plugin",
@@ -32,11 +34,17 @@ wasmtime::component::bindgen!({
 
 use yoshuawuyts::acp::types as acp;
 
-/// Per-store host state.
+// -----------------------------------------------------------------------------
+// Per-store host state.
+// -----------------------------------------------------------------------------
+
 struct HostState {
     wasi: WasiCtx,
     http: WasiHttpCtx,
     table: ResourceTable,
+    /// Channel for forwarding wasm-side `update-session` calls to the ACP
+    /// connection task. Drained by the `connect_with` main loop.
+    updates: mpsc::UnboundedSender<schema::SessionNotification>,
 }
 
 impl WasiView for HostState {
@@ -61,23 +69,16 @@ impl WasiHttpView for HostState {
 impl yoshuawuyts::acp::types::Host for HostState {}
 
 // -----------------------------------------------------------------------------
-// `client` interface implementation. These methods are called by the wasm
-// guest. For the MVP they log/forward what we can and return method-not-found
-// for the rest.
+// `client` interface implementation. Called by the wasm guest.
 // -----------------------------------------------------------------------------
 
 impl yoshuawuyts::acp::client::Host for HostState {
-    async fn update_session(
-        &mut self,
-        session_id: acp::SessionId,
-        update: acp::SessionUpdate,
-    ) {
-        // TODO: forward to the editor via the ACP connection. For now, log to
-        // stderr so we can see it during smoke tests.
-        eprintln!(
-            "[host] update-session {session_id}: {}",
-            translate::session_update_summary(&update)
-        );
+    async fn update_session(&mut self, session_id: acp::SessionId, update: acp::SessionUpdate) {
+        if let Some(notif) = translate::session_update_wit_to_schema(session_id, update) {
+            // Best-effort: if the receiver is gone, the connection has shut
+            // down; nothing useful to do here.
+            let _ = self.updates.send(notif);
+        }
     }
 
     async fn request_permission(
@@ -156,7 +157,11 @@ struct WasmAgent {
 }
 
 impl WasmAgent {
-    async fn new(engine: &Engine, component: &Component) -> Result<Self> {
+    async fn new(
+        engine: &Engine,
+        component: &Component,
+        updates_tx: mpsc::UnboundedSender<schema::SessionNotification>,
+    ) -> Result<Self> {
         let mut linker: Linker<HostState> = Linker::new(engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
@@ -170,10 +175,73 @@ impl WasmAgent {
                 .build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
+            updates: updates_tx,
         };
         let mut store = Store::new(engine, state);
         let bindings = AgentPlugin::instantiate_async(&mut store, component, &linker).await?;
         Ok(Self { store, bindings })
+    }
+
+    // Disjoint-borrow helpers: each method splits `&mut self` into separate
+    // mutable refs to `store` and an immutable borrow of `bindings`, so the
+    // wasmtime call can take `&mut self.store` while the bindings accessor
+    // remains live.
+
+    async fn call_initialize(
+        &mut self,
+        req: &acp::InitializeRequest,
+    ) -> wasmtime::Result<Result<acp::InitializeResponse, acp::Error>> {
+        self.bindings
+            .yoshuawuyts_acp_agent()
+            .call_initialize(&mut self.store, req)
+            .await
+    }
+
+    async fn call_authenticate(
+        &mut self,
+        req: &acp::AuthenticateRequest,
+    ) -> wasmtime::Result<Result<(), acp::Error>> {
+        self.bindings
+            .yoshuawuyts_acp_agent()
+            .call_authenticate(&mut self.store, req)
+            .await
+    }
+
+    async fn call_new_session(
+        &mut self,
+        req: &acp::NewSessionRequest,
+    ) -> wasmtime::Result<Result<acp::NewSessionResponse, acp::Error>> {
+        self.bindings
+            .yoshuawuyts_acp_agent()
+            .call_new_session(&mut self.store, req)
+            .await
+    }
+
+    async fn call_load_session(
+        &mut self,
+        req: &acp::LoadSessionRequest,
+    ) -> wasmtime::Result<Result<(), acp::Error>> {
+        self.bindings
+            .yoshuawuyts_acp_agent()
+            .call_load_session(&mut self.store, req)
+            .await
+    }
+
+    async fn call_prompt(
+        &mut self,
+        req: &acp::PromptRequest,
+    ) -> wasmtime::Result<Result<acp::PromptResponse, acp::Error>> {
+        self.bindings
+            .yoshuawuyts_acp_agent()
+            .call_prompt(&mut self.store, req)
+            .await
+    }
+
+    async fn call_cancel(&mut self, sid: &acp::SessionId) -> wasmtime::Result<()> {
+        self.bindings
+            .yoshuawuyts_acp_agent()
+            .call_cancel(&mut self.store, sid)
+            .await
     }
 }
 
@@ -198,15 +266,123 @@ async fn main() -> Result<()> {
         .map_err(anyhow::Error::from)
         .with_context(|| format!("loading {}", args.wasm_path.display()))?;
 
-    let agent = Arc::new(Mutex::new(WasmAgent::new(&engine, &component).await?));
+    let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
+    let agent = Arc::new(Mutex::new(
+        WasmAgent::new(&engine, &component, updates_tx).await?,
+    ));
 
-    // TODO Phase 3 finish: wire up agent-client-protocol Builder over stdio,
-    // dispatching incoming ACP agent requests (initialize/new-session/prompt/
-    // etc.) to `agent.bindings.yoshuawuyts_acp_agent()` calls and translating
-    // the schema types via the `translate` module.
     eprintln!("[host] loaded {}", args.wasm_path.display());
-    eprintln!("[host] ACP wire protocol bridge not yet wired up");
-    let _ = agent;
-    bail!("ACP wire protocol bridge not yet implemented")
+
+    // ACP bridge over stdio. The host plays the `Agent` role on the wire (the
+    // editor is the client driving us), so we dispatch incoming agent
+    // requests into the wasm component.
+    let transport = ByteStreams::new(
+        tokio::io::stdout().compat_write(),
+        tokio::io::stdin().compat(),
+    );
+
+    let agent_init = agent.clone();
+    let agent_auth = agent.clone();
+    let agent_new = agent.clone();
+    let agent_load = agent.clone();
+    let agent_prompt = agent.clone();
+    let agent_cancel = agent.clone();
+
+    AgentRole
+        .builder()
+        .name("ollama-wasm-host")
+        .on_receive_request(
+            async move |req: schema::InitializeRequest, responder, _cx| {
+                let mut a = agent_init.lock().await;
+                let wit_req = translate::init_request_schema_to_wit(req);
+                let result = a
+                    .call_initialize(&wit_req)
+                    .await
+                    .map_err(|e| translate::trap_to_acp("initialize", e))?;
+                let resp = result.map_err(translate::wit_error_to_acp)?;
+                responder.respond(translate::init_response_wit_to_schema(resp))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: schema::AuthenticateRequest, responder, _cx| {
+                let mut a = agent_auth.lock().await;
+                let wit_req = translate::authenticate_request_schema_to_wit(req);
+                let result = a
+                    .call_authenticate(&wit_req)
+                    .await
+                    .map_err(|e| translate::trap_to_acp("authenticate", e))?;
+                result.map_err(translate::wit_error_to_acp)?;
+                let empty: schema::AuthenticateResponse =
+                    serde_json::from_value(serde_json::json!({})).expect("empty auth response");
+                responder.respond(empty)
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: schema::NewSessionRequest, responder, _cx| {
+                let mut a = agent_new.lock().await;
+                let wit_req = translate::new_session_request_schema_to_wit(req);
+                let result = a
+                    .call_new_session(&wit_req)
+                    .await
+                    .map_err(|e| translate::trap_to_acp("new-session", e))?;
+                let resp = result.map_err(translate::wit_error_to_acp)?;
+                responder.respond(translate::new_session_response_wit_to_schema(resp))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: schema::LoadSessionRequest, responder, _cx| {
+                let mut a = agent_load.lock().await;
+                let wit_req = translate::load_session_request_schema_to_wit(req);
+                let result = a
+                    .call_load_session(&wit_req)
+                    .await
+                    .map_err(|e| translate::trap_to_acp("load-session", e))?;
+                result.map_err(translate::wit_error_to_acp)?;
+                let empty: schema::LoadSessionResponse =
+                    serde_json::from_value(serde_json::json!({})).expect("empty load response");
+                responder.respond(empty)
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: schema::PromptRequest, responder, _cx| {
+                let mut a = agent_prompt.lock().await;
+                let wit_req = translate::prompt_request_schema_to_wit(req);
+                let result = a
+                    .call_prompt(&wit_req)
+                    .await
+                    .map_err(|e| translate::trap_to_acp("prompt", e))?;
+                let resp = result.map_err(translate::wit_error_to_acp)?;
+                responder.respond(translate::prompt_response_wit_to_schema(resp))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |notif: schema::CancelNotification, _cx| {
+                let mut a = agent_cancel.lock().await;
+                let sid = translate::cancel_session_id_schema_to_wit(&notif);
+                a.call_cancel(&sid).await.ok();
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .connect_with(transport, async move |cx| {
+            // Drain wasm-emitted session updates and forward as JSON-RPC
+            // notifications to the client (editor) until the channel closes.
+            while let Some(notif) = updates_rx.recv().await {
+                if let Err(e) = cx.send_notification(notif) {
+                    eprintln!("[host] failed to send session/update: {e:?}");
+                    break;
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("acp connection error: {e:?}"))?;
+
+    Ok(())
 }
 

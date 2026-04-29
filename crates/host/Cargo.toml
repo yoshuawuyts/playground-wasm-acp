@@ -10,8 +10,11 @@ publish = { workspace = true }
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }
+futures = { workspace = true }
 wasmtime = { workspace = true, features = ["component-model"] }
 wasmtime-wasi = { workspace = true }
 wasmtime-wasi-http = { workspace = true }
 agent-client-protocol = { workspace = true }
+serde_json = { workspace = true }
 anyhow = "1.0"
