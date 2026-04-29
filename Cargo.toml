@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/guest", "crates/host"]
+members = ["crates/acp-wasm-sys", "crates/guest", "crates/host"]
 resolver = "2"
 
 [workspace.package]
@@ -18,20 +18,18 @@ lto = true
 [workspace.dependencies]
 # Shared
 clap = "4.5.50"
-ox = { path = "./crates/ox" }
+acp-wasm-sys = { path = "./crates/acp-wasm-sys" }
 
 # Guest
 wit-bindgen-rt = "0.44.0"
+wstd = "0.6.6"
+api_ollama = "0.2.0"
 
 # Host
-wasmtime = "38.0.2"
-wasmtime-wasi = "38.0.2"
+wasmtime = "44.0.0"
+wasmtime-wasi = "44.0.0"
 tokio = "1.48.0"
-sacp = "1.0.0"
-
-# Ox
-wasi = "0.14.7"
-slab = "0.4.11"
+agent-client-protocol = "0.11.1"
 
 # Xtask
 xshell = "0.2.7"

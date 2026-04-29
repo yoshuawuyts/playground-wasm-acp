@@ -12,3 +12,4 @@ clap = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
+agent-client-protocol = { workspace = true }
