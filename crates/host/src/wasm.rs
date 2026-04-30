@@ -33,6 +33,7 @@ use crate::yoshuawuyts::acp::init::{AuthenticateRequest, InitializeRequest, Init
 use crate::yoshuawuyts::acp::prompts::{PromptRequest, PromptResponse};
 use crate::yoshuawuyts::acp::sessions::{
     LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
+    SetSessionModeRequest,
 };
 
 // -----------------------------------------------------------------------------
@@ -229,6 +230,18 @@ enum Message {
         req: PromptRequest,
         reply: oneshot::Sender<PromptOutcome>,
     },
+    SetMode {
+        req: SetSessionModeRequest,
+        reply: oneshot::Sender<SetModeOutcome>,
+    },
+}
+
+/// Outcome of a `set-session-mode` call. Mirrors [`PromptOutcome`] but
+/// without a `Cancelled` arm — mode switches are not cancellable.
+pub enum SetModeOutcome {
+    Done,
+    Wit(Error),
+    Trap(wasmtime::Error),
 }
 
 /// Bridge-side handle to a [`SessionActor`]. Cloneable, `Send + Sync`.
@@ -247,6 +260,21 @@ impl SessionHandle {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Message::Prompt { req, reply: tx })
+            .await
+            .map_err(|_| SessionError::ChannelClosed)?;
+        rx.await.map_err(|_| SessionError::ChannelClosed)
+    }
+
+    /// Switch the session's active mode. Routed through the actor so it
+    /// runs on the same wasm instance (and serializes with prompts) as
+    /// the underlying mutable state.
+    pub async fn set_mode(
+        &self,
+        req: SetSessionModeRequest,
+    ) -> Result<SetModeOutcome, SessionError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Message::SetMode { req, reply: tx })
             .await
             .map_err(|_| SessionError::ChannelClosed)?;
         rx.await.map_err(|_| SessionError::ChannelClosed)
@@ -331,6 +359,16 @@ impl SessionActor {
                     };
                     if reply.send(outcome).is_err() {
                         warn!("prompt caller dropped before response was sent");
+                    }
+                }
+                Message::SetMode { req, reply } => {
+                    let outcome = match self.agent.call_set_session_mode(&req).await {
+                        Err(e) => SetModeOutcome::Trap(e),
+                        Ok(Err(e)) => SetModeOutcome::Wit(e),
+                        Ok(Ok(())) => SetModeOutcome::Done,
+                    };
+                    if reply.send(outcome).is_err() {
+                        warn!("set-mode caller dropped before response was sent");
                     }
                 }
             }
@@ -419,6 +457,16 @@ impl WasmAgent {
         self.bindings
             .yoshuawuyts_acp_agent()
             .call_load_session(&mut self.store, req)
+            .await
+    }
+
+    pub async fn call_set_session_mode(
+        &mut self,
+        req: &SetSessionModeRequest,
+    ) -> wasmtime::Result<Result<(), Error>> {
+        self.bindings
+            .yoshuawuyts_acp_agent()
+            .call_set_session_mode(&mut self.store, req)
             .await
     }
 

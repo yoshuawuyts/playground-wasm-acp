@@ -26,7 +26,9 @@ use tracing::{debug, warn};
 
 use crate::state::OutboundEvent;
 use crate::translate;
-use crate::wasm::{PromptOutcome, SessionActor, SessionFactory, SessionHandle, SessionRegistry};
+use crate::wasm::{
+    PromptOutcome, SessionActor, SessionFactory, SessionHandle, SessionRegistry, SetModeOutcome,
+};
 
 /// Look up a session's handle, or return an ACP `invalid-params` error if
 /// the session id is unknown.
@@ -58,6 +60,7 @@ pub async fn run(
     let factory_load = factory.clone();
     let registry_new = registry.clone();
     let registry_load = registry.clone();
+    let registry_set_mode = registry.clone();
     let registry_prompt = registry.clone();
     let registry_cancel = registry.clone();
 
@@ -144,13 +147,35 @@ pub async fn run(
                     .call_load_session(&wit_req)
                     .await
                     .map_err(|e| translate::trap_to_acp("load-session", e))?;
-                // We discard `LoadSessionResponse.modes` for now; mode
-                // plumbing through the WIT translation is Phase 2.
-                let _ = result.map_err(translate::wit_error_to_acp)?;
+                let resp = result.map_err(translate::wit_error_to_acp)?;
                 let (actor, handle) = SessionActor::new(agent, 8, registry_load.clone());
                 tokio::task::spawn_local(actor.run());
                 registry_load.insert(session_key, handle);
-                responder.respond(translate::empty_load_session_response()?)
+                responder.respond(translate::load_session_response_wit_to_schema(resp)?)
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: schema::SetSessionModeRequest, responder, _cx| {
+                let session_key = req.session_id.0.to_string();
+                debug!(session = %session_key, "session/set_mode");
+
+                let handle = require_session(&registry_set_mode, &session_key)?;
+                let wit_req = translate::set_session_mode_request_schema_to_wit(req);
+
+                let outcome = handle.set_mode(wit_req).await.map_err(|_| {
+                    let mut e = AcpError::internal_error();
+                    e.message = format!("session actor for {session_key} is gone");
+                    e
+                })?;
+
+                match outcome {
+                    SetModeOutcome::Done => {
+                        responder.respond(translate::empty_set_session_mode_response()?)
+                    }
+                    SetModeOutcome::Wit(e) => Err(translate::wit_error_to_acp(e)),
+                    SetModeOutcome::Trap(e) => Err(translate::trap_to_acp("set-session-mode", e)),
+                }
             },
             agent_client_protocol::on_receive_request!(),
         )

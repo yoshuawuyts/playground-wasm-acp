@@ -21,9 +21,63 @@ pub fn default_model() -> String {
     std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| DEFAULT_OLLAMA_MODEL.to_string())
 }
 
+/// The Ollama base URL (no path). Derived from [`endpoint()`] by stripping
+/// a trailing `/api/...` segment, so `OLLAMA_URL` remains the only knob.
+fn base_url() -> String {
+    let ep = endpoint();
+    if let Some(idx) = ep.find("/api/") {
+        ep[..idx].to_string()
+    } else {
+        ep
+    }
+}
+
+#[derive(Deserialize)]
+struct TagsResponse {
+    #[serde(default)]
+    models: Vec<TagModel>,
+}
+
+#[derive(Deserialize)]
+struct TagModel {
+    name: String,
+}
+
+/// List models installed in the local Ollama via `GET {base}/api/tags`.
+/// Returns names in the order Ollama reports them.
+pub async fn list_models() -> Result<Vec<String>, String> {
+    let url = format!("{}/api/tags", base_url());
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(&url)
+        .body(Body::empty())
+        .map_err(|e| format!("build request: {e}"))?;
+
+    let mut resp = Client::new()
+        .send(req)
+        .await
+        .map_err(|e| format!("send: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let txt = resp
+            .body_mut()
+            .str_contents()
+            .await
+            .unwrap_or("<unreadable>")
+            .to_string();
+        return Err(format!("ollama HTTP {status}: {txt}"));
+    }
+    let body = resp
+        .body_mut()
+        .json::<TagsResponse>()
+        .await
+        .map_err(|e| format!("decode tags: {e}"))?;
+    Ok(body.models.into_iter().map(|m| m.name).collect())
+}
+
 /// One message in an Ollama chat history. Owned form so we can keep history
 /// across prompt turns.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
     pub content: String,
@@ -56,11 +110,14 @@ struct StreamMessage {
 /// Send a streaming chat completion to Ollama. `on_chunk` is invoked once per
 /// non-empty content fragment as it arrives. Returns the assembled assistant
 /// reply text once the server marks the stream as done.
-pub async fn chat<F: FnMut(&str)>(history: &[Message], on_chunk: F) -> Result<String, String> {
-    let model = default_model();
+pub async fn chat<F: FnMut(&str)>(
+    model: &str,
+    history: &[Message],
+    on_chunk: F,
+) -> Result<String, String> {
     let url = endpoint();
     let body = Body::from_json(&ChatRequestOwned {
-        model: &model,
+        model,
         messages: history,
         stream: true,
     })

@@ -17,13 +17,14 @@ use crate::yoshuawuyts::acp::filesystem::{
     ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest,
 };
 use crate::yoshuawuyts::acp::init::{
-    AuthenticateRequest, ClientCapabilities, FsCapabilities, ImplementationInfo,
-    InitializeRequest, InitializeResponse,
+    AuthenticateRequest, ClientCapabilities, FsCapabilities, ImplementationInfo, InitializeRequest,
+    InitializeResponse,
 };
 use crate::yoshuawuyts::acp::prompts::{PromptRequest, PromptResponse, SessionUpdate, StopReason};
 use crate::yoshuawuyts::acp::sessions::{
-    EnvVar, HttpHeader, LoadSessionRequest, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
-    NewSessionRequest, NewSessionResponse, SessionId,
+    EnvVar, HttpHeader, LoadSessionRequest, LoadSessionResponse, McpServer, McpServerHttp,
+    McpServerSse, McpServerStdio, NewSessionRequest, NewSessionResponse, SessionId, SessionMode,
+    SessionModeId, SessionModeState, SetSessionModeRequest,
 };
 
 // -----------------------------------------------------------------------------
@@ -188,10 +189,11 @@ pub fn new_session_response_wit_to_schema(
 ) -> Result<schema::NewSessionResponse, AcpError> {
     // schema::NewSessionResponse is `non_exhaustive`. Roundtrip via JSON to
     // construct it without depending on the (unstable) field set.
-    synth(
-        "new-session response",
-        serde_json::json!({ "sessionId": resp.session_id }),
-    )
+    let mut json = serde_json::json!({ "sessionId": resp.session_id });
+    if let Some(modes) = resp.modes {
+        json["modes"] = session_mode_state_to_json(modes);
+    }
+    synth("new-session response", json)
 }
 
 // -----------------------------------------------------------------------------
@@ -205,6 +207,69 @@ pub fn load_session_request_schema_to_wit(req: schema::LoadSessionRequest) -> Lo
         mcp_servers: req.mcp_servers.into_iter().map(mcp_server_to_wit).collect(),
     }
 }
+
+/// Convert a WIT `LoadSessionResponse` into the schema shape, propagating
+/// any `modes` the agent advertised so the editor can render its picker
+/// for resumed sessions.
+pub fn load_session_response_wit_to_schema(
+    resp: LoadSessionResponse,
+) -> Result<schema::LoadSessionResponse, AcpError> {
+    let mut json = serde_json::json!({});
+    if let Some(modes) = resp.modes {
+        json["modes"] = session_mode_state_to_json(modes);
+    }
+    synth("load-session response", json)
+}
+
+// -----------------------------------------------------------------------------
+// Session modes
+// -----------------------------------------------------------------------------
+
+pub fn set_session_mode_request_schema_to_wit(
+    req: schema::SetSessionModeRequest,
+) -> SetSessionModeRequest {
+    SetSessionModeRequest {
+        session_id: req.session_id.0.to_string(),
+        mode_id: req.mode_id.0.to_string(),
+    }
+}
+
+/// Empty `SetSessionModeResponse`. Constructed via JSON because the schema
+/// type is `non_exhaustive`.
+pub fn empty_set_session_mode_response() -> Result<schema::SetSessionModeResponse, AcpError> {
+    synth("set-session-mode response", serde_json::json!({}))
+}
+
+fn session_mode_state_to_json(state: SessionModeState) -> serde_json::Value {
+    let SessionModeState {
+        current_mode_id,
+        available_modes,
+    } = state;
+    serde_json::json!({
+        "currentModeId": current_mode_id,
+        "availableModes": available_modes
+            .into_iter()
+            .map(session_mode_to_json)
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn session_mode_to_json(mode: SessionMode) -> serde_json::Value {
+    let SessionMode {
+        id,
+        name,
+        description,
+    } = mode;
+    let mut entry = serde_json::json!({ "id": id, "name": name });
+    if let Some(d) = description {
+        entry["description"] = serde_json::Value::String(d);
+    }
+    entry
+}
+
+/// Suppress the unused-import lint for `SessionModeId` — it's part of the
+/// public WIT surface but not directly referenced in this module.
+const _: fn(SessionModeId) = |_| {};
 
 // -----------------------------------------------------------------------------
 // Prompt
@@ -252,12 +317,6 @@ pub fn empty_authenticate_response() -> Result<schema::AuthenticateResponse, Acp
     synth("authenticate response", serde_json::json!({}))
 }
 
-/// Empty `LoadSessionResponse`. Constructed via JSON because the schema
-/// type is `non_exhaustive`.
-pub fn empty_load_session_response() -> Result<schema::LoadSessionResponse, AcpError> {
-    synth("load-session response", serde_json::json!({}))
-}
-
 // -----------------------------------------------------------------------------
 // Session updates (wasm → editor)
 // -----------------------------------------------------------------------------
@@ -285,9 +344,19 @@ pub fn session_update_wit_to_schema(
             debug!(session = %session_id, "dropped session update: plan (not yet wired)");
             None
         }
-        SessionUpdate::CurrentModeUpdate(_) => {
-            debug!(session = %session_id, "dropped session update: current-mode-update (not yet wired)");
-            None
+        SessionUpdate::CurrentModeUpdate(mode_id) => {
+            // The guest reports a mode switch (e.g. user picked a
+            // different model). Forward as a real `current-mode-update`
+            // notification so the editor's picker can reflect it.
+            let upd: schema::SessionUpdate = serde_json::from_value(serde_json::json!({
+                "sessionUpdate": "current_mode_update",
+                "currentModeId": mode_id,
+            }))
+            .ok()?;
+            return Some(schema::SessionNotification::new(
+                schema::SessionId::from(session_id),
+                upd,
+            ));
         }
         SessionUpdate::SessionInfoUpdate(_) => {
             debug!(session = %session_id, "dropped session update: session-info-update (not yet wired)");

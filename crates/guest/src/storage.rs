@@ -12,6 +12,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::ollama::Message;
 
 const ROOT: &str = "/data";
@@ -36,31 +38,59 @@ fn path_for(session_id: &str) -> Option<PathBuf> {
     Some(sessions_dir().join(format!("{session_id}.json")))
 }
 
-/// Read history from disk. Returns `Ok(None)` if the file doesn't exist
-/// (a fresh session); `Err` only on real I/O or decode failures.
-pub fn load(session_id: &str) -> Result<Option<Vec<Message>>, String> {
+/// On-disk session payload: conversation history plus the active model.
+///
+/// Persists in tagged-object form (`{ "history": [...], "model": "..." }`).
+/// Older session files written before the model picker existed contained a
+/// bare `Vec<Message>`; [`load`] handles both shapes via [`OnDisk`] below.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Session {
+    pub history: Vec<Message>,
+    pub model: String,
+}
+
+/// Untagged accept-both view of the on-disk format. New writes always use
+/// the `Tagged` variant; legacy files (just `Vec<Message>`) deserialize
+/// through `Legacy`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OnDisk {
+    Tagged(Session),
+    Legacy(Vec<Message>),
+}
+
+/// Read a session from disk. Returns `Ok(None)` if the file doesn't exist.
+/// Legacy files (bare arrays) load with `model` set to `default_model`.
+pub fn load(session_id: &str, default_model: &str) -> Result<Option<Session>, String> {
     let Some(path) = path_for(session_id) else {
         return Err(format!("invalid session id: {session_id:?}"));
     };
     match fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|e| format!("decode {}: {e}", path.display())),
+        Ok(bytes) => {
+            let parsed: OnDisk = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("decode {}: {e}", path.display()))?;
+            let session = match parsed {
+                OnDisk::Tagged(s) => s,
+                OnDisk::Legacy(history) => Session {
+                    history,
+                    model: default_model.to_string(),
+                },
+            };
+            Ok(Some(session))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("read {}: {e}", path.display())),
     }
 }
 
-/// Persist history to disk. Creates the `sessions/` subdir if missing and
-/// overwrites any existing file.
-pub fn save(session_id: &str, history: &[Message]) -> Result<(), String> {
+/// Persist a session to disk. Creates the `sessions/` subdir if missing
+/// and overwrites any existing file.
+pub fn save(session_id: &str, session: &Session) -> Result<(), String> {
     let Some(path) = path_for(session_id) else {
         return Err(format!("invalid session id: {session_id:?}"));
     };
     fs::create_dir_all(sessions_dir())
         .map_err(|e| format!("mkdir {}: {e}", sessions_dir().display()))?;
-    let bytes =
-        serde_json::to_vec_pretty(history).map_err(|e| format!("encode session: {e}"))?;
+    let bytes = serde_json::to_vec_pretty(session).map_err(|e| format!("encode session: {e}"))?;
     fs::write(&path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
 }
-
