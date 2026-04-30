@@ -307,3 +307,169 @@ fn mcp_server_to_wit(s: schema::McpServer) -> wit::McpServer {
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_code_roundtrip() {
+        let cases = [
+            (wit::ErrorCode::ParseError, schema::ErrorCode::ParseError),
+            (
+                wit::ErrorCode::InvalidRequest,
+                schema::ErrorCode::InvalidRequest,
+            ),
+            (
+                wit::ErrorCode::MethodNotFound,
+                schema::ErrorCode::MethodNotFound,
+            ),
+            (
+                wit::ErrorCode::InvalidParams,
+                schema::ErrorCode::InvalidParams,
+            ),
+            (
+                wit::ErrorCode::InternalError,
+                schema::ErrorCode::InternalError,
+            ),
+            (
+                wit::ErrorCode::AuthRequired,
+                schema::ErrorCode::AuthRequired,
+            ),
+            (
+                wit::ErrorCode::ResourceNotFound,
+                schema::ErrorCode::ResourceNotFound,
+            ),
+        ];
+        for (wit_code, schema_code) in cases {
+            let acp = wit_error_to_acp(wit::Error {
+                code: wit_code,
+                message: "msg".into(),
+            });
+            assert_eq!(acp.code, schema_code, "code mismatch for {:?}", wit_code);
+            assert_eq!(acp.message, "msg");
+        }
+    }
+
+    #[test]
+    fn error_code_other_passthrough() {
+        let acp = wit_error_to_acp(wit::Error {
+            code: wit::ErrorCode::Other(-12345),
+            message: "boom".into(),
+        });
+        assert_eq!(acp.code, AcpErrorCode::Other(-12345));
+        assert_eq!(acp.message, "boom");
+    }
+
+    #[test]
+    fn protocol_version_roundtrip() {
+        let n = pv_to_u32(&pv_from_u32(1));
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn initialize_request_translation() {
+        let req = schema::InitializeRequest::new(schema::ProtocolVersion::V1)
+            .client_info(schema::Implementation::new("editor", "1.0").title(Some("Ed".into())));
+        let wit_req = init_request_schema_to_wit(req);
+        assert_eq!(wit_req.protocol_version, 1);
+        let info = wit_req.client_info.unwrap();
+        assert_eq!(info.name, "editor");
+        assert_eq!(info.version, "1.0");
+        assert_eq!(info.title.as_deref(), Some("Ed"));
+    }
+
+    #[test]
+    fn initialize_response_translation() {
+        let resp = wit::InitializeResponse {
+            protocol_version: 1,
+            agent_capabilities: wit::AgentCapabilities {
+                load_session: true,
+                prompt_capabilities: wit::PromptCapabilities {
+                    image: true,
+                    audio: false,
+                    embedded_context: false,
+                },
+                mcp_capabilities: wit::McpCapabilities {
+                    http: true,
+                    sse: false,
+                },
+            },
+            agent_info: Some(wit::ImplementationInfo {
+                name: "ag".into(),
+                title: None,
+                version: "0.1".into(),
+            }),
+            auth_methods: vec![],
+        };
+        let schema_resp = init_response_wit_to_schema(resp);
+        assert_eq!(pv_to_u32(&schema_resp.protocol_version), 1);
+        assert!(schema_resp.agent_capabilities.load_session);
+        assert!(schema_resp.agent_capabilities.prompt_capabilities.image);
+        assert!(schema_resp.agent_capabilities.mcp_capabilities.http);
+        let info = schema_resp.agent_info.unwrap();
+        assert_eq!(info.name, "ag");
+        assert_eq!(info.version, "0.1");
+    }
+
+    #[test]
+    fn prompt_request_text_only() {
+        let req = schema::PromptRequest::new(
+            schema::SessionId::from("sess-1"),
+            vec![schema::ContentBlock::Text(schema::TextContent::new(
+                "hello",
+            ))],
+        );
+        let wit_req = prompt_request_schema_to_wit(req);
+        assert_eq!(wit_req.session_id, "sess-1");
+        assert_eq!(wit_req.prompt.len(), 1);
+        match &wit_req.prompt[0] {
+            wit::ContentBlock::Text(t) => assert_eq!(t.text, "hello"),
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prompt_response_stop_reasons() {
+        for (wit_sr, json_sr) in [
+            (wit::StopReason::EndTurn, "end_turn"),
+            (wit::StopReason::MaxTokens, "max_tokens"),
+            (wit::StopReason::Refusal, "refusal"),
+            (wit::StopReason::Cancelled, "cancelled"),
+        ] {
+            let resp = prompt_response_wit_to_schema(wit::PromptResponse { stop_reason: wit_sr });
+            let json = serde_json::to_value(&resp).unwrap();
+            assert_eq!(json["stopReason"], json_sr);
+        }
+    }
+
+    #[test]
+    fn session_update_agent_chunk() {
+        let notif = session_update_wit_to_schema(
+            "s1".into(),
+            wit::SessionUpdate::AgentMessageChunk(wit::ContentBlock::Text(wit::TextContent {
+                text: "hi".into(),
+            })),
+        )
+        .unwrap();
+        let json = serde_json::to_value(&notif).unwrap();
+        assert_eq!(json["sessionId"], "s1");
+        assert_eq!(json["update"]["sessionUpdate"], "agent_message_chunk");
+        assert_eq!(json["update"]["content"]["text"], "hi");
+    }
+
+    #[test]
+    fn session_update_unsupported_drops() {
+        // Non-text content blocks aren't translated yet, so the update is
+        // dropped rather than panicking or sending malformed data.
+        let dropped = session_update_wit_to_schema(
+            "s".into(),
+            wit::SessionUpdate::AgentMessageChunk(wit::ContentBlock::Image(wit::ImageContent {
+                data: "x".into(),
+                mime_type: "image/png".into(),
+                uri: None,
+            })),
+        );
+        assert!(dropped.is_none());
+    }
+}

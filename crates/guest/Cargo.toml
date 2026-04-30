@@ -13,6 +13,7 @@ wit-bindgen-rt = { workspace = true, features = ["bitflags"] }
 wstd = { workspace = true, features = ["json"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+futures = { workspace = true }
 acp-wasm-sys = { workspace = true }
 
 [package.metadata.component]

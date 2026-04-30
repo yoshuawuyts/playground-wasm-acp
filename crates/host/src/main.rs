@@ -1,7 +1,8 @@
 //! ACP wasmtime host.
 //!
 //! Loads an ACP agent component and bridges it to the editor over the ACP
-//! JSON-RPC wire protocol on stdio.
+//! JSON-RPC wire protocol on stdio. Logs go to stderr; configure verbosity
+//! with the `RUST_LOG` environment variable (e.g. `RUST_LOG=host=debug`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use clap::Parser;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use tracing::{debug, info, warn};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -95,10 +97,7 @@ impl yoshuawuyts::acp::client::Host for HostState {
         Err(translate::method_not_found("read-text-file not supported"))
     }
 
-    async fn write_text_file(
-        &mut self,
-        _req: acp::WriteTextFileRequest,
-    ) -> Result<(), acp::Error> {
+    async fn write_text_file(&mut self, _req: acp::WriteTextFileRequest) -> Result<(), acp::Error> {
         Err(translate::method_not_found("write-text-file not supported"))
     }
 
@@ -142,7 +141,9 @@ impl yoshuawuyts::acp::client::Host for HostState {
         _session_id: acp::SessionId,
         _terminal_id: acp::TerminalId,
     ) -> Result<(), acp::Error> {
-        Err(translate::method_not_found("release-terminal not supported"))
+        Err(translate::method_not_found(
+            "release-terminal not supported",
+        ))
     }
 }
 
@@ -257,6 +258,14 @@ struct Args {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("host=info")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     let args = Args::parse();
 
     let mut config = Config::new();
@@ -271,7 +280,8 @@ async fn main() -> Result<()> {
         WasmAgent::new(&engine, &component, updates_tx).await?,
     ));
 
-    eprintln!("[host] loaded {}", args.wasm_path.display());
+    info!(path = %args.wasm_path.display(), "loaded wasm component");
+    info!("listening for ACP JSON-RPC on stdio");
 
     // ACP bridge over stdio. The host plays the `Agent` role on the wire (the
     // editor is the client driving us), so we dispatch incoming agent
@@ -349,6 +359,7 @@ async fn main() -> Result<()> {
         )
         .on_receive_request(
             async move |req: schema::PromptRequest, responder, _cx| {
+                debug!(session = %req.session_id.0, "session/prompt");
                 let mut a = agent_prompt.lock().await;
                 let wit_req = translate::prompt_request_schema_to_wit(req);
                 let result = a
@@ -374,7 +385,7 @@ async fn main() -> Result<()> {
             // notifications to the client (editor) until the channel closes.
             while let Some(notif) = updates_rx.recv().await {
                 if let Err(e) = cx.send_notification(notif) {
-                    eprintln!("[host] failed to send session/update: {e:?}");
+                    warn!("failed to send session/update: {e:?}");
                     break;
                 }
             }
@@ -385,4 +396,3 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
-
