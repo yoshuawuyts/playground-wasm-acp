@@ -1,4 +1,4 @@
 [dependencies.components]
 
 [dependencies.interfaces]
-"yoshuawuyts:acp" = "2.0.6"
+"yoshuawuyts:acp" = "3.0.0"

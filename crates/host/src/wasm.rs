@@ -15,7 +15,7 @@
 //! once, and drops it.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -25,9 +25,9 @@ use wasmtime::{Engine, Store};
 use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi_http::WasiHttpCtx;
 
-use crate::AgentPlugin;
+use crate::Provider;
+use crate::acp;
 use crate::state::{HostState, OutboundEvent};
-use crate::yoshuawuyts::acp::types as acp;
 
 // -----------------------------------------------------------------------------
 // Factory
@@ -162,17 +162,38 @@ impl SessionHandle {
 /// A per-session actor. Owns its [`WasmAgent`] and processes [`Message`]s
 /// off a channel. Spawn it onto the top-level `LocalSet` and store the
 /// handle in the registry.
+///
+/// **Inter-session messaging**: each actor holds an `Arc<SessionRegistry>`,
+/// so it can look up *other* sessions' [`SessionHandle`]s and call
+/// [`SessionHandle::prompt`] / [`SessionHandle::cancel`] on them. This is
+/// how a future router/layer/fanout agent would forward work to peers.
+/// Direction-of-fanout is the actor's choice; the registry is just a phone
+/// book.
+///
+/// Note: there is no cycle protection. If session A awaits session B which
+/// awaits A, both sit forever. The actor model makes this a logical
+/// deadlock rather than a lock, but it's still a hang. Add cycle
+/// detection only when a real use case demands it.
 pub struct SessionActor {
     rx: mpsc::Receiver<Message>,
     cancel: watch::Receiver<bool>,
     agent: WasmAgent,
+    /// Phone book for talking to other sessions. Currently unused inside
+    /// the actor body — kept here so future inter-session features can
+    /// reach the registry without a refactor.
+    #[allow(dead_code)]
+    peers: Arc<SessionRegistry>,
 }
 
 impl SessionActor {
     /// Construct a new actor and its handle. The actor is not running yet;
     /// the caller must drive [`Self::run`] (typically via `spawn_local`
     /// onto the top-level `LocalSet`).
-    pub fn new(agent: WasmAgent, capacity: usize) -> (Self, SessionHandle) {
+    pub fn new(
+        agent: WasmAgent,
+        capacity: usize,
+        peers: Arc<SessionRegistry>,
+    ) -> (Self, SessionHandle) {
         let (tx, rx) = mpsc::channel(capacity);
         let (cancel_tx, cancel_rx) = watch::channel(false);
         (
@@ -180,6 +201,7 @@ impl SessionActor {
                 rx,
                 cancel: cancel_rx,
                 agent,
+                peers,
             },
             SessionHandle {
                 tx,
@@ -220,10 +242,10 @@ impl SessionActor {
 // WasmAgent
 // -----------------------------------------------------------------------------
 
-/// Owns the wasmtime store + the instantiated `agent-plugin` bindings.
+/// Owns the wasmtime store + the instantiated `provider` bindings.
 pub struct WasmAgent {
     store: Store<HostState>,
-    bindings: AgentPlugin,
+    bindings: Provider,
 }
 
 impl WasmAgent {
@@ -235,7 +257,7 @@ impl WasmAgent {
         let mut linker: Linker<HostState> = Linker::new(engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
-        AgentPlugin::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |s| s)?;
+        Provider::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |s| s)?;
 
         let state = HostState {
             wasi: WasiCtxBuilder::new()
@@ -248,7 +270,7 @@ impl WasmAgent {
             outbound,
         };
         let mut store = Store::new(engine, state);
-        let bindings = AgentPlugin::instantiate_async(&mut store, component, &linker).await?;
+        let bindings = Provider::instantiate_async(&mut store, component, &linker).await?;
         Ok(Self { store, bindings })
     }
 
@@ -285,7 +307,7 @@ impl WasmAgent {
     pub async fn call_load_session(
         &mut self,
         req: &acp::LoadSessionRequest,
-    ) -> wasmtime::Result<Result<(), acp::Error>> {
+    ) -> wasmtime::Result<Result<acp::LoadSessionResponse, acp::Error>> {
         self.bindings
             .yoshuawuyts_acp_agent()
             .call_load_session(&mut self.store, req)

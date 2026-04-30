@@ -15,19 +15,20 @@ use tracing::info;
 use wasmtime::component::Component;
 use wasmtime::{Config, Engine};
 
+mod acp;
 mod bridge;
 mod client_impl;
 mod state;
 mod translate;
 mod wasm;
 
-// Generate wasmtime component bindings for the `agent-plugin` world. From the
+// Generate wasmtime component bindings for the `provider` world. From the
 // host's perspective, bindgen flips imports/exports: the `client` interface
 // becomes a Host trait we implement (see [`client_impl`]), and the `agent`
 // interface becomes callable methods on the bindings struct (see [`wasm`]).
 wasmtime::component::bindgen!({
     path: "../../vendor/wit",
-    world: "agent-plugin",
+    world: "provider",
     imports: { default: async },
     exports: { default: async },
 });

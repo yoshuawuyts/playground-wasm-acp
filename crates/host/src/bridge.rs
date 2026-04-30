@@ -122,7 +122,7 @@ pub async fn run(
                 let resp = result.map_err(translate::wit_error_to_acp)?;
                 debug!(session = %resp.session_id, "session/new");
                 let session_id = resp.session_id.clone();
-                let (actor, handle) = SessionActor::new(agent, 8);
+                let (actor, handle) = SessionActor::new(agent, 8, registry_new.clone());
                 tokio::task::spawn_local(actor.run());
                 registry_new.insert(session_id, handle);
                 responder.respond(translate::new_session_response_wit_to_schema(resp)?)
@@ -142,8 +142,10 @@ pub async fn run(
                     .call_load_session(&wit_req)
                     .await
                     .map_err(|e| translate::trap_to_acp("load-session", e))?;
-                result.map_err(translate::wit_error_to_acp)?;
-                let (actor, handle) = SessionActor::new(agent, 8);
+                // We discard `LoadSessionResponse.modes` for now; mode
+                // plumbing through the WIT translation is Phase 2.
+                let _ = result.map_err(translate::wit_error_to_acp)?;
+                let (actor, handle) = SessionActor::new(agent, 8, registry_load.clone());
                 tokio::task::spawn_local(actor.run());
                 registry_load.insert(session_key, handle);
                 responder.respond(translate::empty_load_session_response()?)

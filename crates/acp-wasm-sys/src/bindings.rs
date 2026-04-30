@@ -6,57 +6,16 @@
 #[allow(dead_code, clippy::all)]
 pub mod yoshuawuyts {
     pub mod acp {
-        /// A WIT mapping of the [Agent Client Protocol][acp] (ACP), modelled as a
-        /// Wasm Component Model plugin system.
+        /// Protocol errors, modelled after JSON-RPC 2.0.
         ///
-        /// ACP is a JSON-RPC protocol between an editor (the *Client*) and a coding
-        /// *Agent*. This package exposes the core protocol so that:
-        ///
-        /// - An agent can be packaged as a Wasm component implementing
-        ///   [`agent-plugin`], and
-        /// - An editor can host any such agent by implementing [`client-host`].
-        ///
-        /// We intentionally model only the **core, stable** surface of ACP: connection
-        /// initialization, session setup, prompt turns, tool calls (with permission),
-        /// file system access, and terminals. Extension points such as `_meta`, slash
-        /// commands, session modes/list/resume/close, MCP-over-ACP, and authentication
-        /// methods are either omitted or modelled minimally; they can be layered on
-        /// later without breaking the core.
-        ///
-        /// All file paths in this protocol are absolute. Line numbers are 1-based.
-        ///
-        /// # Mapping to the ACP JSON-RPC wire format
-        ///
-        /// The protocol surface is split across the following WIT files:
-        ///
-        /// - `types.wit`   — shared records, variants, and enums (the data model).
-        /// - `agent.wit`   — methods exported by the **Agent** (Client → Agent calls).
-        /// - `client.wit`  — methods exported by the **Client** (Agent → Client calls).
-        /// - `worlds.wit`  — the [`agent-plugin`] and [`client-host`] worlds.
-        ///
-        /// Method names drop JSON-RPC namespacing (`session/new` → `new-session`,
-        /// `terminal/create` → `create-terminal`, etc.) because `/` is not a valid
-        /// WIT identifier and structured names are clearer in component bindings.
-        /// One method (`session/update`) is renamed to `update-session` to avoid
-        /// colliding with the `session-update` payload type.
-        ///
-        /// # See also
-        ///
-        /// - Protocol overview: <https://agentclientprotocol.com/protocol/overview>
-        /// - JSON schema: <https://agentclientprotocol.com/protocol/schema>
-        ///
-        /// [acp]: https://agentclientprotocol.com
-        /// Shared types used by both the [`agent`] and [`client`] interfaces.
-        ///
-        /// Each section in this interface mirrors a section of the ACP spec; see
-        /// the inline links throughout for exact protocol references.
+        /// See: <https://www.jsonrpc.org/specification#error_object>
         #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
-        pub mod types {
+        pub mod errors {
             #[used]
             #[doc(hidden)]
             static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
             use super::super::super::_rt;
-            /// Predefined error codes. These cover the JSON-RPC standard codes plus
+            /// Predefined error codes. Covers JSON-RPC standard codes plus
             /// ACP-specific ones.
             #[derive(Clone, Copy)]
             pub enum ErrorCode {
@@ -110,12 +69,7 @@ pub mod yoshuawuyts {
                     }
                 }
             }
-            /// ------------------------------------------------------------------
-            /// Errors
-            /// ------------------------------------------------------------------
-            /// A protocol error, modelled after the JSON-RPC 2.0 error object.
-            ///
-            /// See: <https://www.jsonrpc.org/specification#error_object>
+            /// A protocol error.
             #[derive(Clone)]
             pub struct Error {
                 /// JSON-RPC / ACP error code.
@@ -143,270 +97,33 @@ pub mod yoshuawuyts {
                 }
             }
             impl ::core::error::Error for Error {}
-            /// ------------------------------------------------------------------
-            /// Identifiers
-            /// ------------------------------------------------------------------
+        }
+        /// Session lifecycle types: identifiers, MCP server configuration, modes, and
+        /// new/load/list/resume payloads.
+        ///
+        /// See: <https://agentclientprotocol.com/protocol/session-setup>
+        ///      <https://agentclientprotocol.com/protocol/session-list>
+        ///      <https://agentclientprotocol.com/protocol/session-modes>
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod sessions {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
             /// Unique identifier for an active session, returned by `new-session`.
             pub type SessionId = _rt::String;
-            /// Unique identifier for a tool call within a session.
-            pub type ToolCallId = _rt::String;
-            /// Unique identifier for a terminal created via the terminal API.
-            pub type TerminalId = _rt::String;
+            /// Unique identifier for a session mode.
+            pub type SessionModeId = _rt::String;
             /// ------------------------------------------------------------------
-            /// Implementation info
-            /// ------------------------------------------------------------------
-            /// Identification metadata for a client or agent implementation.
-            ///
-            /// See: <https://agentclientprotocol.com/protocol/initialization#implementation-information>
-            #[derive(Clone)]
-            pub struct ImplementationInfo {
-                /// Programmatic name (e.g. `"my-agent"`).
-                pub name: _rt::String,
-                /// Optional human-readable display name.
-                pub title: Option<_rt::String>,
-                /// Implementation version (e.g. `"1.0.0"`).
-                pub version: _rt::String,
-            }
-            impl ::core::fmt::Debug for ImplementationInfo {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("ImplementationInfo")
-                        .field("name", &self.name)
-                        .field("title", &self.title)
-                        .field("version", &self.version)
-                        .finish()
-                }
-            }
-            /// ------------------------------------------------------------------
-            /// Capabilities
-            ///
-            /// See: https://agentclientprotocol.com/protocol/initialization#capabilities
-            /// ------------------------------------------------------------------
-            /// File system features the client supports.
-            ///
-            /// See: <https://agentclientprotocol.com/protocol/file-system>
-            #[repr(C)]
-            #[derive(Clone, Copy)]
-            pub struct FsCapabilities {
-                /// Client supports `read-text-file`.
-                pub read_text_file: bool,
-                /// Client supports `write-text-file`.
-                pub write_text_file: bool,
-            }
-            impl ::core::fmt::Debug for FsCapabilities {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("FsCapabilities")
-                        .field("read-text-file", &self.read_text_file)
-                        .field("write-text-file", &self.write_text_file)
-                        .finish()
-                }
-            }
-            /// Capabilities advertised by the client during `initialize`.
-            ///
-            /// See: <https://agentclientprotocol.com/protocol/initialization#client-capabilities>
-            #[repr(C)]
-            #[derive(Clone, Copy)]
-            pub struct ClientCapabilities {
-                /// File system read/write capabilities.
-                pub fs: FsCapabilities,
-                /// Whether the client supports the terminal API.
-                pub terminal: bool,
-            }
-            impl ::core::fmt::Debug for ClientCapabilities {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("ClientCapabilities")
-                        .field("fs", &self.fs)
-                        .field("terminal", &self.terminal)
-                        .finish()
-                }
-            }
-            /// Content types the agent can accept in `prompt` requests beyond the
-            /// baseline (text and resource links, which are always supported).
-            ///
-            /// See: <https://agentclientprotocol.com/protocol/initialization#prompt-capabilities>
-            #[repr(C)]
-            #[derive(Clone, Copy)]
-            pub struct PromptCapabilities {
-                /// Image content blocks may appear in prompts.
-                pub image: bool,
-                /// Audio content blocks may appear in prompts.
-                pub audio: bool,
-                /// Embedded resources may appear in prompts.
-                pub embedded_context: bool,
-            }
-            impl ::core::fmt::Debug for PromptCapabilities {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("PromptCapabilities")
-                        .field("image", &self.image)
-                        .field("audio", &self.audio)
-                        .field("embedded-context", &self.embedded_context)
-                        .finish()
-                }
-            }
-            /// MCP transports the agent supports for `mcp-server` configurations.
-            ///
-            /// See: <https://agentclientprotocol.com/protocol/initialization#mcp-capabilities>
-            #[repr(C)]
-            #[derive(Clone, Copy)]
-            pub struct McpCapabilities {
-                /// HTTP transport.
-                pub http: bool,
-                /// SSE transport (deprecated by the MCP spec).
-                pub sse: bool,
-            }
-            impl ::core::fmt::Debug for McpCapabilities {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("McpCapabilities")
-                        .field("http", &self.http)
-                        .field("sse", &self.sse)
-                        .finish()
-                }
-            }
-            /// Capabilities advertised by the agent during `initialize`.
-            ///
-            /// See: <https://agentclientprotocol.com/protocol/initialization#agent-capabilities>
-            #[repr(C)]
-            #[derive(Clone, Copy)]
-            pub struct AgentCapabilities {
-                /// Whether the agent supports `load-session`.
-                pub load_session: bool,
-                /// Content types the agent accepts in prompts.
-                pub prompt_capabilities: PromptCapabilities,
-                /// MCP transports the agent supports.
-                pub mcp_capabilities: McpCapabilities,
-            }
-            impl ::core::fmt::Debug for AgentCapabilities {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("AgentCapabilities")
-                        .field("load-session", &self.load_session)
-                        .field("prompt-capabilities", &self.prompt_capabilities)
-                        .field("mcp-capabilities", &self.mcp_capabilities)
-                        .finish()
-                }
-            }
-            /// An authentication method the agent supports.
-            #[derive(Clone)]
-            pub struct AuthMethod {
-                /// Stable identifier for this method.
-                pub id: _rt::String,
-                /// Human-readable display name.
-                pub name: _rt::String,
-                /// Optional longer description.
-                pub description: Option<_rt::String>,
-            }
-            impl ::core::fmt::Debug for AuthMethod {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("AuthMethod")
-                        .field("id", &self.id)
-                        .field("name", &self.name)
-                        .field("description", &self.description)
-                        .finish()
-                }
-            }
-            /// ------------------------------------------------------------------
-            /// Initialize
-            ///
-            /// See: https://agentclientprotocol.com/protocol/initialization
-            /// ------------------------------------------------------------------
-            /// Parameters to `initialize`.
-            #[derive(Clone)]
-            pub struct InitializeRequest {
-                /// The latest ACP protocol major version the client supports.
-                pub protocol_version: u32,
-                /// What the client can do.
-                pub client_capabilities: ClientCapabilities,
-                /// Optional client identification.
-                pub client_info: Option<ImplementationInfo>,
-            }
-            impl ::core::fmt::Debug for InitializeRequest {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("InitializeRequest")
-                        .field("protocol-version", &self.protocol_version)
-                        .field("client-capabilities", &self.client_capabilities)
-                        .field("client-info", &self.client_info)
-                        .finish()
-                }
-            }
-            /// Response to `initialize`.
-            #[derive(Clone)]
-            pub struct InitializeResponse {
-                /// The protocol major version the agent has selected.
-                pub protocol_version: u32,
-                /// What the agent can do.
-                pub agent_capabilities: AgentCapabilities,
-                /// Optional agent identification.
-                pub agent_info: Option<ImplementationInfo>,
-                /// Authentication methods available, if any.
-                pub auth_methods: _rt::Vec<AuthMethod>,
-            }
-            impl ::core::fmt::Debug for InitializeResponse {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("InitializeResponse")
-                        .field("protocol-version", &self.protocol_version)
-                        .field("agent-capabilities", &self.agent_capabilities)
-                        .field("agent-info", &self.agent_info)
-                        .field("auth-methods", &self.auth_methods)
-                        .finish()
-                }
-            }
-            /// ------------------------------------------------------------------
-            /// Authentication
-            ///
-            /// See: https://agentclientprotocol.com/protocol/initialization#authentication
-            /// ------------------------------------------------------------------
-            /// Parameters to `authenticate`.
-            #[derive(Clone)]
-            pub struct AuthenticateRequest {
-                /// The id of the auth method to use, from `auth-methods` in
-                /// `initialize-response`.
-                pub method_id: _rt::String,
-            }
-            impl ::core::fmt::Debug for AuthenticateRequest {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("AuthenticateRequest")
-                        .field("method-id", &self.method_id)
-                        .finish()
-                }
-            }
-            /// ------------------------------------------------------------------
-            /// Session setup
-            ///
-            /// See: https://agentclientprotocol.com/protocol/session-setup
+            /// Common helpers
             /// ------------------------------------------------------------------
             /// An environment variable, used when launching MCP stdio servers or
             /// terminal commands.
             #[derive(Clone)]
             pub struct EnvVar {
+                /// Variable name.
                 pub name: _rt::String,
+                /// Variable value.
                 pub value: _rt::String,
             }
             impl ::core::fmt::Debug for EnvVar {
@@ -423,7 +140,9 @@ pub mod yoshuawuyts {
             /// An HTTP header, used when connecting to MCP HTTP/SSE servers.
             #[derive(Clone)]
             pub struct HttpHeader {
+                /// Header name.
                 pub name: _rt::String,
+                /// Header value.
                 pub value: _rt::String,
             }
             impl ::core::fmt::Debug for HttpHeader {
@@ -503,9 +222,12 @@ pub mod yoshuawuyts {
                         .finish()
                 }
             }
-            /// Configuration for connecting to an MCP server.
+            /// ------------------------------------------------------------------
+            /// MCP server configuration
             ///
-            /// See: <https://agentclientprotocol.com/protocol/session-setup#mcp-servers>
+            /// See: https://agentclientprotocol.com/protocol/session-setup#mcp-servers
+            /// ------------------------------------------------------------------
+            /// Configuration for connecting to an MCP server.
             #[derive(Clone)]
             pub enum McpServer {
                 /// Stdio transport (always supported).
@@ -533,6 +255,77 @@ pub mod yoshuawuyts {
                     }
                 }
             }
+            /// ------------------------------------------------------------------
+            /// Session modes
+            ///
+            /// See: https://agentclientprotocol.com/protocol/session-modes
+            /// ------------------------------------------------------------------
+            /// A mode the agent can operate in within a session. Modes typically
+            /// affect system prompts, tool availability, and permission behavior.
+            #[derive(Clone)]
+            pub struct SessionMode {
+                /// Stable identifier for this mode.
+                pub id: SessionModeId,
+                /// Human-readable display name.
+                pub name: _rt::String,
+                /// Optional longer description.
+                pub description: Option<_rt::String>,
+            }
+            impl ::core::fmt::Debug for SessionMode {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("SessionMode")
+                        .field("id", &self.id)
+                        .field("name", &self.name)
+                        .field("description", &self.description)
+                        .finish()
+                }
+            }
+            /// The set of modes available for a session and which one is active.
+            #[derive(Clone)]
+            pub struct SessionModeState {
+                /// The currently active mode.
+                pub current_mode_id: SessionModeId,
+                /// All modes the agent can operate in for this session.
+                pub available_modes: _rt::Vec<SessionMode>,
+            }
+            impl ::core::fmt::Debug for SessionModeState {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("SessionModeState")
+                        .field("current-mode-id", &self.current_mode_id)
+                        .field("available-modes", &self.available_modes)
+                        .finish()
+                }
+            }
+            /// Parameters to `set-session-mode`.
+            #[derive(Clone)]
+            pub struct SetSessionModeRequest {
+                /// The session whose mode is being changed.
+                pub session_id: SessionId,
+                /// The mode to switch to. MUST be one of the `available-modes`.
+                pub mode_id: SessionModeId,
+            }
+            impl ::core::fmt::Debug for SetSessionModeRequest {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("SetSessionModeRequest")
+                        .field("session-id", &self.session_id)
+                        .field("mode-id", &self.mode_id)
+                        .finish()
+                }
+            }
+            /// ------------------------------------------------------------------
+            /// New / load
+            ///
+            /// See: https://agentclientprotocol.com/protocol/session-setup
+            /// ------------------------------------------------------------------
             /// Parameters to `new-session`.
             #[derive(Clone)]
             pub struct NewSessionRequest {
@@ -557,6 +350,8 @@ pub mod yoshuawuyts {
             pub struct NewSessionResponse {
                 /// The id assigned to the new session.
                 pub session_id: SessionId,
+                /// Modes the agent can operate in for this session, if any.
+                pub modes: Option<SessionModeState>,
             }
             impl ::core::fmt::Debug for NewSessionResponse {
                 fn fmt(
@@ -565,6 +360,7 @@ pub mod yoshuawuyts {
                 ) -> ::core::fmt::Result {
                     f.debug_struct("NewSessionResponse")
                         .field("session-id", &self.session_id)
+                        .field("modes", &self.modes)
                         .finish()
                 }
             }
@@ -591,6 +387,160 @@ pub mod yoshuawuyts {
                         .finish()
                 }
             }
+            /// Response to `load-session`.
+            #[derive(Clone)]
+            pub struct LoadSessionResponse {
+                /// Modes the agent can operate in for this session, if any.
+                pub modes: Option<SessionModeState>,
+            }
+            impl ::core::fmt::Debug for LoadSessionResponse {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("LoadSessionResponse")
+                        .field("modes", &self.modes)
+                        .finish()
+                }
+            }
+            /// ------------------------------------------------------------------
+            /// List / resume / close
+            /// ------------------------------------------------------------------
+            /// Metadata about a session, returned by `list-sessions` and pushed via
+            /// `session-info-update` notifications.
+            #[derive(Clone)]
+            pub struct SessionInfo {
+                /// The session's id.
+                pub session_id: SessionId,
+                /// Working directory for the session (absolute path).
+                pub cwd: _rt::String,
+                /// Optional human-readable title (often agent-generated).
+                pub title: Option<_rt::String>,
+                /// Optional ISO 8601 timestamp of last activity.
+                pub updated_at: Option<_rt::String>,
+            }
+            impl ::core::fmt::Debug for SessionInfo {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("SessionInfo")
+                        .field("session-id", &self.session_id)
+                        .field("cwd", &self.cwd)
+                        .field("title", &self.title)
+                        .field("updated-at", &self.updated_at)
+                        .finish()
+                }
+            }
+            /// Parameters to `list-sessions`. All fields are optional; an empty
+            /// request returns the first page of sessions.
+            #[derive(Clone)]
+            pub struct ListSessionsRequest {
+                /// Filter by working directory (absolute path).
+                pub cwd: Option<_rt::String>,
+                /// Opaque cursor from a previous response's `next-cursor` field.
+                pub cursor: Option<_rt::String>,
+            }
+            impl ::core::fmt::Debug for ListSessionsRequest {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("ListSessionsRequest")
+                        .field("cwd", &self.cwd)
+                        .field("cursor", &self.cursor)
+                        .finish()
+                }
+            }
+            /// Response to `list-sessions`.
+            #[derive(Clone)]
+            pub struct ListSessionsResponse {
+                /// Discovered sessions. May be empty.
+                pub sessions: _rt::Vec<SessionInfo>,
+                /// Opaque cursor for the next page, if more results exist.
+                pub next_cursor: Option<_rt::String>,
+            }
+            impl ::core::fmt::Debug for ListSessionsResponse {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("ListSessionsResponse")
+                        .field("sessions", &self.sessions)
+                        .field("next-cursor", &self.next_cursor)
+                        .finish()
+                }
+            }
+            /// Parameters to `resume-session`. Reconnects to an existing session
+            /// without replaying conversation history (unlike `load-session`).
+            #[derive(Clone)]
+            pub struct ResumeSessionRequest {
+                /// The id of the session to resume.
+                pub session_id: SessionId,
+                /// The working directory for the session.
+                pub cwd: _rt::String,
+                /// MCP servers to (re)connect to.
+                pub mcp_servers: _rt::Vec<McpServer>,
+            }
+            impl ::core::fmt::Debug for ResumeSessionRequest {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("ResumeSessionRequest")
+                        .field("session-id", &self.session_id)
+                        .field("cwd", &self.cwd)
+                        .field("mcp-servers", &self.mcp_servers)
+                        .finish()
+                }
+            }
+            /// Response to `resume-session`.
+            #[derive(Clone)]
+            pub struct ResumeSessionResponse {
+                /// Modes the agent can operate in for this session, if any.
+                pub modes: Option<SessionModeState>,
+            }
+            impl ::core::fmt::Debug for ResumeSessionResponse {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("ResumeSessionResponse")
+                        .field("modes", &self.modes)
+                        .finish()
+                }
+            }
+            /// Update to a session's metadata, pushed by the agent. Only included
+            /// fields are changed; omitted fields are left unchanged.
+            #[derive(Clone)]
+            pub struct SessionInfoUpdate {
+                /// New title. `none` means "unchanged".
+                pub title: Option<_rt::String>,
+                /// New ISO 8601 last-activity timestamp. `none` means "unchanged".
+                pub updated_at: Option<_rt::String>,
+            }
+            impl ::core::fmt::Debug for SessionInfoUpdate {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("SessionInfoUpdate")
+                        .field("title", &self.title)
+                        .field("updated-at", &self.updated_at)
+                        .finish()
+                }
+            }
+        }
+        /// Displayable content blocks. Mirrors MCP's `ContentBlock` so that MCP tool
+        /// output can be forwarded without transformation.
+        ///
+        /// See: <https://agentclientprotocol.com/protocol/content>
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod content {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
             #[derive(Clone)]
             pub struct TextContent {
                 /// The text. May be plain or Markdown.
@@ -673,10 +623,14 @@ pub mod yoshuawuyts {
                         .finish()
                 }
             }
+            /// Inline text resource.
             #[derive(Clone)]
             pub struct TextResourceContents {
+                /// URI identifying the resource.
                 pub uri: _rt::String,
+                /// Optional MIME type of the text content.
                 pub mime_type: Option<_rt::String>,
+                /// The text contents.
                 pub text: _rt::String,
             }
             impl ::core::fmt::Debug for TextResourceContents {
@@ -691,9 +645,12 @@ pub mod yoshuawuyts {
                         .finish()
                 }
             }
+            /// Inline binary resource.
             #[derive(Clone)]
             pub struct BlobResourceContents {
+                /// URI identifying the resource.
                 pub uri: _rt::String,
+                /// Optional MIME type of the binary content.
                 pub mime_type: Option<_rt::String>,
                 /// Base64-encoded binary data.
                 pub blob: _rt::String,
@@ -713,7 +670,9 @@ pub mod yoshuawuyts {
             /// Inline contents of an embedded resource — either text or binary.
             #[derive(Clone)]
             pub enum ResourceContents {
+                /// Text contents.
                 Text(TextResourceContents),
+                /// Binary contents (base64-encoded).
                 Blob(BlobResourceContents),
             }
             impl ::core::fmt::Debug for ResourceContents {
@@ -746,13 +705,7 @@ pub mod yoshuawuyts {
                         .finish()
                 }
             }
-            /// ------------------------------------------------------------------
-            /// Content blocks
-            ///
-            /// See: https://agentclientprotocol.com/protocol/content
-            /// ------------------------------------------------------------------
-            /// A displayable block of content. Mirrors MCP's `ContentBlock` so that
-            /// MCP tool output can be forwarded without transformation.
+            /// A displayable block of content.
             #[derive(Clone)]
             pub enum ContentBlock {
                 /// Plain text or Markdown. Always supported.
@@ -792,106 +745,125 @@ pub mod yoshuawuyts {
                     }
                 }
             }
-            /// ------------------------------------------------------------------
-            /// Prompt turn
-            ///
-            /// See: https://agentclientprotocol.com/protocol/prompt-turn
-            /// ------------------------------------------------------------------
-            /// Parameters to `prompt`.
+        }
+        /// Client-side terminal execution (agent → client).
+        ///
+        /// See: <https://agentclientprotocol.com/protocol/terminals>
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod terminals {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
+            pub type SessionId = super::super::super::yoshuawuyts::acp::sessions::SessionId;
+            pub type EnvVar = super::super::super::yoshuawuyts::acp::sessions::EnvVar;
+            /// Unique identifier for a terminal created via `create-terminal`.
+            pub type TerminalId = _rt::String;
+            /// Parameters to `create-terminal`.
             #[derive(Clone)]
-            pub struct PromptRequest {
-                /// The session this prompt belongs to.
+            pub struct CreateTerminalRequest {
+                /// The session this terminal belongs to.
                 pub session_id: SessionId,
-                /// The user message, as a sequence of content blocks.
-                pub prompt: _rt::Vec<ContentBlock>,
+                /// Command to execute.
+                pub command: _rt::String,
+                /// Arguments.
+                pub args: _rt::Vec<_rt::String>,
+                /// Environment variables.
+                pub env: _rt::Vec<EnvVar>,
+                /// Working directory (absolute path).
+                pub cwd: Option<_rt::String>,
+                /// Maximum bytes of output to retain. Once exceeded, output is
+                /// truncated from the start, on a character boundary.
+                pub output_byte_limit: Option<u64>,
             }
-            impl ::core::fmt::Debug for PromptRequest {
+            impl ::core::fmt::Debug for CreateTerminalRequest {
                 fn fmt(
                     &self,
                     f: &mut ::core::fmt::Formatter<'_>,
                 ) -> ::core::fmt::Result {
-                    f.debug_struct("PromptRequest")
+                    f.debug_struct("CreateTerminalRequest")
                         .field("session-id", &self.session_id)
-                        .field("prompt", &self.prompt)
+                        .field("command", &self.command)
+                        .field("args", &self.args)
+                        .field("env", &self.env)
+                        .field("cwd", &self.cwd)
+                        .field("output-byte-limit", &self.output_byte_limit)
                         .finish()
                 }
             }
-            /// Why a prompt turn ended.
-            ///
-            /// See: <https://agentclientprotocol.com/protocol/prompt-turn#stop-reasons>
-            #[repr(u8)]
-            #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-            pub enum StopReason {
-                /// The model finished responding without requesting more tools.
-                EndTurn,
-                /// The token limit was reached.
-                MaxTokens,
-                /// The agent hit its per-turn request cap.
-                MaxTurnRequests,
-                /// The agent refused to continue.
-                Refusal,
-                /// The client cancelled the turn via `cancel`. Agents MUST return
-                /// this stop reason in response to a `cancel` notification, even
-                /// when underlying operations raise exceptions.
-                Cancelled,
+            /// Response to `create-terminal`.
+            #[derive(Clone)]
+            pub struct CreateTerminalResponse {
+                /// The id of the newly created terminal.
+                pub terminal_id: TerminalId,
             }
-            impl ::core::fmt::Debug for StopReason {
+            impl ::core::fmt::Debug for CreateTerminalResponse {
                 fn fmt(
                     &self,
                     f: &mut ::core::fmt::Formatter<'_>,
                 ) -> ::core::fmt::Result {
-                    match self {
-                        StopReason::EndTurn => {
-                            f.debug_tuple("StopReason::EndTurn").finish()
-                        }
-                        StopReason::MaxTokens => {
-                            f.debug_tuple("StopReason::MaxTokens").finish()
-                        }
-                        StopReason::MaxTurnRequests => {
-                            f.debug_tuple("StopReason::MaxTurnRequests").finish()
-                        }
-                        StopReason::Refusal => {
-                            f.debug_tuple("StopReason::Refusal").finish()
-                        }
-                        StopReason::Cancelled => {
-                            f.debug_tuple("StopReason::Cancelled").finish()
-                        }
-                    }
+                    f.debug_struct("CreateTerminalResponse")
+                        .field("terminal-id", &self.terminal_id)
+                        .finish()
                 }
             }
-            impl StopReason {
-                #[doc(hidden)]
-                pub unsafe fn _lift(val: u8) -> StopReason {
-                    if !cfg!(debug_assertions) {
-                        return unsafe { ::core::mem::transmute(val) };
-                    }
-                    match val {
-                        0 => StopReason::EndTurn,
-                        1 => StopReason::MaxTokens,
-                        2 => StopReason::MaxTurnRequests,
-                        3 => StopReason::Refusal,
-                        4 => StopReason::Cancelled,
-                        _ => panic!("invalid enum discriminant"),
-                    }
-                }
+            /// How a terminal command finished.
+            #[derive(Clone)]
+            pub struct TerminalExitStatus {
+                /// Exit code, if the process exited normally.
+                pub exit_code: Option<i32>,
+                /// Signal name, if killed by signal.
+                pub signal: Option<_rt::String>,
             }
-            /// Response to `prompt`.
-            #[repr(C)]
-            #[derive(Clone, Copy)]
-            pub struct PromptResponse {
-                /// Why the agent stopped processing this turn.
-                pub stop_reason: StopReason,
-            }
-            impl ::core::fmt::Debug for PromptResponse {
+            impl ::core::fmt::Debug for TerminalExitStatus {
                 fn fmt(
                     &self,
                     f: &mut ::core::fmt::Formatter<'_>,
                 ) -> ::core::fmt::Result {
-                    f.debug_struct("PromptResponse")
-                        .field("stop-reason", &self.stop_reason)
+                    f.debug_struct("TerminalExitStatus")
+                        .field("exit-code", &self.exit_code)
+                        .field("signal", &self.signal)
                         .finish()
                 }
             }
+            /// Snapshot of a terminal's output.
+            #[derive(Clone)]
+            pub struct TerminalOutput {
+                /// Output captured so far.
+                pub output: _rt::String,
+                /// Whether the output was truncated due to byte limits.
+                pub truncated: bool,
+                /// Present if the command has exited.
+                pub exit_status: Option<TerminalExitStatus>,
+            }
+            impl ::core::fmt::Debug for TerminalOutput {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("TerminalOutput")
+                        .field("output", &self.output)
+                        .field("truncated", &self.truncated)
+                        .field("exit-status", &self.exit_status)
+                        .finish()
+                }
+            }
+        }
+        /// Tool calls, plans, and permission requests.
+        ///
+        /// See: <https://agentclientprotocol.com/protocol/tool-calls>
+        ///      <https://agentclientprotocol.com/protocol/agent-plan>
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod tools {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
+            pub type SessionId = super::super::super::yoshuawuyts::acp::sessions::SessionId;
+            pub type ContentBlock = super::super::super::yoshuawuyts::acp::content::ContentBlock;
+            pub type TerminalId = super::super::super::yoshuawuyts::acp::terminals::TerminalId;
+            /// Unique identifier for a tool call within a session.
+            pub type ToolCallId = _rt::String;
             /// Categories of tools.
             ///
             /// See: <https://agentclientprotocol.com/protocol/tool-calls#creating>
@@ -1081,8 +1053,6 @@ pub mod yoshuawuyts {
             }
             /// ------------------------------------------------------------------
             /// Tool calls
-            ///
-            /// See: https://agentclientprotocol.com/protocol/tool-calls
             /// ------------------------------------------------------------------
             /// A tool call initiated by the language model and executed by the agent.
             #[derive(Clone)]
@@ -1158,6 +1128,7 @@ pub mod yoshuawuyts {
                         .finish()
                 }
             }
+            /// Priority of a plan entry.
             #[repr(u8)]
             #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
             pub enum PlanEntryPriority {
@@ -1197,6 +1168,7 @@ pub mod yoshuawuyts {
                     }
                 }
             }
+            /// Lifecycle state of a plan entry.
             #[repr(u8)]
             #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
             pub enum PlanEntryStatus {
@@ -1266,6 +1238,7 @@ pub mod yoshuawuyts {
             /// An execution plan reported by the agent.
             #[derive(Clone)]
             pub struct Plan {
+                /// Tasks the agent intends to accomplish.
                 pub entries: _rt::Vec<PlanEntry>,
             }
             impl ::core::fmt::Debug for Plan {
@@ -1276,74 +1249,13 @@ pub mod yoshuawuyts {
                     f.debug_struct("Plan").field("entries", &self.entries).finish()
                 }
             }
-            /// ------------------------------------------------------------------
-            /// Session updates (agent → client notifications)
-            ///
-            /// See: https://agentclientprotocol.com/protocol/prompt-turn#3-agent-reports-output
-            /// ------------------------------------------------------------------
-            /// A streaming update sent by the agent during a prompt turn. Variants
-            /// follow the `sessionUpdate` discriminator in the JSON protocol.
-            #[derive(Clone)]
-            pub enum SessionUpdate {
-                /// A chunk of the user's message being replayed (e.g. during
-                /// `load-session`).
-                UserMessageChunk(ContentBlock),
-                /// A chunk of the agent's response.
-                AgentMessageChunk(ContentBlock),
-                /// A chunk of the agent's internal reasoning ("thought").
-                AgentThoughtChunk(ContentBlock),
-                /// A new tool call has been initiated.
-                ToolCall(ToolCall),
-                /// An update to an existing tool call.
-                ToolCallUpdate(ToolCallUpdate),
-                /// The agent's current execution plan.
-                Plan(Plan),
-            }
-            impl ::core::fmt::Debug for SessionUpdate {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    match self {
-                        SessionUpdate::UserMessageChunk(e) => {
-                            f.debug_tuple("SessionUpdate::UserMessageChunk")
-                                .field(e)
-                                .finish()
-                        }
-                        SessionUpdate::AgentMessageChunk(e) => {
-                            f.debug_tuple("SessionUpdate::AgentMessageChunk")
-                                .field(e)
-                                .finish()
-                        }
-                        SessionUpdate::AgentThoughtChunk(e) => {
-                            f.debug_tuple("SessionUpdate::AgentThoughtChunk")
-                                .field(e)
-                                .finish()
-                        }
-                        SessionUpdate::ToolCall(e) => {
-                            f.debug_tuple("SessionUpdate::ToolCall").field(e).finish()
-                        }
-                        SessionUpdate::ToolCallUpdate(e) => {
-                            f.debug_tuple("SessionUpdate::ToolCallUpdate")
-                                .field(e)
-                                .finish()
-                        }
-                        SessionUpdate::Plan(e) => {
-                            f.debug_tuple("SessionUpdate::Plan").field(e).finish()
-                        }
-                    }
-                }
-            }
+            /// UI hint for a permission option.
             #[repr(u8)]
             #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
             pub enum PermissionOptionKind {
-                /// Allow this once.
                 AllowOnce,
-                /// Allow and remember.
                 AllowAlways,
-                /// Reject this once.
                 RejectOnce,
-                /// Reject and remember.
                 RejectAlways,
             }
             impl ::core::fmt::Debug for PermissionOptionKind {
@@ -1462,6 +1374,7 @@ pub mod yoshuawuyts {
             /// Response to `request-permission`.
             #[derive(Clone)]
             pub struct RequestPermissionResponse {
+                /// The user's decision.
                 pub outcome: PermissionOutcome,
             }
             impl ::core::fmt::Debug for RequestPermissionResponse {
@@ -1474,11 +1387,260 @@ pub mod yoshuawuyts {
                         .finish()
                 }
             }
+        }
+        /// Prompt turns, streaming session updates, and slash commands.
+        ///
+        /// See: <https://agentclientprotocol.com/protocol/prompt-turn>
+        ///      <https://agentclientprotocol.com/protocol/slash-commands>
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod prompts {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
+            pub type SessionId = super::super::super::yoshuawuyts::acp::sessions::SessionId;
+            pub type SessionModeId = super::super::super::yoshuawuyts::acp::sessions::SessionModeId;
+            pub type SessionInfoUpdate = super::super::super::yoshuawuyts::acp::sessions::SessionInfoUpdate;
+            pub type ContentBlock = super::super::super::yoshuawuyts::acp::content::ContentBlock;
+            pub type ToolCall = super::super::super::yoshuawuyts::acp::tools::ToolCall;
+            pub type ToolCallUpdate = super::super::super::yoshuawuyts::acp::tools::ToolCallUpdate;
+            pub type Plan = super::super::super::yoshuawuyts::acp::tools::Plan;
             /// ------------------------------------------------------------------
-            /// File system (agent → client)
+            /// Prompt turn
+            /// ------------------------------------------------------------------
+            /// Parameters to `prompt`.
+            #[derive(Clone)]
+            pub struct PromptRequest {
+                /// The session this prompt belongs to.
+                pub session_id: SessionId,
+                /// The user message, as a sequence of content blocks.
+                pub prompt: _rt::Vec<ContentBlock>,
+            }
+            impl ::core::fmt::Debug for PromptRequest {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("PromptRequest")
+                        .field("session-id", &self.session_id)
+                        .field("prompt", &self.prompt)
+                        .finish()
+                }
+            }
+            /// Why a prompt turn ended.
             ///
-            /// See: https://agentclientprotocol.com/protocol/file-system
+            /// See: <https://agentclientprotocol.com/protocol/prompt-turn#stop-reasons>
+            #[repr(u8)]
+            #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+            pub enum StopReason {
+                /// The model finished responding without requesting more tools.
+                EndTurn,
+                /// The token limit was reached.
+                MaxTokens,
+                /// The agent hit its per-turn request cap.
+                MaxTurnRequests,
+                /// The agent refused to continue.
+                Refusal,
+                /// The client cancelled the turn via `cancel`. Agents MUST return
+                /// this stop reason in response to a `cancel` notification.
+                Cancelled,
+            }
+            impl ::core::fmt::Debug for StopReason {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    match self {
+                        StopReason::EndTurn => {
+                            f.debug_tuple("StopReason::EndTurn").finish()
+                        }
+                        StopReason::MaxTokens => {
+                            f.debug_tuple("StopReason::MaxTokens").finish()
+                        }
+                        StopReason::MaxTurnRequests => {
+                            f.debug_tuple("StopReason::MaxTurnRequests").finish()
+                        }
+                        StopReason::Refusal => {
+                            f.debug_tuple("StopReason::Refusal").finish()
+                        }
+                        StopReason::Cancelled => {
+                            f.debug_tuple("StopReason::Cancelled").finish()
+                        }
+                    }
+                }
+            }
+            impl StopReason {
+                #[doc(hidden)]
+                pub unsafe fn _lift(val: u8) -> StopReason {
+                    if !cfg!(debug_assertions) {
+                        return unsafe { ::core::mem::transmute(val) };
+                    }
+                    match val {
+                        0 => StopReason::EndTurn,
+                        1 => StopReason::MaxTokens,
+                        2 => StopReason::MaxTurnRequests,
+                        3 => StopReason::Refusal,
+                        4 => StopReason::Cancelled,
+                        _ => panic!("invalid enum discriminant"),
+                    }
+                }
+            }
+            /// Response to `prompt`.
+            #[repr(C)]
+            #[derive(Clone, Copy)]
+            pub struct PromptResponse {
+                /// Why the agent stopped processing this turn.
+                pub stop_reason: StopReason,
+            }
+            impl ::core::fmt::Debug for PromptResponse {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("PromptResponse")
+                        .field("stop-reason", &self.stop_reason)
+                        .finish()
+                }
+            }
             /// ------------------------------------------------------------------
+            /// Slash commands
+            ///
+            /// See: https://agentclientprotocol.com/protocol/slash-commands
+            /// ------------------------------------------------------------------
+            /// Optional input specification for an [`available-command`]. Currently
+            /// only unstructured text input is supported.
+            #[derive(Clone)]
+            pub struct AvailableCommandInput {
+                /// Hint to display when the input hasn't been provided yet.
+                pub hint: _rt::String,
+            }
+            impl ::core::fmt::Debug for AvailableCommandInput {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("AvailableCommandInput")
+                        .field("hint", &self.hint)
+                        .finish()
+                }
+            }
+            /// A slash command the agent advertises for a session.
+            ///
+            /// Commands are invoked by including their text in a regular `prompt`
+            /// (e.g. `"/web agent client protocol"`).
+            #[derive(Clone)]
+            pub struct AvailableCommand {
+                /// Command name without the leading slash (e.g. `"web"`).
+                pub name: _rt::String,
+                /// Human-readable description of what the command does.
+                pub description: _rt::String,
+                /// Optional input specification.
+                pub input: Option<AvailableCommandInput>,
+            }
+            impl ::core::fmt::Debug for AvailableCommand {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("AvailableCommand")
+                        .field("name", &self.name)
+                        .field("description", &self.description)
+                        .field("input", &self.input)
+                        .finish()
+                }
+            }
+            /// ------------------------------------------------------------------
+            /// Session updates (agent → client notifications)
+            ///
+            /// See: https://agentclientprotocol.com/protocol/prompt-turn#3-agent-reports-output
+            /// ------------------------------------------------------------------
+            /// A streaming update sent by the agent during a prompt turn. Variants
+            /// follow the `sessionUpdate` discriminator in the JSON protocol.
+            #[derive(Clone)]
+            pub enum SessionUpdate {
+                /// A chunk of the user's message being replayed (e.g. during
+                /// `load-session`).
+                UserMessageChunk(ContentBlock),
+                /// A chunk of the agent's response.
+                AgentMessageChunk(ContentBlock),
+                /// A chunk of the agent's internal reasoning ("thought").
+                AgentThoughtChunk(ContentBlock),
+                /// A new tool call has been initiated.
+                ToolCall(ToolCall),
+                /// An update to an existing tool call.
+                ToolCallUpdate(ToolCallUpdate),
+                /// The agent's current execution plan.
+                Plan(Plan),
+                /// The agent switched to a different mode. Carries the new
+                /// `current-mode-id`.
+                CurrentModeUpdate(SessionModeId),
+                /// Updated session metadata (title, last-activity timestamp).
+                SessionInfoUpdate(SessionInfoUpdate),
+                /// The set of slash commands available in this session. Replaces
+                /// any previously advertised list.
+                AvailableCommandsUpdate(_rt::Vec<AvailableCommand>),
+            }
+            impl ::core::fmt::Debug for SessionUpdate {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    match self {
+                        SessionUpdate::UserMessageChunk(e) => {
+                            f.debug_tuple("SessionUpdate::UserMessageChunk")
+                                .field(e)
+                                .finish()
+                        }
+                        SessionUpdate::AgentMessageChunk(e) => {
+                            f.debug_tuple("SessionUpdate::AgentMessageChunk")
+                                .field(e)
+                                .finish()
+                        }
+                        SessionUpdate::AgentThoughtChunk(e) => {
+                            f.debug_tuple("SessionUpdate::AgentThoughtChunk")
+                                .field(e)
+                                .finish()
+                        }
+                        SessionUpdate::ToolCall(e) => {
+                            f.debug_tuple("SessionUpdate::ToolCall").field(e).finish()
+                        }
+                        SessionUpdate::ToolCallUpdate(e) => {
+                            f.debug_tuple("SessionUpdate::ToolCallUpdate")
+                                .field(e)
+                                .finish()
+                        }
+                        SessionUpdate::Plan(e) => {
+                            f.debug_tuple("SessionUpdate::Plan").field(e).finish()
+                        }
+                        SessionUpdate::CurrentModeUpdate(e) => {
+                            f.debug_tuple("SessionUpdate::CurrentModeUpdate")
+                                .field(e)
+                                .finish()
+                        }
+                        SessionUpdate::SessionInfoUpdate(e) => {
+                            f.debug_tuple("SessionUpdate::SessionInfoUpdate")
+                                .field(e)
+                                .finish()
+                        }
+                        SessionUpdate::AvailableCommandsUpdate(e) => {
+                            f.debug_tuple("SessionUpdate::AvailableCommandsUpdate")
+                                .field(e)
+                                .finish()
+                        }
+                    }
+                }
+            }
+        }
+        /// Client-side file system access (agent → client).
+        ///
+        /// See: <https://agentclientprotocol.com/protocol/file-system>
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod filesystem {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
+            pub type SessionId = super::super::super::yoshuawuyts::acp::sessions::SessionId;
             /// Parameters to `read-text-file`.
             #[derive(Clone)]
             pub struct ReadTextFileRequest {
@@ -1507,6 +1669,7 @@ pub mod yoshuawuyts {
             /// Response to `read-text-file`.
             #[derive(Clone)]
             pub struct ReadTextFileResponse {
+                /// The file contents.
                 pub content: _rt::String,
             }
             impl ::core::fmt::Debug for ReadTextFileResponse {
@@ -1541,98 +1704,6 @@ pub mod yoshuawuyts {
                         .finish()
                 }
             }
-            /// ------------------------------------------------------------------
-            /// Terminals (agent → client)
-            ///
-            /// See: https://agentclientprotocol.com/protocol/terminals
-            /// ------------------------------------------------------------------
-            /// Parameters to `create-terminal`.
-            #[derive(Clone)]
-            pub struct CreateTerminalRequest {
-                pub session_id: SessionId,
-                /// Command to execute.
-                pub command: _rt::String,
-                /// Arguments.
-                pub args: _rt::Vec<_rt::String>,
-                /// Environment variables.
-                pub env: _rt::Vec<EnvVar>,
-                /// Working directory (absolute path).
-                pub cwd: Option<_rt::String>,
-                /// Maximum bytes of output to retain. Once exceeded, output is
-                /// truncated from the start, on a character boundary.
-                pub output_byte_limit: Option<u64>,
-            }
-            impl ::core::fmt::Debug for CreateTerminalRequest {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("CreateTerminalRequest")
-                        .field("session-id", &self.session_id)
-                        .field("command", &self.command)
-                        .field("args", &self.args)
-                        .field("env", &self.env)
-                        .field("cwd", &self.cwd)
-                        .field("output-byte-limit", &self.output_byte_limit)
-                        .finish()
-                }
-            }
-            /// Response to `create-terminal`.
-            #[derive(Clone)]
-            pub struct CreateTerminalResponse {
-                pub terminal_id: TerminalId,
-            }
-            impl ::core::fmt::Debug for CreateTerminalResponse {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("CreateTerminalResponse")
-                        .field("terminal-id", &self.terminal_id)
-                        .finish()
-                }
-            }
-            /// How a terminal command finished.
-            #[derive(Clone)]
-            pub struct TerminalExitStatus {
-                /// Exit code, if the process exited normally.
-                pub exit_code: Option<i32>,
-                /// Signal name, if killed by signal.
-                pub signal: Option<_rt::String>,
-            }
-            impl ::core::fmt::Debug for TerminalExitStatus {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("TerminalExitStatus")
-                        .field("exit-code", &self.exit_code)
-                        .field("signal", &self.signal)
-                        .finish()
-                }
-            }
-            /// Snapshot of a terminal's output.
-            #[derive(Clone)]
-            pub struct TerminalOutput {
-                /// Output captured so far.
-                pub output: _rt::String,
-                /// Whether the output was truncated due to byte limits.
-                pub truncated: bool,
-                /// Present if the command has exited.
-                pub exit_status: Option<TerminalExitStatus>,
-            }
-            impl ::core::fmt::Debug for TerminalOutput {
-                fn fmt(
-                    &self,
-                    f: &mut ::core::fmt::Formatter<'_>,
-                ) -> ::core::fmt::Result {
-                    f.debug_struct("TerminalOutput")
-                        .field("output", &self.output)
-                        .field("truncated", &self.truncated)
-                        .field("exit-status", &self.exit_status)
-                        .finish()
-                }
-            }
         }
         /// Methods exported by the client. The agent calls these.
         ///
@@ -1647,19 +1718,19 @@ pub mod yoshuawuyts {
             #[doc(hidden)]
             static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
             use super::super::super::_rt;
-            pub type SessionId = super::super::super::yoshuawuyts::acp::types::SessionId;
-            pub type SessionUpdate = super::super::super::yoshuawuyts::acp::types::SessionUpdate;
-            pub type RequestPermissionRequest = super::super::super::yoshuawuyts::acp::types::RequestPermissionRequest;
-            pub type RequestPermissionResponse = super::super::super::yoshuawuyts::acp::types::RequestPermissionResponse;
-            pub type ReadTextFileRequest = super::super::super::yoshuawuyts::acp::types::ReadTextFileRequest;
-            pub type ReadTextFileResponse = super::super::super::yoshuawuyts::acp::types::ReadTextFileResponse;
-            pub type WriteTextFileRequest = super::super::super::yoshuawuyts::acp::types::WriteTextFileRequest;
-            pub type CreateTerminalRequest = super::super::super::yoshuawuyts::acp::types::CreateTerminalRequest;
-            pub type CreateTerminalResponse = super::super::super::yoshuawuyts::acp::types::CreateTerminalResponse;
-            pub type TerminalId = super::super::super::yoshuawuyts::acp::types::TerminalId;
-            pub type TerminalOutput = super::super::super::yoshuawuyts::acp::types::TerminalOutput;
-            pub type TerminalExitStatus = super::super::super::yoshuawuyts::acp::types::TerminalExitStatus;
-            pub type Error = super::super::super::yoshuawuyts::acp::types::Error;
+            pub type Error = super::super::super::yoshuawuyts::acp::errors::Error;
+            pub type SessionId = super::super::super::yoshuawuyts::acp::sessions::SessionId;
+            pub type SessionUpdate = super::super::super::yoshuawuyts::acp::prompts::SessionUpdate;
+            pub type RequestPermissionRequest = super::super::super::yoshuawuyts::acp::tools::RequestPermissionRequest;
+            pub type RequestPermissionResponse = super::super::super::yoshuawuyts::acp::tools::RequestPermissionResponse;
+            pub type ReadTextFileRequest = super::super::super::yoshuawuyts::acp::filesystem::ReadTextFileRequest;
+            pub type ReadTextFileResponse = super::super::super::yoshuawuyts::acp::filesystem::ReadTextFileResponse;
+            pub type WriteTextFileRequest = super::super::super::yoshuawuyts::acp::filesystem::WriteTextFileRequest;
+            pub type TerminalId = super::super::super::yoshuawuyts::acp::terminals::TerminalId;
+            pub type CreateTerminalRequest = super::super::super::yoshuawuyts::acp::terminals::CreateTerminalRequest;
+            pub type CreateTerminalResponse = super::super::super::yoshuawuyts::acp::terminals::CreateTerminalResponse;
+            pub type TerminalOutput = super::super::super::yoshuawuyts::acp::terminals::TerminalOutput;
+            pub type TerminalExitStatus = super::super::super::yoshuawuyts::acp::terminals::TerminalExitStatus;
             #[allow(unused_unsafe, clippy::all)]
             /// Notification: the agent reports progress, output, tool calls, or
             /// plan changes for the given session. Maps to the JSON-RPC
@@ -1686,19 +1757,19 @@ pub mod yoshuawuyts {
                     let len1 = vec1.len();
                     *ptr0.add(::core::mem::size_of::<*const u8>()).cast::<usize>() = len1;
                     *ptr0.add(0).cast::<*mut u8>() = ptr1.cast_mut();
-                    use super::super::super::yoshuawuyts::acp::types::SessionUpdate as V166;
+                    use super::super::super::yoshuawuyts::acp::prompts::SessionUpdate as V176;
                     match update {
-                        V166::UserMessageChunk(e) => {
+                        V176::UserMessageChunk(e) => {
                             *ptr0
                                 .add(2 * ::core::mem::size_of::<*const u8>())
                                 .cast::<u8>() = (0i32) as u8;
-                            use super::super::super::yoshuawuyts::acp::types::ContentBlock as V27;
+                            use super::super::super::yoshuawuyts::acp::content::ContentBlock as V27;
                             match e {
                                 V27::Text(e) => {
                                     *ptr0
                                         .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (0i32) as u8;
-                                    let super::super::super::yoshuawuyts::acp::types::TextContent {
+                                    let super::super::super::yoshuawuyts::acp::content::TextContent {
                                         text: text2,
                                     } = e;
                                     let vec3 = text2;
@@ -1715,7 +1786,7 @@ pub mod yoshuawuyts {
                                     *ptr0
                                         .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (1i32) as u8;
-                                    let super::super::super::yoshuawuyts::acp::types::ImageContent {
+                                    let super::super::super::yoshuawuyts::acp::content::ImageContent {
                                         data: data4,
                                         mime_type: mime_type4,
                                         uri: uri4,
@@ -1764,7 +1835,7 @@ pub mod yoshuawuyts {
                                     *ptr0
                                         .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (2i32) as u8;
-                                    let super::super::super::yoshuawuyts::acp::types::AudioContent {
+                                    let super::super::super::yoshuawuyts::acp::content::AudioContent {
                                         data: data8,
                                         mime_type: mime_type8,
                                     } = e;
@@ -1791,7 +1862,7 @@ pub mod yoshuawuyts {
                                     *ptr0
                                         .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (3i32) as u8;
-                                    let super::super::super::yoshuawuyts::acp::types::ResourceLink {
+                                    let super::super::super::yoshuawuyts::acp::content::ResourceLink {
                                         uri: uri11,
                                         name: name11,
                                         mime_type: mime_type11,
@@ -1900,16 +1971,16 @@ pub mod yoshuawuyts {
                                     *ptr0
                                         .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (4i32) as u8;
-                                    let super::super::super::yoshuawuyts::acp::types::EmbeddedResource {
+                                    let super::super::super::yoshuawuyts::acp::content::EmbeddedResource {
                                         resource: resource17,
                                     } = e;
-                                    use super::super::super::yoshuawuyts::acp::types::ResourceContents as V26;
+                                    use super::super::super::yoshuawuyts::acp::content::ResourceContents as V26;
                                     match resource17 {
                                         V26::Text(e) => {
                                             *ptr0
                                                 .add(16 + 2 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<u8>() = (0i32) as u8;
-                                            let super::super::super::yoshuawuyts::acp::types::TextResourceContents {
+                                            let super::super::super::yoshuawuyts::acp::content::TextResourceContents {
                                                 uri: uri18,
                                                 mime_type: mime_type18,
                                                 text: text18,
@@ -1958,7 +2029,7 @@ pub mod yoshuawuyts {
                                             *ptr0
                                                 .add(16 + 2 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<u8>() = (1i32) as u8;
-                                            let super::super::super::yoshuawuyts::acp::types::BlobResourceContents {
+                                            let super::super::super::yoshuawuyts::acp::content::BlobResourceContents {
                                                 uri: uri22,
                                                 mime_type: mime_type22,
                                                 blob: blob22,
@@ -2007,17 +2078,17 @@ pub mod yoshuawuyts {
                                 }
                             }
                         }
-                        V166::AgentMessageChunk(e) => {
+                        V176::AgentMessageChunk(e) => {
                             *ptr0
                                 .add(2 * ::core::mem::size_of::<*const u8>())
                                 .cast::<u8>() = (1i32) as u8;
-                            use super::super::super::yoshuawuyts::acp::types::ContentBlock as V53;
+                            use super::super::super::yoshuawuyts::acp::content::ContentBlock as V53;
                             match e {
                                 V53::Text(e) => {
                                     *ptr0
                                         .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (0i32) as u8;
-                                    let super::super::super::yoshuawuyts::acp::types::TextContent {
+                                    let super::super::super::yoshuawuyts::acp::content::TextContent {
                                         text: text28,
                                     } = e;
                                     let vec29 = text28;
@@ -2034,7 +2105,7 @@ pub mod yoshuawuyts {
                                     *ptr0
                                         .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (1i32) as u8;
-                                    let super::super::super::yoshuawuyts::acp::types::ImageContent {
+                                    let super::super::super::yoshuawuyts::acp::content::ImageContent {
                                         data: data30,
                                         mime_type: mime_type30,
                                         uri: uri30,
@@ -2083,7 +2154,7 @@ pub mod yoshuawuyts {
                                     *ptr0
                                         .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (2i32) as u8;
-                                    let super::super::super::yoshuawuyts::acp::types::AudioContent {
+                                    let super::super::super::yoshuawuyts::acp::content::AudioContent {
                                         data: data34,
                                         mime_type: mime_type34,
                                     } = e;
@@ -2110,7 +2181,7 @@ pub mod yoshuawuyts {
                                     *ptr0
                                         .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (3i32) as u8;
-                                    let super::super::super::yoshuawuyts::acp::types::ResourceLink {
+                                    let super::super::super::yoshuawuyts::acp::content::ResourceLink {
                                         uri: uri37,
                                         name: name37,
                                         mime_type: mime_type37,
@@ -2219,16 +2290,16 @@ pub mod yoshuawuyts {
                                     *ptr0
                                         .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (4i32) as u8;
-                                    let super::super::super::yoshuawuyts::acp::types::EmbeddedResource {
+                                    let super::super::super::yoshuawuyts::acp::content::EmbeddedResource {
                                         resource: resource43,
                                     } = e;
-                                    use super::super::super::yoshuawuyts::acp::types::ResourceContents as V52;
+                                    use super::super::super::yoshuawuyts::acp::content::ResourceContents as V52;
                                     match resource43 {
                                         V52::Text(e) => {
                                             *ptr0
                                                 .add(16 + 2 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<u8>() = (0i32) as u8;
-                                            let super::super::super::yoshuawuyts::acp::types::TextResourceContents {
+                                            let super::super::super::yoshuawuyts::acp::content::TextResourceContents {
                                                 uri: uri44,
                                                 mime_type: mime_type44,
                                                 text: text44,
@@ -2277,7 +2348,7 @@ pub mod yoshuawuyts {
                                             *ptr0
                                                 .add(16 + 2 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<u8>() = (1i32) as u8;
-                                            let super::super::super::yoshuawuyts::acp::types::BlobResourceContents {
+                                            let super::super::super::yoshuawuyts::acp::content::BlobResourceContents {
                                                 uri: uri48,
                                                 mime_type: mime_type48,
                                                 blob: blob48,
@@ -2326,17 +2397,17 @@ pub mod yoshuawuyts {
                                 }
                             }
                         }
-                        V166::AgentThoughtChunk(e) => {
+                        V176::AgentThoughtChunk(e) => {
                             *ptr0
                                 .add(2 * ::core::mem::size_of::<*const u8>())
                                 .cast::<u8>() = (2i32) as u8;
-                            use super::super::super::yoshuawuyts::acp::types::ContentBlock as V79;
+                            use super::super::super::yoshuawuyts::acp::content::ContentBlock as V79;
                             match e {
                                 V79::Text(e) => {
                                     *ptr0
                                         .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (0i32) as u8;
-                                    let super::super::super::yoshuawuyts::acp::types::TextContent {
+                                    let super::super::super::yoshuawuyts::acp::content::TextContent {
                                         text: text54,
                                     } = e;
                                     let vec55 = text54;
@@ -2353,7 +2424,7 @@ pub mod yoshuawuyts {
                                     *ptr0
                                         .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (1i32) as u8;
-                                    let super::super::super::yoshuawuyts::acp::types::ImageContent {
+                                    let super::super::super::yoshuawuyts::acp::content::ImageContent {
                                         data: data56,
                                         mime_type: mime_type56,
                                         uri: uri56,
@@ -2402,7 +2473,7 @@ pub mod yoshuawuyts {
                                     *ptr0
                                         .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (2i32) as u8;
-                                    let super::super::super::yoshuawuyts::acp::types::AudioContent {
+                                    let super::super::super::yoshuawuyts::acp::content::AudioContent {
                                         data: data60,
                                         mime_type: mime_type60,
                                     } = e;
@@ -2429,7 +2500,7 @@ pub mod yoshuawuyts {
                                     *ptr0
                                         .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (3i32) as u8;
-                                    let super::super::super::yoshuawuyts::acp::types::ResourceLink {
+                                    let super::super::super::yoshuawuyts::acp::content::ResourceLink {
                                         uri: uri63,
                                         name: name63,
                                         mime_type: mime_type63,
@@ -2538,16 +2609,16 @@ pub mod yoshuawuyts {
                                     *ptr0
                                         .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>() = (4i32) as u8;
-                                    let super::super::super::yoshuawuyts::acp::types::EmbeddedResource {
+                                    let super::super::super::yoshuawuyts::acp::content::EmbeddedResource {
                                         resource: resource69,
                                     } = e;
-                                    use super::super::super::yoshuawuyts::acp::types::ResourceContents as V78;
+                                    use super::super::super::yoshuawuyts::acp::content::ResourceContents as V78;
                                     match resource69 {
                                         V78::Text(e) => {
                                             *ptr0
                                                 .add(16 + 2 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<u8>() = (0i32) as u8;
-                                            let super::super::super::yoshuawuyts::acp::types::TextResourceContents {
+                                            let super::super::super::yoshuawuyts::acp::content::TextResourceContents {
                                                 uri: uri70,
                                                 mime_type: mime_type70,
                                                 text: text70,
@@ -2596,7 +2667,7 @@ pub mod yoshuawuyts {
                                             *ptr0
                                                 .add(16 + 2 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<u8>() = (1i32) as u8;
-                                            let super::super::super::yoshuawuyts::acp::types::BlobResourceContents {
+                                            let super::super::super::yoshuawuyts::acp::content::BlobResourceContents {
                                                 uri: uri74,
                                                 mime_type: mime_type74,
                                                 blob: blob74,
@@ -2645,11 +2716,11 @@ pub mod yoshuawuyts {
                                 }
                             }
                         }
-                        V166::ToolCall(e) => {
+                        V176::ToolCall(e) => {
                             *ptr0
                                 .add(2 * ::core::mem::size_of::<*const u8>())
                                 .cast::<u8>() = (3i32) as u8;
-                            let super::super::super::yoshuawuyts::acp::types::ToolCall {
+                            let super::super::super::yoshuawuyts::acp::tools::ToolCall {
                                 id: id80,
                                 title: title80,
                                 kind: kind80,
@@ -2699,15 +2770,15 @@ pub mod yoshuawuyts {
                                 let base = result115
                                     .add(i * (40 + 12 * ::core::mem::size_of::<*const u8>()));
                                 {
-                                    use super::super::super::yoshuawuyts::acp::types::ToolCallContent as V114;
+                                    use super::super::super::yoshuawuyts::acp::tools::ToolCallContent as V114;
                                     match e {
                                         V114::Content(e) => {
                                             *base.add(0).cast::<u8>() = (0i32) as u8;
-                                            use super::super::super::yoshuawuyts::acp::types::ContentBlock as V108;
+                                            use super::super::super::yoshuawuyts::acp::content::ContentBlock as V108;
                                             match e {
                                                 V108::Text(e) => {
                                                     *base.add(8).cast::<u8>() = (0i32) as u8;
-                                                    let super::super::super::yoshuawuyts::acp::types::TextContent {
+                                                    let super::super::super::yoshuawuyts::acp::content::TextContent {
                                                         text: text83,
                                                     } = e;
                                                     let vec84 = text83;
@@ -2720,7 +2791,7 @@ pub mod yoshuawuyts {
                                                 }
                                                 V108::Image(e) => {
                                                     *base.add(8).cast::<u8>() = (1i32) as u8;
-                                                    let super::super::super::yoshuawuyts::acp::types::ImageContent {
+                                                    let super::super::super::yoshuawuyts::acp::content::ImageContent {
                                                         data: data85,
                                                         mime_type: mime_type85,
                                                         uri: uri85,
@@ -2765,7 +2836,7 @@ pub mod yoshuawuyts {
                                                 }
                                                 V108::Audio(e) => {
                                                     *base.add(8).cast::<u8>() = (2i32) as u8;
-                                                    let super::super::super::yoshuawuyts::acp::types::AudioContent {
+                                                    let super::super::super::yoshuawuyts::acp::content::AudioContent {
                                                         data: data89,
                                                         mime_type: mime_type89,
                                                     } = e;
@@ -2788,7 +2859,7 @@ pub mod yoshuawuyts {
                                                 }
                                                 V108::ResourceLink(e) => {
                                                     *base.add(8).cast::<u8>() = (3i32) as u8;
-                                                    let super::super::super::yoshuawuyts::acp::types::ResourceLink {
+                                                    let super::super::super::yoshuawuyts::acp::content::ResourceLink {
                                                         uri: uri92,
                                                         name: name92,
                                                         mime_type: mime_type92,
@@ -2893,14 +2964,14 @@ pub mod yoshuawuyts {
                                                 }
                                                 V108::Resource(e) => {
                                                     *base.add(8).cast::<u8>() = (4i32) as u8;
-                                                    let super::super::super::yoshuawuyts::acp::types::EmbeddedResource {
+                                                    let super::super::super::yoshuawuyts::acp::content::EmbeddedResource {
                                                         resource: resource98,
                                                     } = e;
-                                                    use super::super::super::yoshuawuyts::acp::types::ResourceContents as V107;
+                                                    use super::super::super::yoshuawuyts::acp::content::ResourceContents as V107;
                                                     match resource98 {
                                                         V107::Text(e) => {
                                                             *base.add(16).cast::<u8>() = (0i32) as u8;
-                                                            let super::super::super::yoshuawuyts::acp::types::TextResourceContents {
+                                                            let super::super::super::yoshuawuyts::acp::content::TextResourceContents {
                                                                 uri: uri99,
                                                                 mime_type: mime_type99,
                                                                 text: text99,
@@ -2947,7 +3018,7 @@ pub mod yoshuawuyts {
                                                         }
                                                         V107::Blob(e) => {
                                                             *base.add(16).cast::<u8>() = (1i32) as u8;
-                                                            let super::super::super::yoshuawuyts::acp::types::BlobResourceContents {
+                                                            let super::super::super::yoshuawuyts::acp::content::BlobResourceContents {
                                                                 uri: uri103,
                                                                 mime_type: mime_type103,
                                                                 blob: blob103,
@@ -2998,7 +3069,7 @@ pub mod yoshuawuyts {
                                         }
                                         V114::Diff(e) => {
                                             *base.add(0).cast::<u8>() = (1i32) as u8;
-                                            let super::super::super::yoshuawuyts::acp::types::Diff {
+                                            let super::super::super::yoshuawuyts::acp::tools::Diff {
                                                 path: path109,
                                                 old_text: old_text109,
                                                 new_text: new_text109,
@@ -3076,7 +3147,7 @@ pub mod yoshuawuyts {
                                 let base = result118
                                     .add(i * (8 + 2 * ::core::mem::size_of::<*const u8>()));
                                 {
-                                    let super::super::super::yoshuawuyts::acp::types::ToolCallLocation {
+                                    let super::super::super::yoshuawuyts::acp::tools::ToolCallLocation {
                                         path: path116,
                                         line: line116,
                                     } = e;
@@ -3153,11 +3224,11 @@ pub mod yoshuawuyts {
                                 }
                             };
                         }
-                        V166::ToolCallUpdate(e) => {
+                        V176::ToolCallUpdate(e) => {
                             *ptr0
                                 .add(2 * ::core::mem::size_of::<*const u8>())
                                 .cast::<u8>() = (4i32) as u8;
-                            let super::super::super::yoshuawuyts::acp::types::ToolCallUpdate {
+                            let super::super::super::yoshuawuyts::acp::tools::ToolCallUpdate {
                                 id: id121,
                                 title: title121,
                                 kind: kind121,
@@ -3248,15 +3319,15 @@ pub mod yoshuawuyts {
                                         let base = result156
                                             .add(i * (40 + 12 * ::core::mem::size_of::<*const u8>()));
                                         {
-                                            use super::super::super::yoshuawuyts::acp::types::ToolCallContent as V155;
+                                            use super::super::super::yoshuawuyts::acp::tools::ToolCallContent as V155;
                                             match e {
                                                 V155::Content(e) => {
                                                     *base.add(0).cast::<u8>() = (0i32) as u8;
-                                                    use super::super::super::yoshuawuyts::acp::types::ContentBlock as V149;
+                                                    use super::super::super::yoshuawuyts::acp::content::ContentBlock as V149;
                                                     match e {
                                                         V149::Text(e) => {
                                                             *base.add(8).cast::<u8>() = (0i32) as u8;
-                                                            let super::super::super::yoshuawuyts::acp::types::TextContent {
+                                                            let super::super::super::yoshuawuyts::acp::content::TextContent {
                                                                 text: text124,
                                                             } = e;
                                                             let vec125 = text124;
@@ -3269,7 +3340,7 @@ pub mod yoshuawuyts {
                                                         }
                                                         V149::Image(e) => {
                                                             *base.add(8).cast::<u8>() = (1i32) as u8;
-                                                            let super::super::super::yoshuawuyts::acp::types::ImageContent {
+                                                            let super::super::super::yoshuawuyts::acp::content::ImageContent {
                                                                 data: data126,
                                                                 mime_type: mime_type126,
                                                                 uri: uri126,
@@ -3314,7 +3385,7 @@ pub mod yoshuawuyts {
                                                         }
                                                         V149::Audio(e) => {
                                                             *base.add(8).cast::<u8>() = (2i32) as u8;
-                                                            let super::super::super::yoshuawuyts::acp::types::AudioContent {
+                                                            let super::super::super::yoshuawuyts::acp::content::AudioContent {
                                                                 data: data130,
                                                                 mime_type: mime_type130,
                                                             } = e;
@@ -3337,7 +3408,7 @@ pub mod yoshuawuyts {
                                                         }
                                                         V149::ResourceLink(e) => {
                                                             *base.add(8).cast::<u8>() = (3i32) as u8;
-                                                            let super::super::super::yoshuawuyts::acp::types::ResourceLink {
+                                                            let super::super::super::yoshuawuyts::acp::content::ResourceLink {
                                                                 uri: uri133,
                                                                 name: name133,
                                                                 mime_type: mime_type133,
@@ -3442,14 +3513,14 @@ pub mod yoshuawuyts {
                                                         }
                                                         V149::Resource(e) => {
                                                             *base.add(8).cast::<u8>() = (4i32) as u8;
-                                                            let super::super::super::yoshuawuyts::acp::types::EmbeddedResource {
+                                                            let super::super::super::yoshuawuyts::acp::content::EmbeddedResource {
                                                                 resource: resource139,
                                                             } = e;
-                                                            use super::super::super::yoshuawuyts::acp::types::ResourceContents as V148;
+                                                            use super::super::super::yoshuawuyts::acp::content::ResourceContents as V148;
                                                             match resource139 {
                                                                 V148::Text(e) => {
                                                                     *base.add(16).cast::<u8>() = (0i32) as u8;
-                                                                    let super::super::super::yoshuawuyts::acp::types::TextResourceContents {
+                                                                    let super::super::super::yoshuawuyts::acp::content::TextResourceContents {
                                                                         uri: uri140,
                                                                         mime_type: mime_type140,
                                                                         text: text140,
@@ -3496,7 +3567,7 @@ pub mod yoshuawuyts {
                                                                 }
                                                                 V148::Blob(e) => {
                                                                     *base.add(16).cast::<u8>() = (1i32) as u8;
-                                                                    let super::super::super::yoshuawuyts::acp::types::BlobResourceContents {
+                                                                    let super::super::super::yoshuawuyts::acp::content::BlobResourceContents {
                                                                         uri: uri144,
                                                                         mime_type: mime_type144,
                                                                         blob: blob144,
@@ -3547,7 +3618,7 @@ pub mod yoshuawuyts {
                                                 }
                                                 V155::Diff(e) => {
                                                     *base.add(0).cast::<u8>() = (1i32) as u8;
-                                                    let super::super::super::yoshuawuyts::acp::types::Diff {
+                                                    let super::super::super::yoshuawuyts::acp::tools::Diff {
                                                         path: path150,
                                                         old_text: old_text150,
                                                         new_text: new_text150,
@@ -3637,7 +3708,7 @@ pub mod yoshuawuyts {
                                         let base = result159
                                             .add(i * (8 + 2 * ::core::mem::size_of::<*const u8>()));
                                         {
-                                            let super::super::super::yoshuawuyts::acp::types::ToolCallLocation {
+                                            let super::super::super::yoshuawuyts::acp::tools::ToolCallLocation {
                                                 path: path157,
                                                 line: line157,
                                             } = e;
@@ -3721,11 +3792,11 @@ pub mod yoshuawuyts {
                                 }
                             };
                         }
-                        V166::Plan(e) => {
+                        V176::Plan(e) => {
                             *ptr0
                                 .add(2 * ::core::mem::size_of::<*const u8>())
                                 .cast::<u8>() = (5i32) as u8;
-                            let super::super::super::yoshuawuyts::acp::types::Plan {
+                            let super::super::super::yoshuawuyts::acp::tools::Plan {
                                 entries: entries162,
                             } = e;
                             let vec165 = entries162;
@@ -3743,7 +3814,7 @@ pub mod yoshuawuyts {
                                 let base = result165
                                     .add(i * (3 * ::core::mem::size_of::<*const u8>()));
                                 {
-                                    let super::super::super::yoshuawuyts::acp::types::PlanEntry {
+                                    let super::super::super::yoshuawuyts::acp::tools::PlanEntry {
                                         content: content163,
                                         priority: priority163,
                                         status: status163,
@@ -3770,18 +3841,156 @@ pub mod yoshuawuyts {
                                 .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                 .cast::<*mut u8>() = result165;
                         }
+                        V176::CurrentModeUpdate(e) => {
+                            *ptr0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<u8>() = (6i32) as u8;
+                            let vec166 = e;
+                            let ptr166 = vec166.as_ptr().cast::<u8>();
+                            let len166 = vec166.len();
+                            *ptr0
+                                .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len166;
+                            *ptr0
+                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = ptr166.cast_mut();
+                        }
+                        V176::SessionInfoUpdate(e) => {
+                            *ptr0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<u8>() = (7i32) as u8;
+                            let super::super::super::yoshuawuyts::acp::sessions::SessionInfoUpdate {
+                                title: title167,
+                                updated_at: updated_at167,
+                            } = e;
+                            match title167 {
+                                Some(e) => {
+                                    *ptr0
+                                        .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>() = (1i32) as u8;
+                                    let vec168 = e;
+                                    let ptr168 = vec168.as_ptr().cast::<u8>();
+                                    let len168 = vec168.len();
+                                    *ptr0
+                                        .add(8 + 4 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len168;
+                                    *ptr0
+                                        .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>() = ptr168.cast_mut();
+                                }
+                                None => {
+                                    *ptr0
+                                        .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>() = (0i32) as u8;
+                                }
+                            };
+                            match updated_at167 {
+                                Some(e) => {
+                                    *ptr0
+                                        .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>() = (1i32) as u8;
+                                    let vec169 = e;
+                                    let ptr169 = vec169.as_ptr().cast::<u8>();
+                                    let len169 = vec169.len();
+                                    *ptr0
+                                        .add(8 + 7 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len169;
+                                    *ptr0
+                                        .add(8 + 6 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>() = ptr169.cast_mut();
+                                }
+                                None => {
+                                    *ptr0
+                                        .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>() = (0i32) as u8;
+                                }
+                            };
+                        }
+                        V176::AvailableCommandsUpdate(e) => {
+                            *ptr0
+                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<u8>() = (8i32) as u8;
+                            let vec175 = e;
+                            let len175 = vec175.len();
+                            let layout175 = _rt::alloc::Layout::from_size_align(
+                                    vec175.len() * (7 * ::core::mem::size_of::<*const u8>()),
+                                    ::core::mem::size_of::<*const u8>(),
+                                )
+                                .unwrap();
+                            let (result175, _cleanup175) = wit_bindgen_rt::Cleanup::new(
+                                layout175,
+                            );
+                            cleanup_list.extend(_cleanup175);
+                            for (i, e) in vec175.into_iter().enumerate() {
+                                let base = result175
+                                    .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                {
+                                    let super::super::super::yoshuawuyts::acp::prompts::AvailableCommand {
+                                        name: name170,
+                                        description: description170,
+                                        input: input170,
+                                    } = e;
+                                    let vec171 = name170;
+                                    let ptr171 = vec171.as_ptr().cast::<u8>();
+                                    let len171 = vec171.len();
+                                    *base
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len171;
+                                    *base.add(0).cast::<*mut u8>() = ptr171.cast_mut();
+                                    let vec172 = description170;
+                                    let ptr172 = vec172.as_ptr().cast::<u8>();
+                                    let len172 = vec172.len();
+                                    *base
+                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len172;
+                                    *base
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>() = ptr172.cast_mut();
+                                    match input170 {
+                                        Some(e) => {
+                                            *base
+                                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (1i32) as u8;
+                                            let super::super::super::yoshuawuyts::acp::prompts::AvailableCommandInput {
+                                                hint: hint173,
+                                            } = e;
+                                            let vec174 = hint173;
+                                            let ptr174 = vec174.as_ptr().cast::<u8>();
+                                            let len174 = vec174.len();
+                                            *base
+                                                .add(6 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len174;
+                                            *base
+                                                .add(5 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = ptr174.cast_mut();
+                                        }
+                                        None => {
+                                            *base
+                                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (0i32) as u8;
+                                        }
+                                    };
+                                }
+                            }
+                            *ptr0
+                                .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                .cast::<usize>() = len175;
+                            *ptr0
+                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                .cast::<*mut u8>() = result175;
+                        }
                     }
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@2.0.6")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "update-session"]
-                        fn wit_import167(_: *mut u8);
+                        fn wit_import177(_: *mut u8);
                     }
                     #[cfg(not(target_arch = "wasm32"))]
-                    unsafe extern "C" fn wit_import167(_: *mut u8) {
+                    unsafe extern "C" fn wit_import177(_: *mut u8) {
                         unreachable!()
                     }
-                    wit_import167(ptr0);
+                    wit_import177(ptr0);
                 }
             }
             #[allow(unused_unsafe, clippy::all)]
@@ -3807,7 +4016,7 @@ pub mod yoshuawuyts {
                             * ::core::mem::size_of::<*const u8>()],
                     );
                     let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
-                    let super::super::super::yoshuawuyts::acp::types::RequestPermissionRequest {
+                    let super::super::super::yoshuawuyts::acp::tools::RequestPermissionRequest {
                         session_id: session_id1,
                         tool_call: tool_call1,
                         options: options1,
@@ -3817,7 +4026,7 @@ pub mod yoshuawuyts {
                     let len2 = vec2.len();
                     *ptr0.add(::core::mem::size_of::<*const u8>()).cast::<usize>() = len2;
                     *ptr0.add(0).cast::<*mut u8>() = ptr2.cast_mut();
-                    let super::super::super::yoshuawuyts::acp::types::ToolCallUpdate {
+                    let super::super::super::yoshuawuyts::acp::tools::ToolCallUpdate {
                         id: id3,
                         title: title3,
                         kind: kind3,
@@ -3906,15 +4115,15 @@ pub mod yoshuawuyts {
                                 let base = result38
                                     .add(i * (40 + 12 * ::core::mem::size_of::<*const u8>()));
                                 {
-                                    use super::super::super::yoshuawuyts::acp::types::ToolCallContent as V37;
+                                    use super::super::super::yoshuawuyts::acp::tools::ToolCallContent as V37;
                                     match e {
                                         V37::Content(e) => {
                                             *base.add(0).cast::<u8>() = (0i32) as u8;
-                                            use super::super::super::yoshuawuyts::acp::types::ContentBlock as V31;
+                                            use super::super::super::yoshuawuyts::acp::content::ContentBlock as V31;
                                             match e {
                                                 V31::Text(e) => {
                                                     *base.add(8).cast::<u8>() = (0i32) as u8;
-                                                    let super::super::super::yoshuawuyts::acp::types::TextContent {
+                                                    let super::super::super::yoshuawuyts::acp::content::TextContent {
                                                         text: text6,
                                                     } = e;
                                                     let vec7 = text6;
@@ -3927,7 +4136,7 @@ pub mod yoshuawuyts {
                                                 }
                                                 V31::Image(e) => {
                                                     *base.add(8).cast::<u8>() = (1i32) as u8;
-                                                    let super::super::super::yoshuawuyts::acp::types::ImageContent {
+                                                    let super::super::super::yoshuawuyts::acp::content::ImageContent {
                                                         data: data8,
                                                         mime_type: mime_type8,
                                                         uri: uri8,
@@ -3972,7 +4181,7 @@ pub mod yoshuawuyts {
                                                 }
                                                 V31::Audio(e) => {
                                                     *base.add(8).cast::<u8>() = (2i32) as u8;
-                                                    let super::super::super::yoshuawuyts::acp::types::AudioContent {
+                                                    let super::super::super::yoshuawuyts::acp::content::AudioContent {
                                                         data: data12,
                                                         mime_type: mime_type12,
                                                     } = e;
@@ -3995,7 +4204,7 @@ pub mod yoshuawuyts {
                                                 }
                                                 V31::ResourceLink(e) => {
                                                     *base.add(8).cast::<u8>() = (3i32) as u8;
-                                                    let super::super::super::yoshuawuyts::acp::types::ResourceLink {
+                                                    let super::super::super::yoshuawuyts::acp::content::ResourceLink {
                                                         uri: uri15,
                                                         name: name15,
                                                         mime_type: mime_type15,
@@ -4100,14 +4309,14 @@ pub mod yoshuawuyts {
                                                 }
                                                 V31::Resource(e) => {
                                                     *base.add(8).cast::<u8>() = (4i32) as u8;
-                                                    let super::super::super::yoshuawuyts::acp::types::EmbeddedResource {
+                                                    let super::super::super::yoshuawuyts::acp::content::EmbeddedResource {
                                                         resource: resource21,
                                                     } = e;
-                                                    use super::super::super::yoshuawuyts::acp::types::ResourceContents as V30;
+                                                    use super::super::super::yoshuawuyts::acp::content::ResourceContents as V30;
                                                     match resource21 {
                                                         V30::Text(e) => {
                                                             *base.add(16).cast::<u8>() = (0i32) as u8;
-                                                            let super::super::super::yoshuawuyts::acp::types::TextResourceContents {
+                                                            let super::super::super::yoshuawuyts::acp::content::TextResourceContents {
                                                                 uri: uri22,
                                                                 mime_type: mime_type22,
                                                                 text: text22,
@@ -4154,7 +4363,7 @@ pub mod yoshuawuyts {
                                                         }
                                                         V30::Blob(e) => {
                                                             *base.add(16).cast::<u8>() = (1i32) as u8;
-                                                            let super::super::super::yoshuawuyts::acp::types::BlobResourceContents {
+                                                            let super::super::super::yoshuawuyts::acp::content::BlobResourceContents {
                                                                 uri: uri26,
                                                                 mime_type: mime_type26,
                                                                 blob: blob26,
@@ -4205,7 +4414,7 @@ pub mod yoshuawuyts {
                                         }
                                         V37::Diff(e) => {
                                             *base.add(0).cast::<u8>() = (1i32) as u8;
-                                            let super::super::super::yoshuawuyts::acp::types::Diff {
+                                            let super::super::super::yoshuawuyts::acp::tools::Diff {
                                                 path: path32,
                                                 old_text: old_text32,
                                                 new_text: new_text32,
@@ -4294,7 +4503,7 @@ pub mod yoshuawuyts {
                                 let base = result41
                                     .add(i * (8 + 2 * ::core::mem::size_of::<*const u8>()));
                                 {
-                                    let super::super::super::yoshuawuyts::acp::types::ToolCallLocation {
+                                    let super::super::super::yoshuawuyts::acp::tools::ToolCallLocation {
                                         path: path39,
                                         line: line39,
                                     } = e;
@@ -4389,7 +4598,7 @@ pub mod yoshuawuyts {
                         let base = result47
                             .add(i * (5 * ::core::mem::size_of::<*const u8>()));
                         {
-                            let super::super::super::yoshuawuyts::acp::types::PermissionOption {
+                            let super::super::super::yoshuawuyts::acp::tools::PermissionOption {
                                 id: id44,
                                 name: name44,
                                 kind: kind44,
@@ -4423,7 +4632,7 @@ pub mod yoshuawuyts {
                         .cast::<*mut u8>() = result47;
                     let ptr48 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@2.0.6")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "request-permission"]
                         fn wit_import49(_: *mut u8, _: *mut u8);
@@ -4440,7 +4649,7 @@ pub mod yoshuawuyts {
                                 let l51 = i32::from(
                                     *ptr48.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
                                 );
-                                use super::super::super::yoshuawuyts::acp::types::PermissionOutcome as V55;
+                                use super::super::super::yoshuawuyts::acp::tools::PermissionOutcome as V55;
                                 let v55 = match l51 {
                                     0 => V55::Cancelled,
                                     n => {
@@ -4463,7 +4672,7 @@ pub mod yoshuawuyts {
                                         V55::Selected(e55)
                                     }
                                 };
-                                super::super::super::yoshuawuyts::acp::types::RequestPermissionResponse {
+                                super::super::super::yoshuawuyts::acp::tools::RequestPermissionResponse {
                                     outcome: v55,
                                 }
                             };
@@ -4474,7 +4683,7 @@ pub mod yoshuawuyts {
                                 let l56 = i32::from(
                                     *ptr48.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
                                 );
-                                use super::super::super::yoshuawuyts::acp::types::ErrorCode as V58;
+                                use super::super::super::yoshuawuyts::acp::errors::ErrorCode as V58;
                                 let v58 = match l56 {
                                     0 => V58::ParseError,
                                     1 => V58::InvalidRequest,
@@ -4506,7 +4715,7 @@ pub mod yoshuawuyts {
                                     len61,
                                     len61,
                                 );
-                                super::super::super::yoshuawuyts::acp::types::Error {
+                                super::super::super::yoshuawuyts::acp::errors::Error {
                                     code: v58,
                                     message: _rt::string_lift(bytes61),
                                 }
@@ -4540,7 +4749,7 @@ pub mod yoshuawuyts {
                         [::core::mem::MaybeUninit::uninit(); 8
                             + 3 * ::core::mem::size_of::<*const u8>()],
                     );
-                    let super::super::super::yoshuawuyts::acp::types::ReadTextFileRequest {
+                    let super::super::super::yoshuawuyts::acp::filesystem::ReadTextFileRequest {
                         session_id: session_id0,
                         path: path0,
                         line: line0,
@@ -4562,7 +4771,7 @@ pub mod yoshuawuyts {
                     };
                     let ptr5 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@2.0.6")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "read-text-file"]
                         fn wit_import6(
@@ -4618,7 +4827,7 @@ pub mod yoshuawuyts {
                                     len10,
                                     len10,
                                 );
-                                super::super::super::yoshuawuyts::acp::types::ReadTextFileResponse {
+                                super::super::super::yoshuawuyts::acp::filesystem::ReadTextFileResponse {
                                     content: _rt::string_lift(bytes10),
                                 }
                             };
@@ -4629,7 +4838,7 @@ pub mod yoshuawuyts {
                                 let l11 = i32::from(
                                     *ptr5.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
                                 );
-                                use super::super::super::yoshuawuyts::acp::types::ErrorCode as V13;
+                                use super::super::super::yoshuawuyts::acp::errors::ErrorCode as V13;
                                 let v13 = match l11 {
                                     0 => V13::ParseError,
                                     1 => V13::InvalidRequest,
@@ -4661,7 +4870,7 @@ pub mod yoshuawuyts {
                                     len16,
                                     len16,
                                 );
-                                super::super::super::yoshuawuyts::acp::types::Error {
+                                super::super::super::yoshuawuyts::acp::errors::Error {
                                     code: v13,
                                     message: _rt::string_lift(bytes16),
                                 }
@@ -4693,7 +4902,7 @@ pub mod yoshuawuyts {
                         [::core::mem::MaybeUninit::uninit(); 8
                             + 3 * ::core::mem::size_of::<*const u8>()],
                     );
-                    let super::super::super::yoshuawuyts::acp::types::WriteTextFileRequest {
+                    let super::super::super::yoshuawuyts::acp::filesystem::WriteTextFileRequest {
                         session_id: session_id0,
                         path: path0,
                         content: content0,
@@ -4709,7 +4918,7 @@ pub mod yoshuawuyts {
                     let len3 = vec3.len();
                     let ptr4 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@2.0.6")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "write-text-file"]
                         fn wit_import5(
@@ -4754,7 +4963,7 @@ pub mod yoshuawuyts {
                                 let l7 = i32::from(
                                     *ptr4.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
                                 );
-                                use super::super::super::yoshuawuyts::acp::types::ErrorCode as V9;
+                                use super::super::super::yoshuawuyts::acp::errors::ErrorCode as V9;
                                 let v9 = match l7 {
                                     0 => V9::ParseError,
                                     1 => V9::InvalidRequest,
@@ -4786,7 +4995,7 @@ pub mod yoshuawuyts {
                                     len12,
                                     len12,
                                 );
-                                super::super::super::yoshuawuyts::acp::types::Error {
+                                super::super::super::yoshuawuyts::acp::errors::Error {
                                     code: v9,
                                     message: _rt::string_lift(bytes12),
                                 }
@@ -4820,7 +5029,7 @@ pub mod yoshuawuyts {
                         [::core::mem::MaybeUninit::uninit(); 8
                             + 3 * ::core::mem::size_of::<*const u8>()],
                     );
-                    let super::super::super::yoshuawuyts::acp::types::CreateTerminalRequest {
+                    let super::super::super::yoshuawuyts::acp::terminals::CreateTerminalRequest {
                         session_id: session_id0,
                         command: command0,
                         args: args0,
@@ -4867,7 +5076,7 @@ pub mod yoshuawuyts {
                         let base = result8
                             .add(i * (4 * ::core::mem::size_of::<*const u8>()));
                         {
-                            let super::super::super::yoshuawuyts::acp::types::EnvVar {
+                            let super::super::super::yoshuawuyts::acp::sessions::EnvVar {
                                 name: name5,
                                 value: value5,
                             } = e;
@@ -4904,7 +5113,7 @@ pub mod yoshuawuyts {
                     };
                     let ptr12 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@2.0.6")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "create-terminal"]
                         fn wit_import13(
@@ -4975,7 +5184,7 @@ pub mod yoshuawuyts {
                                     len17,
                                     len17,
                                 );
-                                super::super::super::yoshuawuyts::acp::types::CreateTerminalResponse {
+                                super::super::super::yoshuawuyts::acp::terminals::CreateTerminalResponse {
                                     terminal_id: _rt::string_lift(bytes17),
                                 }
                             };
@@ -4986,7 +5195,7 @@ pub mod yoshuawuyts {
                                 let l18 = i32::from(
                                     *ptr12.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
                                 );
-                                use super::super::super::yoshuawuyts::acp::types::ErrorCode as V20;
+                                use super::super::super::yoshuawuyts::acp::errors::ErrorCode as V20;
                                 let v20 = match l18 {
                                     0 => V20::ParseError,
                                     1 => V20::InvalidRequest,
@@ -5018,7 +5227,7 @@ pub mod yoshuawuyts {
                                     len23,
                                     len23,
                                 );
-                                super::super::super::yoshuawuyts::acp::types::Error {
+                                super::super::super::yoshuawuyts::acp::errors::Error {
                                     code: v20,
                                     message: _rt::string_lift(bytes23),
                                 }
@@ -5061,7 +5270,7 @@ pub mod yoshuawuyts {
                     let len1 = vec1.len();
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@2.0.6")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "get-terminal-output"]
                         fn wit_import3(
@@ -5109,7 +5318,7 @@ pub mod yoshuawuyts {
                                         .add(4 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>(),
                                 );
-                                super::super::super::yoshuawuyts::acp::types::TerminalOutput {
+                                super::super::super::yoshuawuyts::acp::terminals::TerminalOutput {
                                     output: _rt::string_lift(bytes7),
                                     truncated: _rt::bool_lift(l8 as u8),
                                     exit_status: match l9 {
@@ -5126,7 +5335,7 @@ pub mod yoshuawuyts {
                                                         .add(8 + 5 * ::core::mem::size_of::<*const u8>())
                                                         .cast::<u8>(),
                                                 );
-                                                super::super::super::yoshuawuyts::acp::types::TerminalExitStatus {
+                                                super::super::super::yoshuawuyts::acp::terminals::TerminalExitStatus {
                                                     exit_code: match l10 {
                                                         0 => None,
                                                         1 => {
@@ -5177,7 +5386,7 @@ pub mod yoshuawuyts {
                                 let l16 = i32::from(
                                     *ptr2.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
                                 );
-                                use super::super::super::yoshuawuyts::acp::types::ErrorCode as V18;
+                                use super::super::super::yoshuawuyts::acp::errors::ErrorCode as V18;
                                 let v18 = match l16 {
                                     0 => V18::ParseError,
                                     1 => V18::InvalidRequest,
@@ -5209,7 +5418,7 @@ pub mod yoshuawuyts {
                                     len21,
                                     len21,
                                 );
-                                super::super::super::yoshuawuyts::acp::types::Error {
+                                super::super::super::yoshuawuyts::acp::errors::Error {
                                     code: v18,
                                     message: _rt::string_lift(bytes21),
                                 }
@@ -5251,7 +5460,7 @@ pub mod yoshuawuyts {
                     let len1 = vec1.len();
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@2.0.6")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "wait-for-terminal-exit"]
                         fn wit_import3(
@@ -5285,7 +5494,7 @@ pub mod yoshuawuyts {
                                         .add(8 + 1 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>(),
                                 );
-                                super::super::super::yoshuawuyts::acp::types::TerminalExitStatus {
+                                super::super::super::yoshuawuyts::acp::terminals::TerminalExitStatus {
                                     exit_code: match l5 {
                                         0 => None,
                                         1 => {
@@ -5330,7 +5539,7 @@ pub mod yoshuawuyts {
                                 let l11 = i32::from(
                                     *ptr2.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
                                 );
-                                use super::super::super::yoshuawuyts::acp::types::ErrorCode as V13;
+                                use super::super::super::yoshuawuyts::acp::errors::ErrorCode as V13;
                                 let v13 = match l11 {
                                     0 => V13::ParseError,
                                     1 => V13::InvalidRequest,
@@ -5362,7 +5571,7 @@ pub mod yoshuawuyts {
                                     len16,
                                     len16,
                                 );
-                                super::super::super::yoshuawuyts::acp::types::Error {
+                                super::super::super::yoshuawuyts::acp::errors::Error {
                                     code: v13,
                                     message: _rt::string_lift(bytes16),
                                 }
@@ -5405,7 +5614,7 @@ pub mod yoshuawuyts {
                     let len1 = vec1.len();
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@2.0.6")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "kill-terminal"]
                         fn wit_import3(
@@ -5438,7 +5647,7 @@ pub mod yoshuawuyts {
                                 let l5 = i32::from(
                                     *ptr2.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
                                 );
-                                use super::super::super::yoshuawuyts::acp::types::ErrorCode as V7;
+                                use super::super::super::yoshuawuyts::acp::errors::ErrorCode as V7;
                                 let v7 = match l5 {
                                     0 => V7::ParseError,
                                     1 => V7::InvalidRequest,
@@ -5470,7 +5679,7 @@ pub mod yoshuawuyts {
                                     len10,
                                     len10,
                                 );
-                                super::super::super::yoshuawuyts::acp::types::Error {
+                                super::super::super::yoshuawuyts::acp::errors::Error {
                                     code: v7,
                                     message: _rt::string_lift(bytes10),
                                 }
@@ -5513,7 +5722,7 @@ pub mod yoshuawuyts {
                     let len1 = vec1.len();
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@2.0.6")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
                     unsafe extern "C" {
                         #[link_name = "release-terminal"]
                         fn wit_import3(
@@ -5546,7 +5755,7 @@ pub mod yoshuawuyts {
                                 let l5 = i32::from(
                                     *ptr2.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
                                 );
-                                use super::super::super::yoshuawuyts::acp::types::ErrorCode as V7;
+                                use super::super::super::yoshuawuyts::acp::errors::ErrorCode as V7;
                                 let v7 = match l5 {
                                     0 => V7::ParseError,
                                     1 => V7::InvalidRequest,
@@ -5578,7 +5787,7 @@ pub mod yoshuawuyts {
                                     len10,
                                     len10,
                                 );
-                                super::super::super::yoshuawuyts::acp::types::Error {
+                                super::super::super::yoshuawuyts::acp::errors::Error {
                                     code: v7,
                                     message: _rt::string_lift(bytes10),
                                 }
@@ -5588,6 +5797,272 @@ pub mod yoshuawuyts {
                         _ => _rt::invalid_enum_discriminant(),
                     };
                     result11
+                }
+            }
+        }
+        /// Connection initialization: capabilities, identification, and authentication.
+        ///
+        /// See: <https://agentclientprotocol.com/protocol/initialization>
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod init {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
+            /// Identification metadata for a client or agent implementation.
+            ///
+            /// See: <https://agentclientprotocol.com/protocol/initialization#implementation-information>
+            #[derive(Clone)]
+            pub struct ImplementationInfo {
+                /// Programmatic name (e.g. `"my-agent"`).
+                pub name: _rt::String,
+                /// Optional human-readable display name.
+                pub title: Option<_rt::String>,
+                /// Implementation version (e.g. `"1.0.0"`).
+                pub version: _rt::String,
+            }
+            impl ::core::fmt::Debug for ImplementationInfo {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("ImplementationInfo")
+                        .field("name", &self.name)
+                        .field("title", &self.title)
+                        .field("version", &self.version)
+                        .finish()
+                }
+            }
+            /// ------------------------------------------------------------------
+            /// Capabilities
+            ///
+            /// See: https://agentclientprotocol.com/protocol/initialization#capabilities
+            /// ------------------------------------------------------------------
+            /// File system features the client supports.
+            #[repr(C)]
+            #[derive(Clone, Copy)]
+            pub struct FsCapabilities {
+                /// Client supports `read-text-file`.
+                pub read_text_file: bool,
+                /// Client supports `write-text-file`.
+                pub write_text_file: bool,
+            }
+            impl ::core::fmt::Debug for FsCapabilities {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("FsCapabilities")
+                        .field("read-text-file", &self.read_text_file)
+                        .field("write-text-file", &self.write_text_file)
+                        .finish()
+                }
+            }
+            /// Capabilities advertised by the client during `initialize`.
+            #[repr(C)]
+            #[derive(Clone, Copy)]
+            pub struct ClientCapabilities {
+                /// File system read/write capabilities.
+                pub fs: FsCapabilities,
+                /// Whether the client supports the terminal API.
+                pub terminal: bool,
+            }
+            impl ::core::fmt::Debug for ClientCapabilities {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("ClientCapabilities")
+                        .field("fs", &self.fs)
+                        .field("terminal", &self.terminal)
+                        .finish()
+                }
+            }
+            /// Content types the agent can accept in `prompt` requests beyond the
+            /// baseline (text and resource links, which are always supported).
+            #[repr(C)]
+            #[derive(Clone, Copy)]
+            pub struct PromptCapabilities {
+                /// Image content blocks may appear in prompts.
+                pub image: bool,
+                /// Audio content blocks may appear in prompts.
+                pub audio: bool,
+                /// Embedded resources may appear in prompts.
+                pub embedded_context: bool,
+            }
+            impl ::core::fmt::Debug for PromptCapabilities {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("PromptCapabilities")
+                        .field("image", &self.image)
+                        .field("audio", &self.audio)
+                        .field("embedded-context", &self.embedded_context)
+                        .finish()
+                }
+            }
+            /// MCP transports the agent supports for `mcp-server` configurations.
+            #[repr(C)]
+            #[derive(Clone, Copy)]
+            pub struct McpCapabilities {
+                /// HTTP transport.
+                pub http: bool,
+                /// SSE transport (deprecated by the MCP spec).
+                pub sse: bool,
+            }
+            impl ::core::fmt::Debug for McpCapabilities {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("McpCapabilities")
+                        .field("http", &self.http)
+                        .field("sse", &self.sse)
+                        .finish()
+                }
+            }
+            /// Capabilities related to session lifecycle methods.
+            #[repr(C)]
+            #[derive(Clone, Copy)]
+            pub struct SessionCapabilities {
+                /// Whether the agent supports `list-sessions`.
+                pub list: bool,
+                /// Whether the agent supports `resume-session`.
+                pub resume: bool,
+                /// Whether the agent supports `close-session`.
+                pub close: bool,
+            }
+            impl ::core::fmt::Debug for SessionCapabilities {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("SessionCapabilities")
+                        .field("list", &self.list)
+                        .field("resume", &self.resume)
+                        .field("close", &self.close)
+                        .finish()
+                }
+            }
+            /// Capabilities advertised by the agent during `initialize`.
+            #[repr(C)]
+            #[derive(Clone, Copy)]
+            pub struct AgentCapabilities {
+                /// Whether the agent supports `load-session`.
+                pub load_session: bool,
+                /// Content types the agent accepts in prompts.
+                pub prompt_capabilities: PromptCapabilities,
+                /// MCP transports the agent supports.
+                pub mcp_capabilities: McpCapabilities,
+                /// Optional session lifecycle capabilities (list/resume/close).
+                pub session_capabilities: SessionCapabilities,
+            }
+            impl ::core::fmt::Debug for AgentCapabilities {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("AgentCapabilities")
+                        .field("load-session", &self.load_session)
+                        .field("prompt-capabilities", &self.prompt_capabilities)
+                        .field("mcp-capabilities", &self.mcp_capabilities)
+                        .field("session-capabilities", &self.session_capabilities)
+                        .finish()
+                }
+            }
+            /// ------------------------------------------------------------------
+            /// Authentication
+            ///
+            /// See: https://agentclientprotocol.com/protocol/initialization#authentication
+            /// ------------------------------------------------------------------
+            /// An authentication method the agent supports.
+            #[derive(Clone)]
+            pub struct AuthMethod {
+                /// Stable identifier for this method.
+                pub id: _rt::String,
+                /// Human-readable display name.
+                pub name: _rt::String,
+                /// Optional longer description.
+                pub description: Option<_rt::String>,
+            }
+            impl ::core::fmt::Debug for AuthMethod {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("AuthMethod")
+                        .field("id", &self.id)
+                        .field("name", &self.name)
+                        .field("description", &self.description)
+                        .finish()
+                }
+            }
+            /// Parameters to `authenticate`.
+            #[derive(Clone)]
+            pub struct AuthenticateRequest {
+                /// The id of the auth method to use, from `auth-methods` in
+                /// `initialize-response`.
+                pub method_id: _rt::String,
+            }
+            impl ::core::fmt::Debug for AuthenticateRequest {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("AuthenticateRequest")
+                        .field("method-id", &self.method_id)
+                        .finish()
+                }
+            }
+            /// ------------------------------------------------------------------
+            /// Initialize
+            /// ------------------------------------------------------------------
+            /// Parameters to `initialize`.
+            #[derive(Clone)]
+            pub struct InitializeRequest {
+                /// The latest ACP protocol major version the client supports.
+                pub protocol_version: u32,
+                /// What the client can do.
+                pub client_capabilities: ClientCapabilities,
+                /// Optional client identification.
+                pub client_info: Option<ImplementationInfo>,
+            }
+            impl ::core::fmt::Debug for InitializeRequest {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("InitializeRequest")
+                        .field("protocol-version", &self.protocol_version)
+                        .field("client-capabilities", &self.client_capabilities)
+                        .field("client-info", &self.client_info)
+                        .finish()
+                }
+            }
+            /// Response to `initialize`.
+            #[derive(Clone)]
+            pub struct InitializeResponse {
+                /// The protocol major version the agent has selected.
+                pub protocol_version: u32,
+                /// What the agent can do.
+                pub agent_capabilities: AgentCapabilities,
+                /// Optional agent identification.
+                pub agent_info: Option<ImplementationInfo>,
+                /// Authentication methods available, if any.
+                pub auth_methods: _rt::Vec<AuthMethod>,
+            }
+            impl ::core::fmt::Debug for InitializeResponse {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("InitializeResponse")
+                        .field("protocol-version", &self.protocol_version)
+                        .field("agent-capabilities", &self.agent_capabilities)
+                        .field("agent-info", &self.agent_info)
+                        .field("auth-methods", &self.auth_methods)
+                        .finish()
                 }
             }
         }
@@ -5608,16 +6083,22 @@ pub mod exports {
                 #[doc(hidden)]
                 static __FORCE_SECTION_REF: fn() = super::super::super::super::__link_custom_section_describing_imports;
                 use super::super::super::super::_rt;
-                pub type InitializeRequest = super::super::super::super::yoshuawuyts::acp::types::InitializeRequest;
-                pub type InitializeResponse = super::super::super::super::yoshuawuyts::acp::types::InitializeResponse;
-                pub type AuthenticateRequest = super::super::super::super::yoshuawuyts::acp::types::AuthenticateRequest;
-                pub type NewSessionRequest = super::super::super::super::yoshuawuyts::acp::types::NewSessionRequest;
-                pub type NewSessionResponse = super::super::super::super::yoshuawuyts::acp::types::NewSessionResponse;
-                pub type LoadSessionRequest = super::super::super::super::yoshuawuyts::acp::types::LoadSessionRequest;
-                pub type PromptRequest = super::super::super::super::yoshuawuyts::acp::types::PromptRequest;
-                pub type PromptResponse = super::super::super::super::yoshuawuyts::acp::types::PromptResponse;
-                pub type SessionId = super::super::super::super::yoshuawuyts::acp::types::SessionId;
-                pub type Error = super::super::super::super::yoshuawuyts::acp::types::Error;
+                pub type Error = super::super::super::super::yoshuawuyts::acp::errors::Error;
+                pub type InitializeRequest = super::super::super::super::yoshuawuyts::acp::init::InitializeRequest;
+                pub type InitializeResponse = super::super::super::super::yoshuawuyts::acp::init::InitializeResponse;
+                pub type AuthenticateRequest = super::super::super::super::yoshuawuyts::acp::init::AuthenticateRequest;
+                pub type SessionId = super::super::super::super::yoshuawuyts::acp::sessions::SessionId;
+                pub type NewSessionRequest = super::super::super::super::yoshuawuyts::acp::sessions::NewSessionRequest;
+                pub type NewSessionResponse = super::super::super::super::yoshuawuyts::acp::sessions::NewSessionResponse;
+                pub type LoadSessionRequest = super::super::super::super::yoshuawuyts::acp::sessions::LoadSessionRequest;
+                pub type LoadSessionResponse = super::super::super::super::yoshuawuyts::acp::sessions::LoadSessionResponse;
+                pub type ListSessionsRequest = super::super::super::super::yoshuawuyts::acp::sessions::ListSessionsRequest;
+                pub type ListSessionsResponse = super::super::super::super::yoshuawuyts::acp::sessions::ListSessionsResponse;
+                pub type ResumeSessionRequest = super::super::super::super::yoshuawuyts::acp::sessions::ResumeSessionRequest;
+                pub type ResumeSessionResponse = super::super::super::super::yoshuawuyts::acp::sessions::ResumeSessionResponse;
+                pub type SetSessionModeRequest = super::super::super::super::yoshuawuyts::acp::sessions::SetSessionModeRequest;
+                pub type PromptRequest = super::super::super::super::yoshuawuyts::acp::prompts::PromptRequest;
+                pub type PromptResponse = super::super::super::super::yoshuawuyts::acp::prompts::PromptResponse;
                 #[doc(hidden)]
                 #[allow(non_snake_case, unused_unsafe)]
                 pub unsafe fn _export_initialize_cabi<T_: Guest>(
@@ -5637,10 +6118,10 @@ pub mod exports {
                     unsafe {
                         #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
                         let result3 = {
-                            T_::initialize(super::super::super::super::yoshuawuyts::acp::types::InitializeRequest {
+                            T_::initialize(super::super::super::super::yoshuawuyts::acp::init::InitializeRequest {
                                 protocol_version: arg0 as u32,
-                                client_capabilities: super::super::super::super::yoshuawuyts::acp::types::ClientCapabilities {
-                                    fs: super::super::super::super::yoshuawuyts::acp::types::FsCapabilities {
+                                client_capabilities: super::super::super::super::yoshuawuyts::acp::init::ClientCapabilities {
+                                    fs: super::super::super::super::yoshuawuyts::acp::init::FsCapabilities {
                                         read_text_file: _rt::bool_lift(arg1 as u8),
                                         write_text_file: _rt::bool_lift(arg2 as u8),
                                     },
@@ -5662,7 +6143,7 @@ pub mod exports {
                                                 len2,
                                                 len2,
                                             );
-                                            super::super::super::super::yoshuawuyts::acp::types::ImplementationInfo {
+                                            super::super::super::super::yoshuawuyts::acp::init::ImplementationInfo {
                                                 name: _rt::string_lift(bytes0),
                                                 title: match arg7 {
                                                     0 => None,
@@ -5693,7 +6174,7 @@ pub mod exports {
                         match result3 {
                             Ok(e) => {
                                 *ptr4.add(0).cast::<u8>() = (0i32) as u8;
-                                let super::super::super::super::yoshuawuyts::acp::types::InitializeResponse {
+                                let super::super::super::super::yoshuawuyts::acp::init::InitializeResponse {
                                     protocol_version: protocol_version5,
                                     agent_capabilities: agent_capabilities5,
                                     agent_info: agent_info5,
@@ -5702,10 +6183,11 @@ pub mod exports {
                                 *ptr4
                                     .add(::core::mem::size_of::<*const u8>())
                                     .cast::<i32>() = _rt::as_i32(protocol_version5);
-                                let super::super::super::super::yoshuawuyts::acp::types::AgentCapabilities {
+                                let super::super::super::super::yoshuawuyts::acp::init::AgentCapabilities {
                                     load_session: load_session6,
                                     prompt_capabilities: prompt_capabilities6,
                                     mcp_capabilities: mcp_capabilities6,
+                                    session_capabilities: session_capabilities6,
                                 } = agent_capabilities5;
                                 *ptr4
                                     .add(4 + 1 * ::core::mem::size_of::<*const u8>())
@@ -5713,7 +6195,7 @@ pub mod exports {
                                     true => 1,
                                     false => 0,
                                 }) as u8;
-                                let super::super::super::super::yoshuawuyts::acp::types::PromptCapabilities {
+                                let super::super::super::super::yoshuawuyts::acp::init::PromptCapabilities {
                                     image: image7,
                                     audio: audio7,
                                     embedded_context: embedded_context7,
@@ -5736,7 +6218,7 @@ pub mod exports {
                                     true => 1,
                                     false => 0,
                                 }) as u8;
-                                let super::super::super::super::yoshuawuyts::acp::types::McpCapabilities {
+                                let super::super::super::super::yoshuawuyts::acp::init::McpCapabilities {
                                     http: http8,
                                     sse: sse8,
                                 } = mcp_capabilities6;
@@ -5752,120 +6234,143 @@ pub mod exports {
                                     true => 1,
                                     false => 0,
                                 }) as u8;
+                                let super::super::super::super::yoshuawuyts::acp::init::SessionCapabilities {
+                                    list: list9,
+                                    resume: resume9,
+                                    close: close9,
+                                } = session_capabilities6;
+                                *ptr4
+                                    .add(10 + 1 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<u8>() = (match list9 {
+                                    true => 1,
+                                    false => 0,
+                                }) as u8;
+                                *ptr4
+                                    .add(11 + 1 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<u8>() = (match resume9 {
+                                    true => 1,
+                                    false => 0,
+                                }) as u8;
+                                *ptr4
+                                    .add(12 + 1 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<u8>() = (match close9 {
+                                    true => 1,
+                                    false => 0,
+                                }) as u8;
                                 match agent_info5 {
                                     Some(e) => {
                                         *ptr4
-                                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (1i32) as u8;
-                                        let super::super::super::super::yoshuawuyts::acp::types::ImplementationInfo {
-                                            name: name9,
-                                            title: title9,
-                                            version: version9,
+                                        let super::super::super::super::yoshuawuyts::acp::init::ImplementationInfo {
+                                            name: name10,
+                                            title: title10,
+                                            version: version10,
                                         } = e;
-                                        let vec10 = (name9.into_bytes()).into_boxed_slice();
-                                        let ptr10 = vec10.as_ptr().cast::<u8>();
-                                        let len10 = vec10.len();
-                                        ::core::mem::forget(vec10);
+                                        let vec11 = (name10.into_bytes()).into_boxed_slice();
+                                        let ptr11 = vec11.as_ptr().cast::<u8>();
+                                        let len11 = vec11.len();
+                                        ::core::mem::forget(vec11);
                                         *ptr4
-                                            .add(8 + 4 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len10;
+                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len11;
                                         *ptr4
-                                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr10.cast_mut();
-                                        match title9 {
+                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>() = ptr11.cast_mut();
+                                        match title10 {
                                             Some(e) => {
                                                 *ptr4
-                                                    .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
                                                     .cast::<u8>() = (1i32) as u8;
-                                                let vec11 = (e.into_bytes()).into_boxed_slice();
-                                                let ptr11 = vec11.as_ptr().cast::<u8>();
-                                                let len11 = vec11.len();
-                                                ::core::mem::forget(vec11);
+                                                let vec12 = (e.into_bytes()).into_boxed_slice();
+                                                let ptr12 = vec12.as_ptr().cast::<u8>();
+                                                let len12 = vec12.len();
+                                                ::core::mem::forget(vec12);
                                                 *ptr4
-                                                    .add(8 + 7 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len11;
+                                                    .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len12;
                                                 *ptr4
-                                                    .add(8 + 6 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>() = ptr11.cast_mut();
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr12.cast_mut();
                                             }
                                             None => {
                                                 *ptr4
-                                                    .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
                                                     .cast::<u8>() = (0i32) as u8;
                                             }
                                         };
-                                        let vec12 = (version9.into_bytes()).into_boxed_slice();
-                                        let ptr12 = vec12.as_ptr().cast::<u8>();
-                                        let len12 = vec12.len();
-                                        ::core::mem::forget(vec12);
+                                        let vec13 = (version10.into_bytes()).into_boxed_slice();
+                                        let ptr13 = vec13.as_ptr().cast::<u8>();
+                                        let len13 = vec13.len();
+                                        ::core::mem::forget(vec13);
                                         *ptr4
-                                            .add(8 + 9 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len12;
+                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len13;
                                         *ptr4
-                                            .add(8 + 8 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr12.cast_mut();
+                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>() = ptr13.cast_mut();
                                     }
                                     None => {
                                         *ptr4
-                                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (0i32) as u8;
                                     }
                                 };
-                                let vec17 = auth_methods5;
-                                let len17 = vec17.len();
-                                let layout17 = _rt::alloc::Layout::from_size_align(
-                                        vec17.len() * (7 * ::core::mem::size_of::<*const u8>()),
+                                let vec18 = auth_methods5;
+                                let len18 = vec18.len();
+                                let layout18 = _rt::alloc::Layout::from_size_align(
+                                        vec18.len() * (7 * ::core::mem::size_of::<*const u8>()),
                                         ::core::mem::size_of::<*const u8>(),
                                     )
                                     .unwrap();
-                                let (result17, _cleanup17) = wit_bindgen_rt::Cleanup::new(
-                                    layout17,
+                                let (result18, _cleanup18) = wit_bindgen_rt::Cleanup::new(
+                                    layout18,
                                 );
-                                if let Some(cleanup) = _cleanup17 {
+                                if let Some(cleanup) = _cleanup18 {
                                     cleanup.forget();
                                 }
-                                for (i, e) in vec17.into_iter().enumerate() {
-                                    let base = result17
+                                for (i, e) in vec18.into_iter().enumerate() {
+                                    let base = result18
                                         .add(i * (7 * ::core::mem::size_of::<*const u8>()));
                                     {
-                                        let super::super::super::super::yoshuawuyts::acp::types::AuthMethod {
-                                            id: id13,
-                                            name: name13,
-                                            description: description13,
+                                        let super::super::super::super::yoshuawuyts::acp::init::AuthMethod {
+                                            id: id14,
+                                            name: name14,
+                                            description: description14,
                                         } = e;
-                                        let vec14 = (id13.into_bytes()).into_boxed_slice();
-                                        let ptr14 = vec14.as_ptr().cast::<u8>();
-                                        let len14 = vec14.len();
-                                        ::core::mem::forget(vec14);
-                                        *base
-                                            .add(::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len14;
-                                        *base.add(0).cast::<*mut u8>() = ptr14.cast_mut();
-                                        let vec15 = (name13.into_bytes()).into_boxed_slice();
+                                        let vec15 = (id14.into_bytes()).into_boxed_slice();
                                         let ptr15 = vec15.as_ptr().cast::<u8>();
                                         let len15 = vec15.len();
                                         ::core::mem::forget(vec15);
                                         *base
-                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                            .add(::core::mem::size_of::<*const u8>())
                                             .cast::<usize>() = len15;
+                                        *base.add(0).cast::<*mut u8>() = ptr15.cast_mut();
+                                        let vec16 = (name14.into_bytes()).into_boxed_slice();
+                                        let ptr16 = vec16.as_ptr().cast::<u8>();
+                                        let len16 = vec16.len();
+                                        ::core::mem::forget(vec16);
+                                        *base
+                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len16;
                                         *base
                                             .add(2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr15.cast_mut();
-                                        match description13 {
+                                            .cast::<*mut u8>() = ptr16.cast_mut();
+                                        match description14 {
                                             Some(e) => {
                                                 *base
                                                     .add(4 * ::core::mem::size_of::<*const u8>())
                                                     .cast::<u8>() = (1i32) as u8;
-                                                let vec16 = (e.into_bytes()).into_boxed_slice();
-                                                let ptr16 = vec16.as_ptr().cast::<u8>();
-                                                let len16 = vec16.len();
-                                                ::core::mem::forget(vec16);
+                                                let vec17 = (e.into_bytes()).into_boxed_slice();
+                                                let ptr17 = vec17.as_ptr().cast::<u8>();
+                                                let len17 = vec17.len();
+                                                ::core::mem::forget(vec17);
                                                 *base
                                                     .add(6 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len16;
+                                                    .cast::<usize>() = len17;
                                                 *base
                                                     .add(5 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>() = ptr16.cast_mut();
+                                                    .cast::<*mut u8>() = ptr17.cast_mut();
                                             }
                                             None => {
                                                 *base
@@ -5876,56 +6381,56 @@ pub mod exports {
                                     }
                                 }
                                 *ptr4
-                                    .add(8 + 11 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len17;
+                                    .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>() = len18;
                                 *ptr4
-                                    .add(8 + 10 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = result17;
+                                    .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>() = result18;
                             }
                             Err(e) => {
                                 *ptr4.add(0).cast::<u8>() = (1i32) as u8;
-                                let super::super::super::super::yoshuawuyts::acp::types::Error {
-                                    code: code18,
-                                    message: message18,
+                                let super::super::super::super::yoshuawuyts::acp::errors::Error {
+                                    code: code19,
+                                    message: message19,
                                 } = e;
-                                use super::super::super::super::yoshuawuyts::acp::types::ErrorCode as V19;
-                                match code18 {
-                                    V19::ParseError => {
+                                use super::super::super::super::yoshuawuyts::acp::errors::ErrorCode as V20;
+                                match code19 {
+                                    V20::ParseError => {
                                         *ptr4
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (0i32) as u8;
                                     }
-                                    V19::InvalidRequest => {
+                                    V20::InvalidRequest => {
                                         *ptr4
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (1i32) as u8;
                                     }
-                                    V19::MethodNotFound => {
+                                    V20::MethodNotFound => {
                                         *ptr4
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (2i32) as u8;
                                     }
-                                    V19::InvalidParams => {
+                                    V20::InvalidParams => {
                                         *ptr4
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (3i32) as u8;
                                     }
-                                    V19::InternalError => {
+                                    V20::InternalError => {
                                         *ptr4
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (4i32) as u8;
                                     }
-                                    V19::AuthRequired => {
+                                    V20::AuthRequired => {
                                         *ptr4
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (5i32) as u8;
                                     }
-                                    V19::ResourceNotFound => {
+                                    V20::ResourceNotFound => {
                                         *ptr4
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (6i32) as u8;
                                     }
-                                    V19::Other(e) => {
+                                    V20::Other(e) => {
                                         *ptr4
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (7i32) as u8;
@@ -5934,16 +6439,16 @@ pub mod exports {
                                             .cast::<i32>() = _rt::as_i32(e);
                                     }
                                 }
-                                let vec20 = (message18.into_bytes()).into_boxed_slice();
-                                let ptr20 = vec20.as_ptr().cast::<u8>();
-                                let len20 = vec20.len();
-                                ::core::mem::forget(vec20);
+                                let vec21 = (message19.into_bytes()).into_boxed_slice();
+                                let ptr21 = vec21.as_ptr().cast::<u8>();
+                                let len21 = vec21.len();
+                                ::core::mem::forget(vec21);
                                 *ptr4
                                     .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len20;
+                                    .cast::<usize>() = len21;
                                 *ptr4
                                     .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr20.cast_mut();
+                                    .cast::<*mut u8>() = ptr21.cast_mut();
                             }
                         };
                         ptr4
@@ -5958,50 +6463,50 @@ pub mod exports {
                             0 => {
                                 let l1 = i32::from(
                                     *arg0
-                                        .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                        .add(16 + 1 * ::core::mem::size_of::<*const u8>())
                                         .cast::<u8>(),
                                 );
                                 match l1 {
                                     0 => {}
                                     _ => {
                                         let l2 = *arg0
-                                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
                                             .cast::<*mut u8>();
                                         let l3 = *arg0
-                                            .add(8 + 4 * ::core::mem::size_of::<*const u8>())
+                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
                                             .cast::<usize>();
                                         _rt::cabi_dealloc(l2, l3, 1);
                                         let l4 = i32::from(
                                             *arg0
-                                                .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                                .add(16 + 4 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<u8>(),
                                         );
                                         match l4 {
                                             0 => {}
                                             _ => {
                                                 let l5 = *arg0
-                                                    .add(8 + 6 * ::core::mem::size_of::<*const u8>())
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
                                                     .cast::<*mut u8>();
                                                 let l6 = *arg0
-                                                    .add(8 + 7 * ::core::mem::size_of::<*const u8>())
+                                                    .add(16 + 6 * ::core::mem::size_of::<*const u8>())
                                                     .cast::<usize>();
                                                 _rt::cabi_dealloc(l5, l6, 1);
                                             }
                                         }
                                         let l7 = *arg0
-                                            .add(8 + 8 * ::core::mem::size_of::<*const u8>())
+                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
                                             .cast::<*mut u8>();
                                         let l8 = *arg0
-                                            .add(8 + 9 * ::core::mem::size_of::<*const u8>())
+                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
                                             .cast::<usize>();
                                         _rt::cabi_dealloc(l7, l8, 1);
                                     }
                                 }
                                 let l9 = *arg0
-                                    .add(8 + 10 * ::core::mem::size_of::<*const u8>())
+                                    .add(16 + 9 * ::core::mem::size_of::<*const u8>())
                                     .cast::<*mut u8>();
                                 let l10 = *arg0
-                                    .add(8 + 11 * ::core::mem::size_of::<*const u8>())
+                                    .add(16 + 10 * ::core::mem::size_of::<*const u8>())
                                     .cast::<usize>();
                                 let base18 = l9;
                                 let len18 = l10;
@@ -6073,7 +6578,7 @@ pub mod exports {
                                 len0,
                                 len0,
                             );
-                            T_::authenticate(super::super::super::super::yoshuawuyts::acp::types::AuthenticateRequest {
+                            T_::authenticate(super::super::super::super::yoshuawuyts::acp::init::AuthenticateRequest {
                                 method_id: _rt::string_lift(bytes0),
                             })
                         };
@@ -6084,11 +6589,11 @@ pub mod exports {
                             }
                             Err(e) => {
                                 *ptr2.add(0).cast::<u8>() = (1i32) as u8;
-                                let super::super::super::super::yoshuawuyts::acp::types::Error {
+                                let super::super::super::super::yoshuawuyts::acp::errors::Error {
                                     code: code3,
                                     message: message3,
                                 } = e;
-                                use super::super::super::super::yoshuawuyts::acp::types::ErrorCode as V4;
+                                use super::super::super::super::yoshuawuyts::acp::errors::ErrorCode as V4;
                                 match code3 {
                                     V4::ParseError => {
                                         *ptr2
@@ -6193,7 +6698,7 @@ pub mod exports {
                                     .add(i * (9 * ::core::mem::size_of::<*const u8>()));
                                 let e54 = {
                                     let l1 = i32::from(*base.add(0).cast::<u8>());
-                                    use super::super::super::super::yoshuawuyts::acp::types::McpServer as V53;
+                                    use super::super::super::super::yoshuawuyts::acp::sessions::McpServer as V53;
                                     let v53 = match l1 {
                                         0 => {
                                             let e53 = {
@@ -6288,7 +6793,7 @@ pub mod exports {
                                                             len21,
                                                             len21,
                                                         );
-                                                        super::super::super::super::yoshuawuyts::acp::types::EnvVar {
+                                                        super::super::super::super::yoshuawuyts::acp::sessions::EnvVar {
                                                             name: _rt::string_lift(bytes18),
                                                             value: _rt::string_lift(bytes21),
                                                         }
@@ -6300,7 +6805,7 @@ pub mod exports {
                                                     len22 * (4 * ::core::mem::size_of::<*const u8>()),
                                                     ::core::mem::size_of::<*const u8>(),
                                                 );
-                                                super::super::super::super::yoshuawuyts::acp::types::McpServerStdio {
+                                                super::super::super::super::yoshuawuyts::acp::sessions::McpServerStdio {
                                                     name: _rt::string_lift(bytes4),
                                                     command: _rt::string_lift(bytes7),
                                                     args: result13,
@@ -6370,7 +6875,7 @@ pub mod exports {
                                                             len36,
                                                             len36,
                                                         );
-                                                        super::super::super::super::yoshuawuyts::acp::types::HttpHeader {
+                                                        super::super::super::super::yoshuawuyts::acp::sessions::HttpHeader {
                                                             name: _rt::string_lift(bytes33),
                                                             value: _rt::string_lift(bytes36),
                                                         }
@@ -6382,7 +6887,7 @@ pub mod exports {
                                                     len37 * (4 * ::core::mem::size_of::<*const u8>()),
                                                     ::core::mem::size_of::<*const u8>(),
                                                 );
-                                                super::super::super::super::yoshuawuyts::acp::types::McpServerHttp {
+                                                super::super::super::super::yoshuawuyts::acp::sessions::McpServerHttp {
                                                     name: _rt::string_lift(bytes25),
                                                     url: _rt::string_lift(bytes28),
                                                     headers: result37,
@@ -6452,7 +6957,7 @@ pub mod exports {
                                                             len51,
                                                             len51,
                                                         );
-                                                        super::super::super::super::yoshuawuyts::acp::types::HttpHeader {
+                                                        super::super::super::super::yoshuawuyts::acp::sessions::HttpHeader {
                                                             name: _rt::string_lift(bytes48),
                                                             value: _rt::string_lift(bytes51),
                                                         }
@@ -6464,7 +6969,7 @@ pub mod exports {
                                                     len52 * (4 * ::core::mem::size_of::<*const u8>()),
                                                     ::core::mem::size_of::<*const u8>(),
                                                 );
-                                                super::super::super::super::yoshuawuyts::acp::types::McpServerSse {
+                                                super::super::super::super::yoshuawuyts::acp::sessions::McpServerSse {
                                                     name: _rt::string_lift(bytes40),
                                                     url: _rt::string_lift(bytes43),
                                                     headers: result52,
@@ -6482,7 +6987,7 @@ pub mod exports {
                                 len54 * (9 * ::core::mem::size_of::<*const u8>()),
                                 ::core::mem::size_of::<*const u8>(),
                             );
-                            T_::new_session(super::super::super::super::yoshuawuyts::acp::types::NewSessionRequest {
+                            T_::new_session(super::super::super::super::yoshuawuyts::acp::sessions::NewSessionRequest {
                                 cwd: _rt::string_lift(bytes0),
                                 mcp_servers: result54,
                             })
@@ -6491,8 +6996,9 @@ pub mod exports {
                         match result55 {
                             Ok(e) => {
                                 *ptr56.add(0).cast::<u8>() = (0i32) as u8;
-                                let super::super::super::super::yoshuawuyts::acp::types::NewSessionResponse {
+                                let super::super::super::super::yoshuawuyts::acp::sessions::NewSessionResponse {
                                     session_id: session_id57,
+                                    modes: modes57,
                                 } = e;
                                 let vec58 = (session_id57.into_bytes()).into_boxed_slice();
                                 let ptr58 = vec58.as_ptr().cast::<u8>();
@@ -6504,51 +7010,148 @@ pub mod exports {
                                 *ptr56
                                     .add(::core::mem::size_of::<*const u8>())
                                     .cast::<*mut u8>() = ptr58.cast_mut();
+                                match modes57 {
+                                    Some(e) => {
+                                        *ptr56
+                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (1i32) as u8;
+                                        let super::super::super::super::yoshuawuyts::acp::sessions::SessionModeState {
+                                            current_mode_id: current_mode_id59,
+                                            available_modes: available_modes59,
+                                        } = e;
+                                        let vec60 = (current_mode_id59.into_bytes())
+                                            .into_boxed_slice();
+                                        let ptr60 = vec60.as_ptr().cast::<u8>();
+                                        let len60 = vec60.len();
+                                        ::core::mem::forget(vec60);
+                                        *ptr56
+                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len60;
+                                        *ptr56
+                                            .add(4 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>() = ptr60.cast_mut();
+                                        let vec65 = available_modes59;
+                                        let len65 = vec65.len();
+                                        let layout65 = _rt::alloc::Layout::from_size_align(
+                                                vec65.len() * (7 * ::core::mem::size_of::<*const u8>()),
+                                                ::core::mem::size_of::<*const u8>(),
+                                            )
+                                            .unwrap();
+                                        let (result65, _cleanup65) = wit_bindgen_rt::Cleanup::new(
+                                            layout65,
+                                        );
+                                        if let Some(cleanup) = _cleanup65 {
+                                            cleanup.forget();
+                                        }
+                                        for (i, e) in vec65.into_iter().enumerate() {
+                                            let base = result65
+                                                .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let super::super::super::super::yoshuawuyts::acp::sessions::SessionMode {
+                                                    id: id61,
+                                                    name: name61,
+                                                    description: description61,
+                                                } = e;
+                                                let vec62 = (id61.into_bytes()).into_boxed_slice();
+                                                let ptr62 = vec62.as_ptr().cast::<u8>();
+                                                let len62 = vec62.len();
+                                                ::core::mem::forget(vec62);
+                                                *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len62;
+                                                *base.add(0).cast::<*mut u8>() = ptr62.cast_mut();
+                                                let vec63 = (name61.into_bytes()).into_boxed_slice();
+                                                let ptr63 = vec63.as_ptr().cast::<u8>();
+                                                let len63 = vec63.len();
+                                                ::core::mem::forget(vec63);
+                                                *base
+                                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len63;
+                                                *base
+                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr63.cast_mut();
+                                                match description61 {
+                                                    Some(e) => {
+                                                        *base
+                                                            .add(4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        let vec64 = (e.into_bytes()).into_boxed_slice();
+                                                        let ptr64 = vec64.as_ptr().cast::<u8>();
+                                                        let len64 = vec64.len();
+                                                        ::core::mem::forget(vec64);
+                                                        *base
+                                                            .add(6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len64;
+                                                        *base
+                                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr64.cast_mut();
+                                                    }
+                                                    None => {
+                                                        *base
+                                                            .add(4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                            }
+                                        }
+                                        *ptr56
+                                            .add(7 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len65;
+                                        *ptr56
+                                            .add(6 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>() = result65;
+                                    }
+                                    None => {
+                                        *ptr56
+                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (0i32) as u8;
+                                    }
+                                };
                             }
                             Err(e) => {
                                 *ptr56.add(0).cast::<u8>() = (1i32) as u8;
-                                let super::super::super::super::yoshuawuyts::acp::types::Error {
-                                    code: code59,
-                                    message: message59,
+                                let super::super::super::super::yoshuawuyts::acp::errors::Error {
+                                    code: code66,
+                                    message: message66,
                                 } = e;
-                                use super::super::super::super::yoshuawuyts::acp::types::ErrorCode as V60;
-                                match code59 {
-                                    V60::ParseError => {
+                                use super::super::super::super::yoshuawuyts::acp::errors::ErrorCode as V67;
+                                match code66 {
+                                    V67::ParseError => {
                                         *ptr56
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (0i32) as u8;
                                     }
-                                    V60::InvalidRequest => {
+                                    V67::InvalidRequest => {
                                         *ptr56
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (1i32) as u8;
                                     }
-                                    V60::MethodNotFound => {
+                                    V67::MethodNotFound => {
                                         *ptr56
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (2i32) as u8;
                                     }
-                                    V60::InvalidParams => {
+                                    V67::InvalidParams => {
                                         *ptr56
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (3i32) as u8;
                                     }
-                                    V60::InternalError => {
+                                    V67::InternalError => {
                                         *ptr56
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (4i32) as u8;
                                     }
-                                    V60::AuthRequired => {
+                                    V67::AuthRequired => {
                                         *ptr56
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (5i32) as u8;
                                     }
-                                    V60::ResourceNotFound => {
+                                    V67::ResourceNotFound => {
                                         *ptr56
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (6i32) as u8;
                                     }
-                                    V60::Other(e) => {
+                                    V67::Other(e) => {
                                         *ptr56
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (7i32) as u8;
@@ -6557,16 +7160,16 @@ pub mod exports {
                                             .cast::<i32>() = _rt::as_i32(e);
                                     }
                                 }
-                                let vec61 = (message59.into_bytes()).into_boxed_slice();
-                                let ptr61 = vec61.as_ptr().cast::<u8>();
-                                let len61 = vec61.len();
-                                ::core::mem::forget(vec61);
+                                let vec68 = (message66.into_bytes()).into_boxed_slice();
+                                let ptr68 = vec68.as_ptr().cast::<u8>();
+                                let len68 = vec68.len();
+                                ::core::mem::forget(vec68);
                                 *ptr56
                                     .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len61;
+                                    .cast::<usize>() = len68;
                                 *ptr56
                                     .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr61.cast_mut();
+                                    .cast::<*mut u8>() = ptr68.cast_mut();
                             }
                         };
                         ptr56
@@ -6586,15 +7189,80 @@ pub mod exports {
                                     .add(2 * ::core::mem::size_of::<*const u8>())
                                     .cast::<usize>();
                                 _rt::cabi_dealloc(l1, l2, 1);
+                                let l3 = i32::from(
+                                    *arg0
+                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>(),
+                                );
+                                match l3 {
+                                    0 => {}
+                                    _ => {
+                                        let l4 = *arg0
+                                            .add(4 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l5 = *arg0
+                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        _rt::cabi_dealloc(l4, l5, 1);
+                                        let l6 = *arg0
+                                            .add(6 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l7 = *arg0
+                                            .add(7 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let base15 = l6;
+                                        let len15 = l7;
+                                        for i in 0..len15 {
+                                            let base = base15
+                                                .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let l8 = *base.add(0).cast::<*mut u8>();
+                                                let l9 = *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l8, l9, 1);
+                                                let l10 = *base
+                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l11 = *base
+                                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l10, l11, 1);
+                                                let l12 = i32::from(
+                                                    *base
+                                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l12 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l13 = *base
+                                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l14 = *base
+                                                            .add(6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l13, l14, 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _rt::cabi_dealloc(
+                                            base15,
+                                            len15 * (7 * ::core::mem::size_of::<*const u8>()),
+                                            ::core::mem::size_of::<*const u8>(),
+                                        );
+                                    }
+                                }
                             }
                             _ => {
-                                let l3 = *arg0
+                                let l16 = *arg0
                                     .add(8 + 1 * ::core::mem::size_of::<*const u8>())
                                     .cast::<*mut u8>();
-                                let l4 = *arg0
+                                let l17 = *arg0
                                     .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                     .cast::<usize>();
-                                _rt::cabi_dealloc(l3, l4, 1);
+                                _rt::cabi_dealloc(l16, l17, 1);
                             }
                         }
                     }
@@ -6632,7 +7300,7 @@ pub mod exports {
                                     .add(i * (9 * ::core::mem::size_of::<*const u8>()));
                                 let e55 = {
                                     let l2 = i32::from(*base.add(0).cast::<u8>());
-                                    use super::super::super::super::yoshuawuyts::acp::types::McpServer as V54;
+                                    use super::super::super::super::yoshuawuyts::acp::sessions::McpServer as V54;
                                     let v54 = match l2 {
                                         0 => {
                                             let e54 = {
@@ -6727,7 +7395,7 @@ pub mod exports {
                                                             len22,
                                                             len22,
                                                         );
-                                                        super::super::super::super::yoshuawuyts::acp::types::EnvVar {
+                                                        super::super::super::super::yoshuawuyts::acp::sessions::EnvVar {
                                                             name: _rt::string_lift(bytes19),
                                                             value: _rt::string_lift(bytes22),
                                                         }
@@ -6739,7 +7407,7 @@ pub mod exports {
                                                     len23 * (4 * ::core::mem::size_of::<*const u8>()),
                                                     ::core::mem::size_of::<*const u8>(),
                                                 );
-                                                super::super::super::super::yoshuawuyts::acp::types::McpServerStdio {
+                                                super::super::super::super::yoshuawuyts::acp::sessions::McpServerStdio {
                                                     name: _rt::string_lift(bytes5),
                                                     command: _rt::string_lift(bytes8),
                                                     args: result14,
@@ -6809,7 +7477,7 @@ pub mod exports {
                                                             len37,
                                                             len37,
                                                         );
-                                                        super::super::super::super::yoshuawuyts::acp::types::HttpHeader {
+                                                        super::super::super::super::yoshuawuyts::acp::sessions::HttpHeader {
                                                             name: _rt::string_lift(bytes34),
                                                             value: _rt::string_lift(bytes37),
                                                         }
@@ -6821,7 +7489,7 @@ pub mod exports {
                                                     len38 * (4 * ::core::mem::size_of::<*const u8>()),
                                                     ::core::mem::size_of::<*const u8>(),
                                                 );
-                                                super::super::super::super::yoshuawuyts::acp::types::McpServerHttp {
+                                                super::super::super::super::yoshuawuyts::acp::sessions::McpServerHttp {
                                                     name: _rt::string_lift(bytes26),
                                                     url: _rt::string_lift(bytes29),
                                                     headers: result38,
@@ -6891,7 +7559,7 @@ pub mod exports {
                                                             len52,
                                                             len52,
                                                         );
-                                                        super::super::super::super::yoshuawuyts::acp::types::HttpHeader {
+                                                        super::super::super::super::yoshuawuyts::acp::sessions::HttpHeader {
                                                             name: _rt::string_lift(bytes49),
                                                             value: _rt::string_lift(bytes52),
                                                         }
@@ -6903,7 +7571,7 @@ pub mod exports {
                                                     len53 * (4 * ::core::mem::size_of::<*const u8>()),
                                                     ::core::mem::size_of::<*const u8>(),
                                                 );
-                                                super::super::super::super::yoshuawuyts::acp::types::McpServerSse {
+                                                super::super::super::super::yoshuawuyts::acp::sessions::McpServerSse {
                                                     name: _rt::string_lift(bytes41),
                                                     url: _rt::string_lift(bytes44),
                                                     headers: result53,
@@ -6921,7 +7589,7 @@ pub mod exports {
                                 len55 * (9 * ::core::mem::size_of::<*const u8>()),
                                 ::core::mem::size_of::<*const u8>(),
                             );
-                            T_::load_session(super::super::super::super::yoshuawuyts::acp::types::LoadSessionRequest {
+                            T_::load_session(super::super::super::super::yoshuawuyts::acp::sessions::LoadSessionRequest {
                                 session_id: _rt::string_lift(bytes0),
                                 cwd: _rt::string_lift(bytes1),
                                 mcp_servers: result55,
@@ -6929,53 +7597,153 @@ pub mod exports {
                         };
                         let ptr57 = (&raw mut _RET_AREA.0).cast::<u8>();
                         match result56 {
-                            Ok(_) => {
+                            Ok(e) => {
                                 *ptr57.add(0).cast::<u8>() = (0i32) as u8;
-                            }
-                            Err(e) => {
-                                *ptr57.add(0).cast::<u8>() = (1i32) as u8;
-                                let super::super::super::super::yoshuawuyts::acp::types::Error {
-                                    code: code58,
-                                    message: message58,
+                                let super::super::super::super::yoshuawuyts::acp::sessions::LoadSessionResponse {
+                                    modes: modes58,
                                 } = e;
-                                use super::super::super::super::yoshuawuyts::acp::types::ErrorCode as V59;
-                                match code58 {
-                                    V59::ParseError => {
+                                match modes58 {
+                                    Some(e) => {
+                                        *ptr57
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (1i32) as u8;
+                                        let super::super::super::super::yoshuawuyts::acp::sessions::SessionModeState {
+                                            current_mode_id: current_mode_id59,
+                                            available_modes: available_modes59,
+                                        } = e;
+                                        let vec60 = (current_mode_id59.into_bytes())
+                                            .into_boxed_slice();
+                                        let ptr60 = vec60.as_ptr().cast::<u8>();
+                                        let len60 = vec60.len();
+                                        ::core::mem::forget(vec60);
+                                        *ptr57
+                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len60;
+                                        *ptr57
+                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>() = ptr60.cast_mut();
+                                        let vec65 = available_modes59;
+                                        let len65 = vec65.len();
+                                        let layout65 = _rt::alloc::Layout::from_size_align(
+                                                vec65.len() * (7 * ::core::mem::size_of::<*const u8>()),
+                                                ::core::mem::size_of::<*const u8>(),
+                                            )
+                                            .unwrap();
+                                        let (result65, _cleanup65) = wit_bindgen_rt::Cleanup::new(
+                                            layout65,
+                                        );
+                                        if let Some(cleanup) = _cleanup65 {
+                                            cleanup.forget();
+                                        }
+                                        for (i, e) in vec65.into_iter().enumerate() {
+                                            let base = result65
+                                                .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let super::super::super::super::yoshuawuyts::acp::sessions::SessionMode {
+                                                    id: id61,
+                                                    name: name61,
+                                                    description: description61,
+                                                } = e;
+                                                let vec62 = (id61.into_bytes()).into_boxed_slice();
+                                                let ptr62 = vec62.as_ptr().cast::<u8>();
+                                                let len62 = vec62.len();
+                                                ::core::mem::forget(vec62);
+                                                *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len62;
+                                                *base.add(0).cast::<*mut u8>() = ptr62.cast_mut();
+                                                let vec63 = (name61.into_bytes()).into_boxed_slice();
+                                                let ptr63 = vec63.as_ptr().cast::<u8>();
+                                                let len63 = vec63.len();
+                                                ::core::mem::forget(vec63);
+                                                *base
+                                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len63;
+                                                *base
+                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr63.cast_mut();
+                                                match description61 {
+                                                    Some(e) => {
+                                                        *base
+                                                            .add(4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        let vec64 = (e.into_bytes()).into_boxed_slice();
+                                                        let ptr64 = vec64.as_ptr().cast::<u8>();
+                                                        let len64 = vec64.len();
+                                                        ::core::mem::forget(vec64);
+                                                        *base
+                                                            .add(6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len64;
+                                                        *base
+                                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr64.cast_mut();
+                                                    }
+                                                    None => {
+                                                        *base
+                                                            .add(4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                            }
+                                        }
+                                        *ptr57
+                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len65;
+                                        *ptr57
+                                            .add(4 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>() = result65;
+                                    }
+                                    None => {
                                         *ptr57
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (0i32) as u8;
                                     }
-                                    V59::InvalidRequest => {
+                                };
+                            }
+                            Err(e) => {
+                                *ptr57.add(0).cast::<u8>() = (1i32) as u8;
+                                let super::super::super::super::yoshuawuyts::acp::errors::Error {
+                                    code: code66,
+                                    message: message66,
+                                } = e;
+                                use super::super::super::super::yoshuawuyts::acp::errors::ErrorCode as V67;
+                                match code66 {
+                                    V67::ParseError => {
+                                        *ptr57
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (0i32) as u8;
+                                    }
+                                    V67::InvalidRequest => {
                                         *ptr57
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (1i32) as u8;
                                     }
-                                    V59::MethodNotFound => {
+                                    V67::MethodNotFound => {
                                         *ptr57
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (2i32) as u8;
                                     }
-                                    V59::InvalidParams => {
+                                    V67::InvalidParams => {
                                         *ptr57
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (3i32) as u8;
                                     }
-                                    V59::InternalError => {
+                                    V67::InternalError => {
                                         *ptr57
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (4i32) as u8;
                                     }
-                                    V59::AuthRequired => {
+                                    V67::AuthRequired => {
                                         *ptr57
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (5i32) as u8;
                                     }
-                                    V59::ResourceNotFound => {
+                                    V67::ResourceNotFound => {
                                         *ptr57
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (6i32) as u8;
                                     }
-                                    V59::Other(e) => {
+                                    V67::Other(e) => {
                                         *ptr57
                                             .add(::core::mem::size_of::<*const u8>())
                                             .cast::<u8>() = (7i32) as u8;
@@ -6984,16 +7752,16 @@ pub mod exports {
                                             .cast::<i32>() = _rt::as_i32(e);
                                     }
                                 }
-                                let vec60 = (message58.into_bytes()).into_boxed_slice();
-                                let ptr60 = vec60.as_ptr().cast::<u8>();
-                                let len60 = vec60.len();
-                                ::core::mem::forget(vec60);
+                                let vec68 = (message66.into_bytes()).into_boxed_slice();
+                                let ptr68 = vec68.as_ptr().cast::<u8>();
+                                let len68 = vec68.len();
+                                ::core::mem::forget(vec68);
                                 *ptr57
                                     .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len60;
+                                    .cast::<usize>() = len68;
                                 *ptr57
                                     .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr60.cast_mut();
+                                    .cast::<*mut u8>() = ptr68.cast_mut();
                             }
                         };
                         ptr57
@@ -7002,6 +7770,1221 @@ pub mod exports {
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
                 pub unsafe fn __post_return_load_session<T_: Guest>(arg0: *mut u8) {
+                    unsafe {
+                        let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                        match l0 {
+                            0 => {
+                                let l1 = i32::from(
+                                    *arg0.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
+                                );
+                                match l1 {
+                                    0 => {}
+                                    _ => {
+                                        let l2 = *arg0
+                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l3 = *arg0
+                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        _rt::cabi_dealloc(l2, l3, 1);
+                                        let l4 = *arg0
+                                            .add(4 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l5 = *arg0
+                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let base13 = l4;
+                                        let len13 = l5;
+                                        for i in 0..len13 {
+                                            let base = base13
+                                                .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let l6 = *base.add(0).cast::<*mut u8>();
+                                                let l7 = *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l6, l7, 1);
+                                                let l8 = *base
+                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l9 = *base
+                                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l8, l9, 1);
+                                                let l10 = i32::from(
+                                                    *base
+                                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l10 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l11 = *base
+                                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l12 = *base
+                                                            .add(6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l11, l12, 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _rt::cabi_dealloc(
+                                            base13,
+                                            len13 * (7 * ::core::mem::size_of::<*const u8>()),
+                                            ::core::mem::size_of::<*const u8>(),
+                                        );
+                                    }
+                                }
+                            }
+                            _ => {
+                                let l14 = *arg0
+                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l15 = *arg0
+                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                _rt::cabi_dealloc(l14, l15, 1);
+                            }
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case, unused_unsafe)]
+                pub unsafe fn _export_list_sessions_cabi<T_: Guest>(
+                    arg0: i32,
+                    arg1: *mut u8,
+                    arg2: usize,
+                    arg3: i32,
+                    arg4: *mut u8,
+                    arg5: usize,
+                ) -> *mut u8 {
+                    unsafe {
+                        #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                        let result2 = {
+                            T_::list_sessions(super::super::super::super::yoshuawuyts::acp::sessions::ListSessionsRequest {
+                                cwd: match arg0 {
+                                    0 => None,
+                                    1 => {
+                                        let e = {
+                                            let len0 = arg2;
+                                            let bytes0 = _rt::Vec::from_raw_parts(
+                                                arg1.cast(),
+                                                len0,
+                                                len0,
+                                            );
+                                            _rt::string_lift(bytes0)
+                                        };
+                                        Some(e)
+                                    }
+                                    _ => _rt::invalid_enum_discriminant(),
+                                },
+                                cursor: match arg3 {
+                                    0 => None,
+                                    1 => {
+                                        let e = {
+                                            let len1 = arg5;
+                                            let bytes1 = _rt::Vec::from_raw_parts(
+                                                arg4.cast(),
+                                                len1,
+                                                len1,
+                                            );
+                                            _rt::string_lift(bytes1)
+                                        };
+                                        Some(e)
+                                    }
+                                    _ => _rt::invalid_enum_discriminant(),
+                                },
+                            })
+                        };
+                        let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                        match result2 {
+                            Ok(e) => {
+                                *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                                let super::super::super::super::yoshuawuyts::acp::sessions::ListSessionsResponse {
+                                    sessions: sessions4,
+                                    next_cursor: next_cursor4,
+                                } = e;
+                                let vec10 = sessions4;
+                                let len10 = vec10.len();
+                                let layout10 = _rt::alloc::Layout::from_size_align(
+                                        vec10.len() * (10 * ::core::mem::size_of::<*const u8>()),
+                                        ::core::mem::size_of::<*const u8>(),
+                                    )
+                                    .unwrap();
+                                let (result10, _cleanup10) = wit_bindgen_rt::Cleanup::new(
+                                    layout10,
+                                );
+                                if let Some(cleanup) = _cleanup10 {
+                                    cleanup.forget();
+                                }
+                                for (i, e) in vec10.into_iter().enumerate() {
+                                    let base = result10
+                                        .add(i * (10 * ::core::mem::size_of::<*const u8>()));
+                                    {
+                                        let super::super::super::super::yoshuawuyts::acp::sessions::SessionInfo {
+                                            session_id: session_id5,
+                                            cwd: cwd5,
+                                            title: title5,
+                                            updated_at: updated_at5,
+                                        } = e;
+                                        let vec6 = (session_id5.into_bytes()).into_boxed_slice();
+                                        let ptr6 = vec6.as_ptr().cast::<u8>();
+                                        let len6 = vec6.len();
+                                        ::core::mem::forget(vec6);
+                                        *base
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len6;
+                                        *base.add(0).cast::<*mut u8>() = ptr6.cast_mut();
+                                        let vec7 = (cwd5.into_bytes()).into_boxed_slice();
+                                        let ptr7 = vec7.as_ptr().cast::<u8>();
+                                        let len7 = vec7.len();
+                                        ::core::mem::forget(vec7);
+                                        *base
+                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len7;
+                                        *base
+                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>() = ptr7.cast_mut();
+                                        match title5 {
+                                            Some(e) => {
+                                                *base
+                                                    .add(4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>() = (1i32) as u8;
+                                                let vec8 = (e.into_bytes()).into_boxed_slice();
+                                                let ptr8 = vec8.as_ptr().cast::<u8>();
+                                                let len8 = vec8.len();
+                                                ::core::mem::forget(vec8);
+                                                *base
+                                                    .add(6 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len8;
+                                                *base
+                                                    .add(5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr8.cast_mut();
+                                            }
+                                            None => {
+                                                *base
+                                                    .add(4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>() = (0i32) as u8;
+                                            }
+                                        };
+                                        match updated_at5 {
+                                            Some(e) => {
+                                                *base
+                                                    .add(7 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>() = (1i32) as u8;
+                                                let vec9 = (e.into_bytes()).into_boxed_slice();
+                                                let ptr9 = vec9.as_ptr().cast::<u8>();
+                                                let len9 = vec9.len();
+                                                ::core::mem::forget(vec9);
+                                                *base
+                                                    .add(9 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len9;
+                                                *base
+                                                    .add(8 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr9.cast_mut();
+                                            }
+                                            None => {
+                                                *base
+                                                    .add(7 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>() = (0i32) as u8;
+                                            }
+                                        };
+                                    }
+                                }
+                                *ptr3
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>() = len10;
+                                *ptr3
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>() = result10;
+                                match next_cursor4 {
+                                    Some(e) => {
+                                        *ptr3
+                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (1i32) as u8;
+                                        let vec11 = (e.into_bytes()).into_boxed_slice();
+                                        let ptr11 = vec11.as_ptr().cast::<u8>();
+                                        let len11 = vec11.len();
+                                        ::core::mem::forget(vec11);
+                                        *ptr3
+                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len11;
+                                        *ptr3
+                                            .add(4 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>() = ptr11.cast_mut();
+                                    }
+                                    None => {
+                                        *ptr3
+                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (0i32) as u8;
+                                    }
+                                };
+                            }
+                            Err(e) => {
+                                *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                                let super::super::super::super::yoshuawuyts::acp::errors::Error {
+                                    code: code12,
+                                    message: message12,
+                                } = e;
+                                use super::super::super::super::yoshuawuyts::acp::errors::ErrorCode as V13;
+                                match code12 {
+                                    V13::ParseError => {
+                                        *ptr3
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (0i32) as u8;
+                                    }
+                                    V13::InvalidRequest => {
+                                        *ptr3
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (1i32) as u8;
+                                    }
+                                    V13::MethodNotFound => {
+                                        *ptr3
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (2i32) as u8;
+                                    }
+                                    V13::InvalidParams => {
+                                        *ptr3
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (3i32) as u8;
+                                    }
+                                    V13::InternalError => {
+                                        *ptr3
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (4i32) as u8;
+                                    }
+                                    V13::AuthRequired => {
+                                        *ptr3
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (5i32) as u8;
+                                    }
+                                    V13::ResourceNotFound => {
+                                        *ptr3
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (6i32) as u8;
+                                    }
+                                    V13::Other(e) => {
+                                        *ptr3
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (7i32) as u8;
+                                        *ptr3
+                                            .add(4 + 1 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<i32>() = _rt::as_i32(e);
+                                    }
+                                }
+                                let vec14 = (message12.into_bytes()).into_boxed_slice();
+                                let ptr14 = vec14.as_ptr().cast::<u8>();
+                                let len14 = vec14.len();
+                                ::core::mem::forget(vec14);
+                                *ptr3
+                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>() = len14;
+                                *ptr3
+                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>() = ptr14.cast_mut();
+                            }
+                        };
+                        ptr3
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_list_sessions<T_: Guest>(arg0: *mut u8) {
+                    unsafe {
+                        let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                        match l0 {
+                            0 => {
+                                let l1 = *arg0
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l2 = *arg0
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let base13 = l1;
+                                let len13 = l2;
+                                for i in 0..len13 {
+                                    let base = base13
+                                        .add(i * (10 * ::core::mem::size_of::<*const u8>()));
+                                    {
+                                        let l3 = *base.add(0).cast::<*mut u8>();
+                                        let l4 = *base
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        _rt::cabi_dealloc(l3, l4, 1);
+                                        let l5 = *base
+                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l6 = *base
+                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        _rt::cabi_dealloc(l5, l6, 1);
+                                        let l7 = i32::from(
+                                            *base
+                                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l7 {
+                                            0 => {}
+                                            _ => {
+                                                let l8 = *base
+                                                    .add(5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l9 = *base
+                                                    .add(6 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l8, l9, 1);
+                                            }
+                                        }
+                                        let l10 = i32::from(
+                                            *base
+                                                .add(7 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l10 {
+                                            0 => {}
+                                            _ => {
+                                                let l11 = *base
+                                                    .add(8 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l12 = *base
+                                                    .add(9 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l11, l12, 1);
+                                            }
+                                        }
+                                    }
+                                }
+                                _rt::cabi_dealloc(
+                                    base13,
+                                    len13 * (10 * ::core::mem::size_of::<*const u8>()),
+                                    ::core::mem::size_of::<*const u8>(),
+                                );
+                                let l14 = i32::from(
+                                    *arg0
+                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>(),
+                                );
+                                match l14 {
+                                    0 => {}
+                                    _ => {
+                                        let l15 = *arg0
+                                            .add(4 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l16 = *arg0
+                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        _rt::cabi_dealloc(l15, l16, 1);
+                                    }
+                                }
+                            }
+                            _ => {
+                                let l17 = *arg0
+                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l18 = *arg0
+                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                _rt::cabi_dealloc(l17, l18, 1);
+                            }
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case, unused_unsafe)]
+                pub unsafe fn _export_resume_session_cabi<T_: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                    arg4: *mut u8,
+                    arg5: usize,
+                ) -> *mut u8 {
+                    unsafe {
+                        #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                        let result56 = {
+                            let len0 = arg1;
+                            let bytes0 = _rt::Vec::from_raw_parts(
+                                arg0.cast(),
+                                len0,
+                                len0,
+                            );
+                            let len1 = arg3;
+                            let bytes1 = _rt::Vec::from_raw_parts(
+                                arg2.cast(),
+                                len1,
+                                len1,
+                            );
+                            let base55 = arg4;
+                            let len55 = arg5;
+                            let mut result55 = _rt::Vec::with_capacity(len55);
+                            for i in 0..len55 {
+                                let base = base55
+                                    .add(i * (9 * ::core::mem::size_of::<*const u8>()));
+                                let e55 = {
+                                    let l2 = i32::from(*base.add(0).cast::<u8>());
+                                    use super::super::super::super::yoshuawuyts::acp::sessions::McpServer as V54;
+                                    let v54 = match l2 {
+                                        0 => {
+                                            let e54 = {
+                                                let l3 = *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l4 = *base
+                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                let len5 = l4;
+                                                let bytes5 = _rt::Vec::from_raw_parts(
+                                                    l3.cast(),
+                                                    len5,
+                                                    len5,
+                                                );
+                                                let l6 = *base
+                                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l7 = *base
+                                                    .add(4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                let len8 = l7;
+                                                let bytes8 = _rt::Vec::from_raw_parts(
+                                                    l6.cast(),
+                                                    len8,
+                                                    len8,
+                                                );
+                                                let l9 = *base
+                                                    .add(5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l10 = *base
+                                                    .add(6 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                let base14 = l9;
+                                                let len14 = l10;
+                                                let mut result14 = _rt::Vec::with_capacity(len14);
+                                                for i in 0..len14 {
+                                                    let base = base14
+                                                        .add(i * (2 * ::core::mem::size_of::<*const u8>()));
+                                                    let e14 = {
+                                                        let l11 = *base.add(0).cast::<*mut u8>();
+                                                        let l12 = *base
+                                                            .add(::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        let len13 = l12;
+                                                        let bytes13 = _rt::Vec::from_raw_parts(
+                                                            l11.cast(),
+                                                            len13,
+                                                            len13,
+                                                        );
+                                                        _rt::string_lift(bytes13)
+                                                    };
+                                                    result14.push(e14);
+                                                }
+                                                _rt::cabi_dealloc(
+                                                    base14,
+                                                    len14 * (2 * ::core::mem::size_of::<*const u8>()),
+                                                    ::core::mem::size_of::<*const u8>(),
+                                                );
+                                                let l15 = *base
+                                                    .add(7 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l16 = *base
+                                                    .add(8 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                let base23 = l15;
+                                                let len23 = l16;
+                                                let mut result23 = _rt::Vec::with_capacity(len23);
+                                                for i in 0..len23 {
+                                                    let base = base23
+                                                        .add(i * (4 * ::core::mem::size_of::<*const u8>()));
+                                                    let e23 = {
+                                                        let l17 = *base.add(0).cast::<*mut u8>();
+                                                        let l18 = *base
+                                                            .add(::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        let len19 = l18;
+                                                        let bytes19 = _rt::Vec::from_raw_parts(
+                                                            l17.cast(),
+                                                            len19,
+                                                            len19,
+                                                        );
+                                                        let l20 = *base
+                                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l21 = *base
+                                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        let len22 = l21;
+                                                        let bytes22 = _rt::Vec::from_raw_parts(
+                                                            l20.cast(),
+                                                            len22,
+                                                            len22,
+                                                        );
+                                                        super::super::super::super::yoshuawuyts::acp::sessions::EnvVar {
+                                                            name: _rt::string_lift(bytes19),
+                                                            value: _rt::string_lift(bytes22),
+                                                        }
+                                                    };
+                                                    result23.push(e23);
+                                                }
+                                                _rt::cabi_dealloc(
+                                                    base23,
+                                                    len23 * (4 * ::core::mem::size_of::<*const u8>()),
+                                                    ::core::mem::size_of::<*const u8>(),
+                                                );
+                                                super::super::super::super::yoshuawuyts::acp::sessions::McpServerStdio {
+                                                    name: _rt::string_lift(bytes5),
+                                                    command: _rt::string_lift(bytes8),
+                                                    args: result14,
+                                                    env: result23,
+                                                }
+                                            };
+                                            V54::Stdio(e54)
+                                        }
+                                        1 => {
+                                            let e54 = {
+                                                let l24 = *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l25 = *base
+                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                let len26 = l25;
+                                                let bytes26 = _rt::Vec::from_raw_parts(
+                                                    l24.cast(),
+                                                    len26,
+                                                    len26,
+                                                );
+                                                let l27 = *base
+                                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l28 = *base
+                                                    .add(4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                let len29 = l28;
+                                                let bytes29 = _rt::Vec::from_raw_parts(
+                                                    l27.cast(),
+                                                    len29,
+                                                    len29,
+                                                );
+                                                let l30 = *base
+                                                    .add(5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l31 = *base
+                                                    .add(6 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                let base38 = l30;
+                                                let len38 = l31;
+                                                let mut result38 = _rt::Vec::with_capacity(len38);
+                                                for i in 0..len38 {
+                                                    let base = base38
+                                                        .add(i * (4 * ::core::mem::size_of::<*const u8>()));
+                                                    let e38 = {
+                                                        let l32 = *base.add(0).cast::<*mut u8>();
+                                                        let l33 = *base
+                                                            .add(::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        let len34 = l33;
+                                                        let bytes34 = _rt::Vec::from_raw_parts(
+                                                            l32.cast(),
+                                                            len34,
+                                                            len34,
+                                                        );
+                                                        let l35 = *base
+                                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l36 = *base
+                                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        let len37 = l36;
+                                                        let bytes37 = _rt::Vec::from_raw_parts(
+                                                            l35.cast(),
+                                                            len37,
+                                                            len37,
+                                                        );
+                                                        super::super::super::super::yoshuawuyts::acp::sessions::HttpHeader {
+                                                            name: _rt::string_lift(bytes34),
+                                                            value: _rt::string_lift(bytes37),
+                                                        }
+                                                    };
+                                                    result38.push(e38);
+                                                }
+                                                _rt::cabi_dealloc(
+                                                    base38,
+                                                    len38 * (4 * ::core::mem::size_of::<*const u8>()),
+                                                    ::core::mem::size_of::<*const u8>(),
+                                                );
+                                                super::super::super::super::yoshuawuyts::acp::sessions::McpServerHttp {
+                                                    name: _rt::string_lift(bytes26),
+                                                    url: _rt::string_lift(bytes29),
+                                                    headers: result38,
+                                                }
+                                            };
+                                            V54::Http(e54)
+                                        }
+                                        n => {
+                                            debug_assert_eq!(n, 2, "invalid enum discriminant");
+                                            let e54 = {
+                                                let l39 = *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l40 = *base
+                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                let len41 = l40;
+                                                let bytes41 = _rt::Vec::from_raw_parts(
+                                                    l39.cast(),
+                                                    len41,
+                                                    len41,
+                                                );
+                                                let l42 = *base
+                                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l43 = *base
+                                                    .add(4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                let len44 = l43;
+                                                let bytes44 = _rt::Vec::from_raw_parts(
+                                                    l42.cast(),
+                                                    len44,
+                                                    len44,
+                                                );
+                                                let l45 = *base
+                                                    .add(5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l46 = *base
+                                                    .add(6 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                let base53 = l45;
+                                                let len53 = l46;
+                                                let mut result53 = _rt::Vec::with_capacity(len53);
+                                                for i in 0..len53 {
+                                                    let base = base53
+                                                        .add(i * (4 * ::core::mem::size_of::<*const u8>()));
+                                                    let e53 = {
+                                                        let l47 = *base.add(0).cast::<*mut u8>();
+                                                        let l48 = *base
+                                                            .add(::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        let len49 = l48;
+                                                        let bytes49 = _rt::Vec::from_raw_parts(
+                                                            l47.cast(),
+                                                            len49,
+                                                            len49,
+                                                        );
+                                                        let l50 = *base
+                                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l51 = *base
+                                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        let len52 = l51;
+                                                        let bytes52 = _rt::Vec::from_raw_parts(
+                                                            l50.cast(),
+                                                            len52,
+                                                            len52,
+                                                        );
+                                                        super::super::super::super::yoshuawuyts::acp::sessions::HttpHeader {
+                                                            name: _rt::string_lift(bytes49),
+                                                            value: _rt::string_lift(bytes52),
+                                                        }
+                                                    };
+                                                    result53.push(e53);
+                                                }
+                                                _rt::cabi_dealloc(
+                                                    base53,
+                                                    len53 * (4 * ::core::mem::size_of::<*const u8>()),
+                                                    ::core::mem::size_of::<*const u8>(),
+                                                );
+                                                super::super::super::super::yoshuawuyts::acp::sessions::McpServerSse {
+                                                    name: _rt::string_lift(bytes41),
+                                                    url: _rt::string_lift(bytes44),
+                                                    headers: result53,
+                                                }
+                                            };
+                                            V54::Sse(e54)
+                                        }
+                                    };
+                                    v54
+                                };
+                                result55.push(e55);
+                            }
+                            _rt::cabi_dealloc(
+                                base55,
+                                len55 * (9 * ::core::mem::size_of::<*const u8>()),
+                                ::core::mem::size_of::<*const u8>(),
+                            );
+                            T_::resume_session(super::super::super::super::yoshuawuyts::acp::sessions::ResumeSessionRequest {
+                                session_id: _rt::string_lift(bytes0),
+                                cwd: _rt::string_lift(bytes1),
+                                mcp_servers: result55,
+                            })
+                        };
+                        let ptr57 = (&raw mut _RET_AREA.0).cast::<u8>();
+                        match result56 {
+                            Ok(e) => {
+                                *ptr57.add(0).cast::<u8>() = (0i32) as u8;
+                                let super::super::super::super::yoshuawuyts::acp::sessions::ResumeSessionResponse {
+                                    modes: modes58,
+                                } = e;
+                                match modes58 {
+                                    Some(e) => {
+                                        *ptr57
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (1i32) as u8;
+                                        let super::super::super::super::yoshuawuyts::acp::sessions::SessionModeState {
+                                            current_mode_id: current_mode_id59,
+                                            available_modes: available_modes59,
+                                        } = e;
+                                        let vec60 = (current_mode_id59.into_bytes())
+                                            .into_boxed_slice();
+                                        let ptr60 = vec60.as_ptr().cast::<u8>();
+                                        let len60 = vec60.len();
+                                        ::core::mem::forget(vec60);
+                                        *ptr57
+                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len60;
+                                        *ptr57
+                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>() = ptr60.cast_mut();
+                                        let vec65 = available_modes59;
+                                        let len65 = vec65.len();
+                                        let layout65 = _rt::alloc::Layout::from_size_align(
+                                                vec65.len() * (7 * ::core::mem::size_of::<*const u8>()),
+                                                ::core::mem::size_of::<*const u8>(),
+                                            )
+                                            .unwrap();
+                                        let (result65, _cleanup65) = wit_bindgen_rt::Cleanup::new(
+                                            layout65,
+                                        );
+                                        if let Some(cleanup) = _cleanup65 {
+                                            cleanup.forget();
+                                        }
+                                        for (i, e) in vec65.into_iter().enumerate() {
+                                            let base = result65
+                                                .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let super::super::super::super::yoshuawuyts::acp::sessions::SessionMode {
+                                                    id: id61,
+                                                    name: name61,
+                                                    description: description61,
+                                                } = e;
+                                                let vec62 = (id61.into_bytes()).into_boxed_slice();
+                                                let ptr62 = vec62.as_ptr().cast::<u8>();
+                                                let len62 = vec62.len();
+                                                ::core::mem::forget(vec62);
+                                                *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len62;
+                                                *base.add(0).cast::<*mut u8>() = ptr62.cast_mut();
+                                                let vec63 = (name61.into_bytes()).into_boxed_slice();
+                                                let ptr63 = vec63.as_ptr().cast::<u8>();
+                                                let len63 = vec63.len();
+                                                ::core::mem::forget(vec63);
+                                                *base
+                                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len63;
+                                                *base
+                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr63.cast_mut();
+                                                match description61 {
+                                                    Some(e) => {
+                                                        *base
+                                                            .add(4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        let vec64 = (e.into_bytes()).into_boxed_slice();
+                                                        let ptr64 = vec64.as_ptr().cast::<u8>();
+                                                        let len64 = vec64.len();
+                                                        ::core::mem::forget(vec64);
+                                                        *base
+                                                            .add(6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len64;
+                                                        *base
+                                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr64.cast_mut();
+                                                    }
+                                                    None => {
+                                                        *base
+                                                            .add(4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                            }
+                                        }
+                                        *ptr57
+                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len65;
+                                        *ptr57
+                                            .add(4 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>() = result65;
+                                    }
+                                    None => {
+                                        *ptr57
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (0i32) as u8;
+                                    }
+                                };
+                            }
+                            Err(e) => {
+                                *ptr57.add(0).cast::<u8>() = (1i32) as u8;
+                                let super::super::super::super::yoshuawuyts::acp::errors::Error {
+                                    code: code66,
+                                    message: message66,
+                                } = e;
+                                use super::super::super::super::yoshuawuyts::acp::errors::ErrorCode as V67;
+                                match code66 {
+                                    V67::ParseError => {
+                                        *ptr57
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (0i32) as u8;
+                                    }
+                                    V67::InvalidRequest => {
+                                        *ptr57
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (1i32) as u8;
+                                    }
+                                    V67::MethodNotFound => {
+                                        *ptr57
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (2i32) as u8;
+                                    }
+                                    V67::InvalidParams => {
+                                        *ptr57
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (3i32) as u8;
+                                    }
+                                    V67::InternalError => {
+                                        *ptr57
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (4i32) as u8;
+                                    }
+                                    V67::AuthRequired => {
+                                        *ptr57
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (5i32) as u8;
+                                    }
+                                    V67::ResourceNotFound => {
+                                        *ptr57
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (6i32) as u8;
+                                    }
+                                    V67::Other(e) => {
+                                        *ptr57
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (7i32) as u8;
+                                        *ptr57
+                                            .add(4 + 1 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<i32>() = _rt::as_i32(e);
+                                    }
+                                }
+                                let vec68 = (message66.into_bytes()).into_boxed_slice();
+                                let ptr68 = vec68.as_ptr().cast::<u8>();
+                                let len68 = vec68.len();
+                                ::core::mem::forget(vec68);
+                                *ptr57
+                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>() = len68;
+                                *ptr57
+                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>() = ptr68.cast_mut();
+                            }
+                        };
+                        ptr57
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_resume_session<T_: Guest>(arg0: *mut u8) {
+                    unsafe {
+                        let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                        match l0 {
+                            0 => {
+                                let l1 = i32::from(
+                                    *arg0.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
+                                );
+                                match l1 {
+                                    0 => {}
+                                    _ => {
+                                        let l2 = *arg0
+                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l3 = *arg0
+                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        _rt::cabi_dealloc(l2, l3, 1);
+                                        let l4 = *arg0
+                                            .add(4 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l5 = *arg0
+                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let base13 = l4;
+                                        let len13 = l5;
+                                        for i in 0..len13 {
+                                            let base = base13
+                                                .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let l6 = *base.add(0).cast::<*mut u8>();
+                                                let l7 = *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l6, l7, 1);
+                                                let l8 = *base
+                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l9 = *base
+                                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l8, l9, 1);
+                                                let l10 = i32::from(
+                                                    *base
+                                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l10 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l11 = *base
+                                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l12 = *base
+                                                            .add(6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l11, l12, 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _rt::cabi_dealloc(
+                                            base13,
+                                            len13 * (7 * ::core::mem::size_of::<*const u8>()),
+                                            ::core::mem::size_of::<*const u8>(),
+                                        );
+                                    }
+                                }
+                            }
+                            _ => {
+                                let l14 = *arg0
+                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l15 = *arg0
+                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                _rt::cabi_dealloc(l14, l15, 1);
+                            }
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case, unused_unsafe)]
+                pub unsafe fn _export_close_session_cabi<T_: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                ) -> *mut u8 {
+                    unsafe {
+                        #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                        let result1 = {
+                            let len0 = arg1;
+                            let bytes0 = _rt::Vec::from_raw_parts(
+                                arg0.cast(),
+                                len0,
+                                len0,
+                            );
+                            T_::close_session(_rt::string_lift(bytes0))
+                        };
+                        let ptr2 = (&raw mut _RET_AREA.0).cast::<u8>();
+                        match result1 {
+                            Ok(_) => {
+                                *ptr2.add(0).cast::<u8>() = (0i32) as u8;
+                            }
+                            Err(e) => {
+                                *ptr2.add(0).cast::<u8>() = (1i32) as u8;
+                                let super::super::super::super::yoshuawuyts::acp::errors::Error {
+                                    code: code3,
+                                    message: message3,
+                                } = e;
+                                use super::super::super::super::yoshuawuyts::acp::errors::ErrorCode as V4;
+                                match code3 {
+                                    V4::ParseError => {
+                                        *ptr2
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (0i32) as u8;
+                                    }
+                                    V4::InvalidRequest => {
+                                        *ptr2
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (1i32) as u8;
+                                    }
+                                    V4::MethodNotFound => {
+                                        *ptr2
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (2i32) as u8;
+                                    }
+                                    V4::InvalidParams => {
+                                        *ptr2
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (3i32) as u8;
+                                    }
+                                    V4::InternalError => {
+                                        *ptr2
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (4i32) as u8;
+                                    }
+                                    V4::AuthRequired => {
+                                        *ptr2
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (5i32) as u8;
+                                    }
+                                    V4::ResourceNotFound => {
+                                        *ptr2
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (6i32) as u8;
+                                    }
+                                    V4::Other(e) => {
+                                        *ptr2
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (7i32) as u8;
+                                        *ptr2
+                                            .add(4 + 1 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<i32>() = _rt::as_i32(e);
+                                    }
+                                }
+                                let vec5 = (message3.into_bytes()).into_boxed_slice();
+                                let ptr5 = vec5.as_ptr().cast::<u8>();
+                                let len5 = vec5.len();
+                                ::core::mem::forget(vec5);
+                                *ptr2
+                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>() = len5;
+                                *ptr2
+                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>() = ptr5.cast_mut();
+                            }
+                        };
+                        ptr2
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_close_session<T_: Guest>(arg0: *mut u8) {
+                    unsafe {
+                        let l0 = i32::from(*arg0.add(0).cast::<u8>());
+                        match l0 {
+                            0 => {}
+                            _ => {
+                                let l1 = *arg0
+                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l2 = *arg0
+                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                _rt::cabi_dealloc(l1, l2, 1);
+                            }
+                        }
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case, unused_unsafe)]
+                pub unsafe fn _export_set_session_mode_cabi<T_: Guest>(
+                    arg0: *mut u8,
+                    arg1: usize,
+                    arg2: *mut u8,
+                    arg3: usize,
+                ) -> *mut u8 {
+                    unsafe {
+                        #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                        let result2 = {
+                            let len0 = arg1;
+                            let bytes0 = _rt::Vec::from_raw_parts(
+                                arg0.cast(),
+                                len0,
+                                len0,
+                            );
+                            let len1 = arg3;
+                            let bytes1 = _rt::Vec::from_raw_parts(
+                                arg2.cast(),
+                                len1,
+                                len1,
+                            );
+                            T_::set_session_mode(super::super::super::super::yoshuawuyts::acp::sessions::SetSessionModeRequest {
+                                session_id: _rt::string_lift(bytes0),
+                                mode_id: _rt::string_lift(bytes1),
+                            })
+                        };
+                        let ptr3 = (&raw mut _RET_AREA.0).cast::<u8>();
+                        match result2 {
+                            Ok(_) => {
+                                *ptr3.add(0).cast::<u8>() = (0i32) as u8;
+                            }
+                            Err(e) => {
+                                *ptr3.add(0).cast::<u8>() = (1i32) as u8;
+                                let super::super::super::super::yoshuawuyts::acp::errors::Error {
+                                    code: code4,
+                                    message: message4,
+                                } = e;
+                                use super::super::super::super::yoshuawuyts::acp::errors::ErrorCode as V5;
+                                match code4 {
+                                    V5::ParseError => {
+                                        *ptr3
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (0i32) as u8;
+                                    }
+                                    V5::InvalidRequest => {
+                                        *ptr3
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (1i32) as u8;
+                                    }
+                                    V5::MethodNotFound => {
+                                        *ptr3
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (2i32) as u8;
+                                    }
+                                    V5::InvalidParams => {
+                                        *ptr3
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (3i32) as u8;
+                                    }
+                                    V5::InternalError => {
+                                        *ptr3
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (4i32) as u8;
+                                    }
+                                    V5::AuthRequired => {
+                                        *ptr3
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (5i32) as u8;
+                                    }
+                                    V5::ResourceNotFound => {
+                                        *ptr3
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (6i32) as u8;
+                                    }
+                                    V5::Other(e) => {
+                                        *ptr3
+                                            .add(::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (7i32) as u8;
+                                        *ptr3
+                                            .add(4 + 1 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<i32>() = _rt::as_i32(e);
+                                    }
+                                }
+                                let vec6 = (message4.into_bytes()).into_boxed_slice();
+                                let ptr6 = vec6.as_ptr().cast::<u8>();
+                                let len6 = vec6.len();
+                                ::core::mem::forget(vec6);
+                                *ptr3
+                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>() = len6;
+                                *ptr3
+                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>() = ptr6.cast_mut();
+                            }
+                        };
+                        ptr3
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __post_return_set_session_mode<T_: Guest>(arg0: *mut u8) {
                     unsafe {
                         let l0 = i32::from(*arg0.add(0).cast::<u8>());
                         match l0 {
@@ -7043,7 +9026,7 @@ pub mod exports {
                                     .add(i * (32 + 12 * ::core::mem::size_of::<*const u8>()));
                                 let e64 = {
                                     let l1 = i32::from(*base.add(0).cast::<u8>());
-                                    use super::super::super::super::yoshuawuyts::acp::types::ContentBlock as V63;
+                                    use super::super::super::super::yoshuawuyts::acp::content::ContentBlock as V63;
                                     let v63 = match l1 {
                                         0 => {
                                             let e63 = {
@@ -7057,7 +9040,7 @@ pub mod exports {
                                                     len4,
                                                     len4,
                                                 );
-                                                super::super::super::super::yoshuawuyts::acp::types::TextContent {
+                                                super::super::super::super::yoshuawuyts::acp::content::TextContent {
                                                     text: _rt::string_lift(bytes4),
                                                 }
                                             };
@@ -7092,7 +9075,7 @@ pub mod exports {
                                                         .add(8 + 4 * ::core::mem::size_of::<*const u8>())
                                                         .cast::<u8>(),
                                                 );
-                                                super::super::super::super::yoshuawuyts::acp::types::ImageContent {
+                                                super::super::super::super::yoshuawuyts::acp::content::ImageContent {
                                                     data: _rt::string_lift(bytes7),
                                                     mime_type: _rt::string_lift(bytes10),
                                                     uri: match l11 {
@@ -7145,7 +9128,7 @@ pub mod exports {
                                                     len20,
                                                     len20,
                                                 );
-                                                super::super::super::super::yoshuawuyts::acp::types::AudioContent {
+                                                super::super::super::super::yoshuawuyts::acp::content::AudioContent {
                                                     data: _rt::string_lift(bytes17),
                                                     mime_type: _rt::string_lift(bytes20),
                                                 }
@@ -7196,7 +9179,7 @@ pub mod exports {
                                                         .add(16 + 12 * ::core::mem::size_of::<*const u8>())
                                                         .cast::<u8>(),
                                                 );
-                                                super::super::super::super::yoshuawuyts::acp::types::ResourceLink {
+                                                super::super::super::super::yoshuawuyts::acp::content::ResourceLink {
                                                     uri: _rt::string_lift(bytes23),
                                                     name: _rt::string_lift(bytes26),
                                                     mime_type: match l27 {
@@ -7286,7 +9269,7 @@ pub mod exports {
                                             debug_assert_eq!(n, 4, "invalid enum discriminant");
                                             let e63 = {
                                                 let l41 = i32::from(*base.add(8).cast::<u8>());
-                                                use super::super::super::super::yoshuawuyts::acp::types::ResourceContents as V62;
+                                                use super::super::super::super::yoshuawuyts::acp::content::ResourceContents as V62;
                                                 let v62 = match l41 {
                                                     0 => {
                                                         let e62 = {
@@ -7319,7 +9302,7 @@ pub mod exports {
                                                                 len51,
                                                                 len51,
                                                             );
-                                                            super::super::super::super::yoshuawuyts::acp::types::TextResourceContents {
+                                                            super::super::super::super::yoshuawuyts::acp::content::TextResourceContents {
                                                                 uri: _rt::string_lift(bytes44),
                                                                 mime_type: match l45 {
                                                                     0 => None,
@@ -7380,7 +9363,7 @@ pub mod exports {
                                                                 len61,
                                                                 len61,
                                                             );
-                                                            super::super::super::super::yoshuawuyts::acp::types::BlobResourceContents {
+                                                            super::super::super::super::yoshuawuyts::acp::content::BlobResourceContents {
                                                                 uri: _rt::string_lift(bytes54),
                                                                 mime_type: match l55 {
                                                                     0 => None,
@@ -7410,7 +9393,7 @@ pub mod exports {
                                                         V62::Blob(e62)
                                                     }
                                                 };
-                                                super::super::super::super::yoshuawuyts::acp::types::EmbeddedResource {
+                                                super::super::super::super::yoshuawuyts::acp::content::EmbeddedResource {
                                                     resource: v62,
                                                 }
                                             };
@@ -7426,7 +9409,7 @@ pub mod exports {
                                 len64 * (32 + 12 * ::core::mem::size_of::<*const u8>()),
                                 8,
                             );
-                            T_::prompt(super::super::super::super::yoshuawuyts::acp::types::PromptRequest {
+                            T_::prompt(super::super::super::super::yoshuawuyts::acp::prompts::PromptRequest {
                                 session_id: _rt::string_lift(bytes0),
                                 prompt: result64,
                             })
@@ -7435,7 +9418,7 @@ pub mod exports {
                         match result65 {
                             Ok(e) => {
                                 *ptr66.add(0).cast::<u8>() = (0i32) as u8;
-                                let super::super::super::super::yoshuawuyts::acp::types::PromptResponse {
+                                let super::super::super::super::yoshuawuyts::acp::prompts::PromptResponse {
                                     stop_reason: stop_reason67,
                                 } = e;
                                 *ptr66
@@ -7444,11 +9427,11 @@ pub mod exports {
                             }
                             Err(e) => {
                                 *ptr66.add(0).cast::<u8>() = (1i32) as u8;
-                                let super::super::super::super::yoshuawuyts::acp::types::Error {
+                                let super::super::super::super::yoshuawuyts::acp::errors::Error {
                                     code: code68,
                                     message: message68,
                                 } = e;
-                                use super::super::super::super::yoshuawuyts::acp::types::ErrorCode as V69;
+                                use super::super::super::super::yoshuawuyts::acp::errors::ErrorCode as V69;
                                 match code68 {
                                     V69::ParseError => {
                                         *ptr66
@@ -7583,7 +9566,47 @@ pub mod exports {
                     ///
                     /// See: <https://agentclientprotocol.com/protocol/session-setup#loading-sessions>
                     #[allow(async_fn_in_trait)]
-                    fn load_session(req: LoadSessionRequest) -> Result<(), Error>;
+                    fn load_session(
+                        req: LoadSessionRequest,
+                    ) -> Result<LoadSessionResponse, Error>;
+                    /// Discover existing sessions known to the agent. Only available when
+                    /// `agent-capabilities.session-capabilities.list` is true. Maps to the
+                    /// JSON-RPC `session/list` method.
+                    ///
+                    /// Uses cursor-based pagination via the opaque `cursor` field.
+                    ///
+                    /// See: <https://agentclientprotocol.com/protocol/session-list>
+                    #[allow(async_fn_in_trait)]
+                    fn list_sessions(
+                        req: ListSessionsRequest,
+                    ) -> Result<ListSessionsResponse, Error>;
+                    /// Reconnect to an existing session without replaying conversation
+                    /// history. Only available when
+                    /// `agent-capabilities.session-capabilities.resume` is true. Maps to
+                    /// the JSON-RPC `session/resume` method.
+                    ///
+                    /// Unlike `load-session`, the agent MUST NOT stream history via
+                    /// `update-session` before responding.
+                    ///
+                    /// See: <https://agentclientprotocol.com/protocol/session-setup#resuming-sessions>
+                    #[allow(async_fn_in_trait)]
+                    fn resume_session(
+                        req: ResumeSessionRequest,
+                    ) -> Result<ResumeSessionResponse, Error>;
+                    /// Cancel any ongoing work for a session and free its resources. Only
+                    /// available when `agent-capabilities.session-capabilities.close` is
+                    /// true. Maps to the JSON-RPC `session/close` method.
+                    ///
+                    /// See: <https://agentclientprotocol.com/protocol/session-setup#closing-active-sessions>
+                    #[allow(async_fn_in_trait)]
+                    fn close_session(session_id: SessionId) -> Result<(), Error>;
+                    /// Switch the active mode for a session. Maps to the JSON-RPC
+                    /// `session/set_mode` method. The `mode-id` MUST be one of the modes
+                    /// returned in `new-session-response.modes` or `load-session-response.modes`.
+                    ///
+                    /// See: <https://agentclientprotocol.com/protocol/session-modes>
+                    #[allow(async_fn_in_trait)]
+                    fn set_session_mode(req: SetSessionModeRequest) -> Result<(), Error>;
                     /// Send a user prompt and run a prompt turn to completion. Maps to the
                     /// JSON-RPC `session/prompt` method.
                     ///
@@ -7606,72 +9629,108 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[macro_export]
-                macro_rules! __export_yoshuawuyts_acp_agent_2_0_6_cabi {
+                macro_rules! __export_yoshuawuyts_acp_agent_3_0_0_cabi {
                     ($ty:ident with_types_in $($path_to_types:tt)*) => {
                         const _ : () = { #[unsafe (export_name =
-                        "yoshuawuyts:acp/agent@2.0.6#initialize")] unsafe extern "C" fn
+                        "yoshuawuyts:acp/agent@3.0.0#initialize")] unsafe extern "C" fn
                         export_initialize(arg0 : i32, arg1 : i32, arg2 : i32, arg3 : i32,
                         arg4 : i32, arg5 : * mut u8, arg6 : usize, arg7 : i32, arg8 : *
                         mut u8, arg9 : usize, arg10 : * mut u8, arg11 : usize,) -> * mut
                         u8 { unsafe { $($path_to_types)*:: _export_initialize_cabi::<$ty
                         > (arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9,
                         arg10, arg11) } } #[unsafe (export_name =
-                        "cabi_post_yoshuawuyts:acp/agent@2.0.6#initialize")] unsafe
+                        "cabi_post_yoshuawuyts:acp/agent@3.0.0#initialize")] unsafe
                         extern "C" fn _post_return_initialize(arg0 : * mut u8,) { unsafe
                         { $($path_to_types)*:: __post_return_initialize::<$ty > (arg0) }
                         } #[unsafe (export_name =
-                        "yoshuawuyts:acp/agent@2.0.6#authenticate")] unsafe extern "C" fn
+                        "yoshuawuyts:acp/agent@3.0.0#authenticate")] unsafe extern "C" fn
                         export_authenticate(arg0 : * mut u8, arg1 : usize,) -> * mut u8 {
                         unsafe { $($path_to_types)*:: _export_authenticate_cabi::<$ty >
                         (arg0, arg1) } } #[unsafe (export_name =
-                        "cabi_post_yoshuawuyts:acp/agent@2.0.6#authenticate")] unsafe
+                        "cabi_post_yoshuawuyts:acp/agent@3.0.0#authenticate")] unsafe
                         extern "C" fn _post_return_authenticate(arg0 : * mut u8,) {
                         unsafe { $($path_to_types)*:: __post_return_authenticate::<$ty >
                         (arg0) } } #[unsafe (export_name =
-                        "yoshuawuyts:acp/agent@2.0.6#new-session")] unsafe extern "C" fn
+                        "yoshuawuyts:acp/agent@3.0.0#new-session")] unsafe extern "C" fn
                         export_new_session(arg0 : * mut u8, arg1 : usize, arg2 : * mut
                         u8, arg3 : usize,) -> * mut u8 { unsafe { $($path_to_types)*::
                         _export_new_session_cabi::<$ty > (arg0, arg1, arg2, arg3) } }
                         #[unsafe (export_name =
-                        "cabi_post_yoshuawuyts:acp/agent@2.0.6#new-session")] unsafe
+                        "cabi_post_yoshuawuyts:acp/agent@3.0.0#new-session")] unsafe
                         extern "C" fn _post_return_new_session(arg0 : * mut u8,) { unsafe
                         { $($path_to_types)*:: __post_return_new_session::<$ty > (arg0) }
                         } #[unsafe (export_name =
-                        "yoshuawuyts:acp/agent@2.0.6#load-session")] unsafe extern "C" fn
+                        "yoshuawuyts:acp/agent@3.0.0#load-session")] unsafe extern "C" fn
                         export_load_session(arg0 : * mut u8, arg1 : usize, arg2 : * mut
                         u8, arg3 : usize, arg4 : * mut u8, arg5 : usize,) -> * mut u8 {
                         unsafe { $($path_to_types)*:: _export_load_session_cabi::<$ty >
                         (arg0, arg1, arg2, arg3, arg4, arg5) } } #[unsafe (export_name =
-                        "cabi_post_yoshuawuyts:acp/agent@2.0.6#load-session")] unsafe
+                        "cabi_post_yoshuawuyts:acp/agent@3.0.0#load-session")] unsafe
                         extern "C" fn _post_return_load_session(arg0 : * mut u8,) {
                         unsafe { $($path_to_types)*:: __post_return_load_session::<$ty >
                         (arg0) } } #[unsafe (export_name =
-                        "yoshuawuyts:acp/agent@2.0.6#prompt")] unsafe extern "C" fn
-                        export_prompt(arg0 : * mut u8, arg1 : usize, arg2 : * mut u8,
-                        arg3 : usize,) -> * mut u8 { unsafe { $($path_to_types)*::
-                        _export_prompt_cabi::<$ty > (arg0, arg1, arg2, arg3) } } #[unsafe
-                        (export_name = "cabi_post_yoshuawuyts:acp/agent@2.0.6#prompt")]
-                        unsafe extern "C" fn _post_return_prompt(arg0 : * mut u8,) {
-                        unsafe { $($path_to_types)*:: __post_return_prompt::<$ty > (arg0)
-                        } } #[unsafe (export_name =
-                        "yoshuawuyts:acp/agent@2.0.6#cancel")] unsafe extern "C" fn
-                        export_cancel(arg0 : * mut u8, arg1 : usize,) { unsafe {
-                        $($path_to_types)*:: _export_cancel_cabi::<$ty > (arg0, arg1) } }
-                        };
+                        "yoshuawuyts:acp/agent@3.0.0#list-sessions")] unsafe extern "C"
+                        fn export_list_sessions(arg0 : i32, arg1 : * mut u8, arg2 :
+                        usize, arg3 : i32, arg4 : * mut u8, arg5 : usize,) -> * mut u8 {
+                        unsafe { $($path_to_types)*:: _export_list_sessions_cabi::<$ty >
+                        (arg0, arg1, arg2, arg3, arg4, arg5) } } #[unsafe (export_name =
+                        "cabi_post_yoshuawuyts:acp/agent@3.0.0#list-sessions")] unsafe
+                        extern "C" fn _post_return_list_sessions(arg0 : * mut u8,) {
+                        unsafe { $($path_to_types)*:: __post_return_list_sessions::<$ty >
+                        (arg0) } } #[unsafe (export_name =
+                        "yoshuawuyts:acp/agent@3.0.0#resume-session")] unsafe extern "C"
+                        fn export_resume_session(arg0 : * mut u8, arg1 : usize, arg2 : *
+                        mut u8, arg3 : usize, arg4 : * mut u8, arg5 : usize,) -> * mut u8
+                        { unsafe { $($path_to_types)*:: _export_resume_session_cabi::<$ty
+                        > (arg0, arg1, arg2, arg3, arg4, arg5) } } #[unsafe (export_name
+                        = "cabi_post_yoshuawuyts:acp/agent@3.0.0#resume-session")] unsafe
+                        extern "C" fn _post_return_resume_session(arg0 : * mut u8,) {
+                        unsafe { $($path_to_types)*:: __post_return_resume_session::<$ty
+                        > (arg0) } } #[unsafe (export_name =
+                        "yoshuawuyts:acp/agent@3.0.0#close-session")] unsafe extern "C"
+                        fn export_close_session(arg0 : * mut u8, arg1 : usize,) -> * mut
+                        u8 { unsafe { $($path_to_types)*::
+                        _export_close_session_cabi::<$ty > (arg0, arg1) } } #[unsafe
+                        (export_name =
+                        "cabi_post_yoshuawuyts:acp/agent@3.0.0#close-session")] unsafe
+                        extern "C" fn _post_return_close_session(arg0 : * mut u8,) {
+                        unsafe { $($path_to_types)*:: __post_return_close_session::<$ty >
+                        (arg0) } } #[unsafe (export_name =
+                        "yoshuawuyts:acp/agent@3.0.0#set-session-mode")] unsafe extern
+                        "C" fn export_set_session_mode(arg0 : * mut u8, arg1 : usize,
+                        arg2 : * mut u8, arg3 : usize,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_set_session_mode_cabi::<$ty > (arg0,
+                        arg1, arg2, arg3) } } #[unsafe (export_name =
+                        "cabi_post_yoshuawuyts:acp/agent@3.0.0#set-session-mode")] unsafe
+                        extern "C" fn _post_return_set_session_mode(arg0 : * mut u8,) {
+                        unsafe { $($path_to_types)*::
+                        __post_return_set_session_mode::<$ty > (arg0) } } #[unsafe
+                        (export_name = "yoshuawuyts:acp/agent@3.0.0#prompt")] unsafe
+                        extern "C" fn export_prompt(arg0 : * mut u8, arg1 : usize, arg2 :
+                        * mut u8, arg3 : usize,) -> * mut u8 { unsafe {
+                        $($path_to_types)*:: _export_prompt_cabi::<$ty > (arg0, arg1,
+                        arg2, arg3) } } #[unsafe (export_name =
+                        "cabi_post_yoshuawuyts:acp/agent@3.0.0#prompt")] unsafe extern
+                        "C" fn _post_return_prompt(arg0 : * mut u8,) { unsafe {
+                        $($path_to_types)*:: __post_return_prompt::<$ty > (arg0) } }
+                        #[unsafe (export_name = "yoshuawuyts:acp/agent@3.0.0#cancel")]
+                        unsafe extern "C" fn export_cancel(arg0 : * mut u8, arg1 :
+                        usize,) { unsafe { $($path_to_types)*:: _export_cancel_cabi::<$ty
+                        > (arg0, arg1) } } };
                     };
                 }
                 #[doc(hidden)]
-                pub use __export_yoshuawuyts_acp_agent_2_0_6_cabi;
+                pub use __export_yoshuawuyts_acp_agent_3_0_0_cabi;
                 #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
                 #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
                 struct _RetArea(
                     [::core::mem::MaybeUninit<
                         u8,
-                    >; 8 + 12 * ::core::mem::size_of::<*const u8>()],
+                    >; 16 + 11 * ::core::mem::size_of::<*const u8>()],
                 );
                 static mut _RET_AREA: _RetArea = _RetArea(
-                    [::core::mem::MaybeUninit::uninit(); 8
-                        + 12 * ::core::mem::size_of::<*const u8>()],
+                    [::core::mem::MaybeUninit::uninit(); 16
+                        + 11 * ::core::mem::size_of::<*const u8>()],
                 );
             }
         }
@@ -7824,242 +9883,317 @@ mod _rt {
 #[allow(unused_macros)]
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __export_agent_plugin_impl {
+macro_rules! __export_provider_impl {
     ($ty:ident) => {
         self::export!($ty with_types_in self);
     };
     ($ty:ident with_types_in $($path_to_types_root:tt)*) => {
         $($path_to_types_root)*::
-        exports::yoshuawuyts::acp::agent::__export_yoshuawuyts_acp_agent_2_0_6_cabi!($ty
+        exports::yoshuawuyts::acp::agent::__export_yoshuawuyts_acp_agent_3_0_0_cabi!($ty
         with_types_in $($path_to_types_root)*:: exports::yoshuawuyts::acp::agent); const
         _ : () = { #[rustfmt::skip] #[cfg(target_arch = "wasm32")] #[unsafe (link_section
         =
-        "component-type:wit-bindgen:0.57.1:yoshuawuyts:acp@2.0.6:agent-plugin:imports and exports")]
+        "component-type:wit-bindgen:0.57.1:yoshuawuyts:acp@3.0.0:provider:imports and exports")]
         #[doc(hidden)] #[allow(clippy::octal_escapes)] pub static
-        __WIT_BINDGEN_COMPONENT_TYPE : [u8; 5335] = *
+        __WIT_BINDGEN_COMPONENT_TYPE : [u8; 7252] = *
         b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xd4(\x01A\x02\x01A\x1b\
-\x01B\x8c\x01\x01q\x08\x0bparse-error\0\0\x0finvalid-request\0\0\x10method-not-f\
-ound\0\0\x0einvalid-params\0\0\x0einternal-error\0\0\x0dauth-required\0\0\x12res\
-ource-not-found\0\0\x05other\x01z\0\x04\0\x0aerror-code\x03\0\0\x01r\x02\x04code\
-\x01\x07messages\x04\0\x05error\x03\0\x02\x01s\x04\0\x0asession-id\x03\0\x04\x01\
-s\x04\0\x0ctool-call-id\x03\0\x06\x01s\x04\0\x0bterminal-id\x03\0\x08\x01ks\x01r\
-\x03\x04names\x05title\x0a\x07versions\x04\0\x13implementation-info\x03\0\x0b\x01\
-r\x02\x0eread-text-file\x7f\x0fwrite-text-file\x7f\x04\0\x0ffs-capabilities\x03\0\
-\x0d\x01r\x02\x02fs\x0e\x08terminal\x7f\x04\0\x13client-capabilities\x03\0\x0f\x01\
-r\x03\x05image\x7f\x05audio\x7f\x10embedded-context\x7f\x04\0\x13prompt-capabili\
-ties\x03\0\x11\x01r\x02\x04http\x7f\x03sse\x7f\x04\0\x10mcp-capabilities\x03\0\x13\
-\x01r\x03\x0cload-session\x7f\x13prompt-capabilities\x12\x10mcp-capabilities\x14\
-\x04\0\x12agent-capabilities\x03\0\x15\x01r\x03\x02ids\x04names\x0bdescription\x0a\
-\x04\0\x0bauth-method\x03\0\x17\x01k\x0c\x01r\x03\x10protocol-versiony\x13client\
--capabilities\x10\x0bclient-info\x19\x04\0\x12initialize-request\x03\0\x1a\x01p\x18\
-\x01r\x04\x10protocol-versiony\x12agent-capabilities\x16\x0aagent-info\x19\x0cau\
-th-methods\x1c\x04\0\x13initialize-response\x03\0\x1d\x01r\x01\x09method-ids\x04\
-\0\x14authenticate-request\x03\0\x1f\x01r\x02\x04names\x05values\x04\0\x07env-va\
-r\x03\0!\x01r\x02\x04names\x05values\x04\0\x0bhttp-header\x03\0#\x01ps\x01p\"\x01\
-r\x04\x04names\x07commands\x04args%\x03env&\x04\0\x10mcp-server-stdio\x03\0'\x01\
-p$\x01r\x03\x04names\x03urls\x07headers)\x04\0\x0fmcp-server-http\x03\0*\x01r\x03\
-\x04names\x03urls\x07headers)\x04\0\x0emcp-server-sse\x03\0,\x01q\x03\x05stdio\x01\
-(\0\x04http\x01+\0\x03sse\x01-\0\x04\0\x0amcp-server\x03\0.\x01p/\x01r\x02\x03cw\
-ds\x0bmcp-servers0\x04\0\x13new-session-request\x03\01\x01r\x01\x0asession-id\x05\
-\x04\0\x14new-session-response\x03\03\x01r\x03\x0asession-id\x05\x03cwds\x0bmcp-\
-servers0\x04\0\x14load-session-request\x03\05\x01r\x01\x04texts\x04\0\x0ctext-co\
-ntent\x03\07\x01r\x03\x04datas\x09mime-types\x03uri\x0a\x04\0\x0dimage-content\x03\
-\09\x01r\x02\x04datas\x09mime-types\x04\0\x0daudio-content\x03\0;\x01kw\x01r\x06\
-\x03uris\x04names\x09mime-type\x0a\x05title\x0a\x0bdescription\x0a\x04size=\x04\0\
-\x0dresource-link\x03\0>\x01r\x03\x03uris\x09mime-type\x0a\x04texts\x04\0\x16tex\
-t-resource-contents\x03\0@\x01r\x03\x03uris\x09mime-type\x0a\x04blobs\x04\0\x16b\
-lob-resource-contents\x03\0B\x01q\x02\x04text\x01\xc1\0\0\x04blob\x01\xc3\0\0\x04\
-\0\x11resource-contents\x03\0D\x01r\x01\x08resource\xc5\0\x04\0\x11embedded-reso\
-urce\x03\0F\x01q\x05\x04text\x018\0\x05image\x01:\0\x05audio\x01<\0\x0dresource-\
-link\x01?\0\x08resource\x01\xc7\0\0\x04\0\x0dcontent-block\x03\0H\x01p\xc9\0\x01\
-r\x02\x0asession-id\x05\x06prompt\xca\0\x04\0\x0eprompt-request\x03\0K\x01m\x05\x08\
-end-turn\x0amax-tokens\x11max-turn-requests\x07refusal\x09cancelled\x04\0\x0bsto\
-p-reason\x03\0M\x01r\x01\x0bstop-reason\xce\0\x04\0\x0fprompt-response\x03\0O\x01\
-m\x09\x04read\x04edit\x06delete\x04move\x06search\x07execute\x05think\x05fetch\x05\
-other\x04\0\x09tool-kind\x03\0Q\x01m\x04\x07pending\x0bin-progress\x09completed\x06\
-failed\x04\0\x10tool-call-status\x03\0S\x01r\x03\x04paths\x08old-text\x0a\x08new\
--texts\x04\0\x04diff\x03\0U\x01q\x03\x07content\x01\xc9\0\0\x04diff\x01\xd6\0\0\x08\
-terminal\x01\x09\0\x04\0\x11tool-call-content\x03\0W\x01ky\x01r\x02\x04paths\x04\
-line\xd9\0\x04\0\x12tool-call-location\x03\0Z\x01p\xd8\0\x01p\xdb\0\x01r\x08\x02\
-id\x07\x05titles\x04kind\xd2\0\x06status\xd4\0\x07content\xdc\0\x09locations\xdd\
-\0\x09raw-input\x0a\x0araw-output\x0a\x04\0\x09tool-call\x03\0^\x01k\xd2\0\x01k\xd4\
-\0\x01k\xdc\0\x01k\xdd\0\x01r\x08\x02id\x07\x05title\x0a\x04kind\xe0\0\x06status\
-\xe1\0\x07content\xe2\0\x09locations\xe3\0\x09raw-input\x0a\x0araw-output\x0a\x04\
-\0\x10tool-call-update\x03\0d\x01m\x03\x04high\x06medium\x03low\x04\0\x13plan-en\
-try-priority\x03\0f\x01m\x03\x07pending\x0bin-progress\x09completed\x04\0\x11pla\
-n-entry-status\x03\0h\x01r\x03\x07contents\x08priority\xe7\0\x06status\xe9\0\x04\
-\0\x0aplan-entry\x03\0j\x01p\xeb\0\x01r\x01\x07entries\xec\0\x04\0\x04plan\x03\0\
-m\x01q\x06\x12user-message-chunk\x01\xc9\0\0\x13agent-message-chunk\x01\xc9\0\0\x13\
-agent-thought-chunk\x01\xc9\0\0\x09tool-call\x01\xdf\0\0\x10tool-call-update\x01\
-\xe5\0\0\x04plan\x01\xee\0\0\x04\0\x0esession-update\x03\0o\x01m\x04\x0aallow-on\
-ce\x0callow-always\x0breject-once\x0dreject-always\x04\0\x16permission-option-ki\
-nd\x03\0q\x01r\x03\x02ids\x04names\x04kind\xf2\0\x04\0\x11permission-option\x03\0\
-s\x01p\xf4\0\x01r\x03\x0asession-id\x05\x09tool-call\xe5\0\x07options\xf5\0\x04\0\
-\x1arequest-permission-request\x03\0v\x01q\x02\x09cancelled\0\0\x08selected\x01s\
-\0\x04\0\x12permission-outcome\x03\0x\x01r\x01\x07outcome\xf9\0\x04\0\x1brequest\
--permission-response\x03\0z\x01r\x04\x0asession-id\x05\x04paths\x04line\xd9\0\x05\
-limit\xd9\0\x04\0\x16read-text-file-request\x03\0|\x01r\x01\x07contents\x04\0\x17\
-read-text-file-response\x03\0~\x01r\x03\x0asession-id\x05\x04paths\x07contents\x04\
-\0\x17write-text-file-request\x03\0\x80\x01\x01r\x06\x0asession-id\x05\x07comman\
-ds\x04args%\x03env&\x03cwd\x0a\x11output-byte-limit=\x04\0\x17create-terminal-re\
-quest\x03\0\x82\x01\x01r\x01\x0bterminal-id\x09\x04\0\x18create-terminal-respons\
-e\x03\0\x84\x01\x01kz\x01r\x02\x09exit-code\x86\x01\x06signal\x0a\x04\0\x14termi\
-nal-exit-status\x03\0\x87\x01\x01k\x88\x01\x01r\x03\x06outputs\x09truncated\x7f\x0b\
-exit-status\x89\x01\x04\0\x0fterminal-output\x03\0\x8a\x01\x03\0\x1byoshuawuyts:\
-acp/types@2.0.6\x05\0\x02\x03\0\0\x0asession-id\x02\x03\0\0\x0esession-update\x02\
-\x03\0\0\x1arequest-permission-request\x02\x03\0\0\x1brequest-permission-respons\
-e\x02\x03\0\0\x16read-text-file-request\x02\x03\0\0\x17read-text-file-response\x02\
-\x03\0\0\x17write-text-file-request\x02\x03\0\0\x17create-terminal-request\x02\x03\
-\0\0\x18create-terminal-response\x02\x03\0\0\x0bterminal-id\x02\x03\0\0\x0ftermi\
-nal-output\x02\x03\0\0\x14terminal-exit-status\x02\x03\0\0\x05error\x01B1\x02\x03\
-\x02\x01\x01\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x02\x04\0\x0esession-up\
-date\x03\0\x02\x02\x03\x02\x01\x03\x04\0\x1arequest-permission-request\x03\0\x04\
-\x02\x03\x02\x01\x04\x04\0\x1brequest-permission-response\x03\0\x06\x02\x03\x02\x01\
-\x05\x04\0\x16read-text-file-request\x03\0\x08\x02\x03\x02\x01\x06\x04\0\x17read\
--text-file-response\x03\0\x0a\x02\x03\x02\x01\x07\x04\0\x17write-text-file-reque\
-st\x03\0\x0c\x02\x03\x02\x01\x08\x04\0\x17create-terminal-request\x03\0\x0e\x02\x03\
-\x02\x01\x09\x04\0\x18create-terminal-response\x03\0\x10\x02\x03\x02\x01\x0a\x04\
-\0\x0bterminal-id\x03\0\x12\x02\x03\x02\x01\x0b\x04\0\x0fterminal-output\x03\0\x14\
-\x02\x03\x02\x01\x0c\x04\0\x14terminal-exit-status\x03\0\x16\x02\x03\x02\x01\x0d\
-\x04\0\x05error\x03\0\x18\x01@\x02\x0asession-id\x01\x06update\x03\x01\0\x04\0\x0e\
-update-session\x01\x1a\x01j\x01\x07\x01\x19\x01@\x01\x03req\x05\0\x1b\x04\0\x12r\
-equest-permission\x01\x1c\x01j\x01\x0b\x01\x19\x01@\x01\x03req\x09\0\x1d\x04\0\x0e\
-read-text-file\x01\x1e\x01j\0\x01\x19\x01@\x01\x03req\x0d\0\x1f\x04\0\x0fwrite-t\
-ext-file\x01\x20\x01j\x01\x11\x01\x19\x01@\x01\x03req\x0f\0!\x04\0\x0fcreate-ter\
-minal\x01\"\x01j\x01\x15\x01\x19\x01@\x02\x0asession-id\x01\x0bterminal-id\x13\0\
-#\x04\0\x13get-terminal-output\x01$\x01j\x01\x17\x01\x19\x01@\x02\x0asession-id\x01\
-\x0bterminal-id\x13\0%\x04\0\x16wait-for-terminal-exit\x01&\x01@\x02\x0asession-\
-id\x01\x0bterminal-id\x13\0\x1f\x04\0\x0dkill-terminal\x01'\x04\0\x10release-ter\
-minal\x01'\x03\0\x1cyoshuawuyts:acp/client@2.0.6\x05\x0e\x02\x03\0\0\x12initiali\
-ze-request\x02\x03\0\0\x13initialize-response\x02\x03\0\0\x14authenticate-reques\
-t\x02\x03\0\0\x13new-session-request\x02\x03\0\0\x14new-session-response\x02\x03\
-\0\0\x14load-session-request\x02\x03\0\0\x0eprompt-request\x02\x03\0\0\x0fprompt\
--response\x01B$\x02\x03\x02\x01\x0f\x04\0\x12initialize-request\x03\0\0\x02\x03\x02\
-\x01\x10\x04\0\x13initialize-response\x03\0\x02\x02\x03\x02\x01\x11\x04\0\x14aut\
-henticate-request\x03\0\x04\x02\x03\x02\x01\x12\x04\0\x13new-session-request\x03\
-\0\x06\x02\x03\x02\x01\x13\x04\0\x14new-session-response\x03\0\x08\x02\x03\x02\x01\
-\x14\x04\0\x14load-session-request\x03\0\x0a\x02\x03\x02\x01\x15\x04\0\x0eprompt\
--request\x03\0\x0c\x02\x03\x02\x01\x16\x04\0\x0fprompt-response\x03\0\x0e\x02\x03\
-\x02\x01\x01\x04\0\x0asession-id\x03\0\x10\x02\x03\x02\x01\x0d\x04\0\x05error\x03\
-\0\x12\x01j\x01\x03\x01\x13\x01@\x01\x03req\x01\0\x14\x04\0\x0ainitialize\x01\x15\
-\x01j\0\x01\x13\x01@\x01\x03req\x05\0\x16\x04\0\x0cauthenticate\x01\x17\x01j\x01\
-\x09\x01\x13\x01@\x01\x03req\x07\0\x18\x04\0\x0bnew-session\x01\x19\x01@\x01\x03\
-req\x0b\0\x16\x04\0\x0cload-session\x01\x1a\x01j\x01\x0f\x01\x13\x01@\x01\x03req\
-\x0d\0\x1b\x04\0\x06prompt\x01\x1c\x01@\x01\x0asession-id\x11\x01\0\x04\0\x06can\
-cel\x01\x1d\x04\0\x1byoshuawuyts:acp/agent@2.0.6\x05\x17\x04\0\"yoshuawuyts:acp/\
-agent-plugin@2.0.6\x04\0\x0b\x12\x01\0\x0cagent-plugin\x03\0\0\0G\x09producers\x01\
-\x0cprocessed-by\x02\x0dwit-component\x070.247.0\x10wit-bindgen-rust\x060.57.1";
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xd57\x01A\x02\x01A6\x01\
+B\x04\x01q\x08\x0bparse-error\0\0\x0finvalid-request\0\0\x10method-not-found\0\0\
+\x0einvalid-params\0\0\x0einternal-error\0\0\x0dauth-required\0\0\x12resource-no\
+t-found\0\0\x05other\x01z\0\x04\0\x0aerror-code\x03\0\0\x01r\x02\x04code\x01\x07\
+messages\x04\0\x05error\x03\0\x02\x03\0\x1cyoshuawuyts:acp/errors@3.0.0\x05\0\x01\
+B2\x01s\x04\0\x0asession-id\x03\0\0\x01s\x04\0\x0fsession-mode-id\x03\0\x02\x01r\
+\x02\x04names\x05values\x04\0\x07env-var\x03\0\x04\x01r\x02\x04names\x05values\x04\
+\0\x0bhttp-header\x03\0\x06\x01ps\x01p\x05\x01r\x04\x04names\x07commands\x04args\
+\x08\x03env\x09\x04\0\x10mcp-server-stdio\x03\0\x0a\x01p\x07\x01r\x03\x04names\x03\
+urls\x07headers\x0c\x04\0\x0fmcp-server-http\x03\0\x0d\x01r\x03\x04names\x03urls\
+\x07headers\x0c\x04\0\x0emcp-server-sse\x03\0\x0f\x01q\x03\x05stdio\x01\x0b\0\x04\
+http\x01\x0e\0\x03sse\x01\x10\0\x04\0\x0amcp-server\x03\0\x11\x01ks\x01r\x03\x02\
+id\x03\x04names\x0bdescription\x13\x04\0\x0csession-mode\x03\0\x14\x01p\x15\x01r\
+\x02\x0fcurrent-mode-id\x03\x0favailable-modes\x16\x04\0\x12session-mode-state\x03\
+\0\x17\x01r\x02\x0asession-id\x01\x07mode-id\x03\x04\0\x18set-session-mode-reque\
+st\x03\0\x19\x01p\x12\x01r\x02\x03cwds\x0bmcp-servers\x1b\x04\0\x13new-session-r\
+equest\x03\0\x1c\x01k\x18\x01r\x02\x0asession-id\x01\x05modes\x1e\x04\0\x14new-s\
+ession-response\x03\0\x1f\x01r\x03\x0asession-id\x01\x03cwds\x0bmcp-servers\x1b\x04\
+\0\x14load-session-request\x03\0!\x01r\x01\x05modes\x1e\x04\0\x15load-session-re\
+sponse\x03\0#\x01r\x04\x0asession-id\x01\x03cwds\x05title\x13\x0aupdated-at\x13\x04\
+\0\x0csession-info\x03\0%\x01r\x02\x03cwd\x13\x06cursor\x13\x04\0\x15list-sessio\
+ns-request\x03\0'\x01p&\x01r\x02\x08sessions)\x0bnext-cursor\x13\x04\0\x16list-s\
+essions-response\x03\0*\x01r\x03\x0asession-id\x01\x03cwds\x0bmcp-servers\x1b\x04\
+\0\x16resume-session-request\x03\0,\x01r\x01\x05modes\x1e\x04\0\x17resume-sessio\
+n-response\x03\0.\x01r\x02\x05title\x13\x0aupdated-at\x13\x04\0\x13session-info-\
+update\x03\00\x03\0\x1eyoshuawuyts:acp/sessions@3.0.0\x05\x01\x01B\x14\x01r\x01\x04\
+texts\x04\0\x0ctext-content\x03\0\0\x01ks\x01r\x03\x04datas\x09mime-types\x03uri\
+\x02\x04\0\x0dimage-content\x03\0\x03\x01r\x02\x04datas\x09mime-types\x04\0\x0da\
+udio-content\x03\0\x05\x01kw\x01r\x06\x03uris\x04names\x09mime-type\x02\x05title\
+\x02\x0bdescription\x02\x04size\x07\x04\0\x0dresource-link\x03\0\x08\x01r\x03\x03\
+uris\x09mime-type\x02\x04texts\x04\0\x16text-resource-contents\x03\0\x0a\x01r\x03\
+\x03uris\x09mime-type\x02\x04blobs\x04\0\x16blob-resource-contents\x03\0\x0c\x01\
+q\x02\x04text\x01\x0b\0\x04blob\x01\x0d\0\x04\0\x11resource-contents\x03\0\x0e\x01\
+r\x01\x08resource\x0f\x04\0\x11embedded-resource\x03\0\x10\x01q\x05\x04text\x01\x01\
+\0\x05image\x01\x04\0\x05audio\x01\x06\0\x0dresource-link\x01\x09\0\x08resource\x01\
+\x11\0\x04\0\x0dcontent-block\x03\0\x12\x03\0\x1dyoshuawuyts:acp/content@3.0.0\x05\
+\x02\x02\x03\0\x01\x0asession-id\x02\x03\0\x01\x07env-var\x01B\x14\x02\x03\x02\x01\
+\x03\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x04\x04\0\x07env-var\x03\0\x02\x01\
+s\x04\0\x0bterminal-id\x03\0\x04\x01ps\x01p\x03\x01ks\x01kw\x01r\x06\x0asession-\
+id\x01\x07commands\x04args\x06\x03env\x07\x03cwd\x08\x11output-byte-limit\x09\x04\
+\0\x17create-terminal-request\x03\0\x0a\x01r\x01\x0bterminal-id\x05\x04\0\x18cre\
+ate-terminal-response\x03\0\x0c\x01kz\x01r\x02\x09exit-code\x0e\x06signal\x08\x04\
+\0\x14terminal-exit-status\x03\0\x0f\x01k\x10\x01r\x03\x06outputs\x09truncated\x7f\
+\x0bexit-status\x11\x04\0\x0fterminal-output\x03\0\x12\x03\0\x1fyoshuawuyts:acp/\
+terminals@3.0.0\x05\x05\x02\x03\0\x02\x0dcontent-block\x02\x03\0\x03\x0bterminal\
+-id\x01B2\x02\x03\x02\x01\x03\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x06\x04\
+\0\x0dcontent-block\x03\0\x02\x02\x03\x02\x01\x07\x04\0\x0bterminal-id\x03\0\x04\
+\x01s\x04\0\x0ctool-call-id\x03\0\x06\x01m\x09\x04read\x04edit\x06delete\x04move\
+\x06search\x07execute\x05think\x05fetch\x05other\x04\0\x09tool-kind\x03\0\x08\x01\
+m\x04\x07pending\x0bin-progress\x09completed\x06failed\x04\0\x10tool-call-status\
+\x03\0\x0a\x01ks\x01r\x03\x04paths\x08old-text\x0c\x08new-texts\x04\0\x04diff\x03\
+\0\x0d\x01q\x03\x07content\x01\x03\0\x04diff\x01\x0e\0\x08terminal\x01\x05\0\x04\
+\0\x11tool-call-content\x03\0\x0f\x01ky\x01r\x02\x04paths\x04line\x11\x04\0\x12t\
+ool-call-location\x03\0\x12\x01p\x10\x01p\x13\x01r\x08\x02id\x07\x05titles\x04ki\
+nd\x09\x06status\x0b\x07content\x14\x09locations\x15\x09raw-input\x0c\x0araw-out\
+put\x0c\x04\0\x09tool-call\x03\0\x16\x01k\x09\x01k\x0b\x01k\x14\x01k\x15\x01r\x08\
+\x02id\x07\x05title\x0c\x04kind\x18\x06status\x19\x07content\x1a\x09locations\x1b\
+\x09raw-input\x0c\x0araw-output\x0c\x04\0\x10tool-call-update\x03\0\x1c\x01m\x03\
+\x04high\x06medium\x03low\x04\0\x13plan-entry-priority\x03\0\x1e\x01m\x03\x07pen\
+ding\x0bin-progress\x09completed\x04\0\x11plan-entry-status\x03\0\x20\x01r\x03\x07\
+contents\x08priority\x1f\x06status!\x04\0\x0aplan-entry\x03\0\"\x01p#\x01r\x01\x07\
+entries$\x04\0\x04plan\x03\0%\x01m\x04\x0aallow-once\x0callow-always\x0breject-o\
+nce\x0dreject-always\x04\0\x16permission-option-kind\x03\0'\x01r\x03\x02ids\x04n\
+ames\x04kind(\x04\0\x11permission-option\x03\0)\x01p*\x01r\x03\x0asession-id\x01\
+\x09tool-call\x1d\x07options+\x04\0\x1arequest-permission-request\x03\0,\x01q\x02\
+\x09cancelled\0\0\x08selected\x01s\0\x04\0\x12permission-outcome\x03\0.\x01r\x01\
+\x07outcome/\x04\0\x1brequest-permission-response\x03\00\x03\0\x1byoshuawuyts:ac\
+p/tools@3.0.0\x05\x08\x02\x03\0\x01\x0fsession-mode-id\x02\x03\0\x01\x13session-\
+info-update\x02\x03\0\x04\x09tool-call\x02\x03\0\x04\x10tool-call-update\x02\x03\
+\0\x04\x04plan\x01B\x1d\x02\x03\x02\x01\x03\x04\0\x0asession-id\x03\0\0\x02\x03\x02\
+\x01\x09\x04\0\x0fsession-mode-id\x03\0\x02\x02\x03\x02\x01\x0a\x04\0\x13session\
+-info-update\x03\0\x04\x02\x03\x02\x01\x06\x04\0\x0dcontent-block\x03\0\x06\x02\x03\
+\x02\x01\x0b\x04\0\x09tool-call\x03\0\x08\x02\x03\x02\x01\x0c\x04\0\x10tool-call\
+-update\x03\0\x0a\x02\x03\x02\x01\x0d\x04\0\x04plan\x03\0\x0c\x01p\x07\x01r\x02\x0a\
+session-id\x01\x06prompt\x0e\x04\0\x0eprompt-request\x03\0\x0f\x01m\x05\x08end-t\
+urn\x0amax-tokens\x11max-turn-requests\x07refusal\x09cancelled\x04\0\x0bstop-rea\
+son\x03\0\x11\x01r\x01\x0bstop-reason\x12\x04\0\x0fprompt-response\x03\0\x13\x01\
+r\x01\x04hints\x04\0\x17available-command-input\x03\0\x15\x01k\x16\x01r\x03\x04n\
+ames\x0bdescriptions\x05input\x17\x04\0\x11available-command\x03\0\x18\x01p\x19\x01\
+q\x09\x12user-message-chunk\x01\x07\0\x13agent-message-chunk\x01\x07\0\x13agent-\
+thought-chunk\x01\x07\0\x09tool-call\x01\x09\0\x10tool-call-update\x01\x0b\0\x04\
+plan\x01\x0d\0\x13current-mode-update\x01\x03\0\x13session-info-update\x01\x05\0\
+\x19available-commands-update\x01\x1a\0\x04\0\x0esession-update\x03\0\x1b\x03\0\x1d\
+yoshuawuyts:acp/prompts@3.0.0\x05\x0e\x01B\x09\x02\x03\x02\x01\x03\x04\0\x0asess\
+ion-id\x03\0\0\x01ky\x01r\x04\x0asession-id\x01\x04paths\x04line\x02\x05limit\x02\
+\x04\0\x16read-text-file-request\x03\0\x03\x01r\x01\x07contents\x04\0\x17read-te\
+xt-file-response\x03\0\x05\x01r\x03\x0asession-id\x01\x04paths\x07contents\x04\0\
+\x17write-text-file-request\x03\0\x07\x03\0\x20yoshuawuyts:acp/filesystem@3.0.0\x05\
+\x0f\x02\x03\0\0\x05error\x02\x03\0\x05\x0esession-update\x02\x03\0\x04\x1areque\
+st-permission-request\x02\x03\0\x04\x1brequest-permission-response\x02\x03\0\x06\
+\x16read-text-file-request\x02\x03\0\x06\x17read-text-file-response\x02\x03\0\x06\
+\x17write-text-file-request\x02\x03\0\x03\x17create-terminal-request\x02\x03\0\x03\
+\x18create-terminal-response\x02\x03\0\x03\x0fterminal-output\x02\x03\0\x03\x14t\
+erminal-exit-status\x01B1\x02\x03\x02\x01\x10\x04\0\x05error\x03\0\0\x02\x03\x02\
+\x01\x03\x04\0\x0asession-id\x03\0\x02\x02\x03\x02\x01\x11\x04\0\x0esession-upda\
+te\x03\0\x04\x02\x03\x02\x01\x12\x04\0\x1arequest-permission-request\x03\0\x06\x02\
+\x03\x02\x01\x13\x04\0\x1brequest-permission-response\x03\0\x08\x02\x03\x02\x01\x14\
+\x04\0\x16read-text-file-request\x03\0\x0a\x02\x03\x02\x01\x15\x04\0\x17read-tex\
+t-file-response\x03\0\x0c\x02\x03\x02\x01\x16\x04\0\x17write-text-file-request\x03\
+\0\x0e\x02\x03\x02\x01\x07\x04\0\x0bterminal-id\x03\0\x10\x02\x03\x02\x01\x17\x04\
+\0\x17create-terminal-request\x03\0\x12\x02\x03\x02\x01\x18\x04\0\x18create-term\
+inal-response\x03\0\x14\x02\x03\x02\x01\x19\x04\0\x0fterminal-output\x03\0\x16\x02\
+\x03\x02\x01\x1a\x04\0\x14terminal-exit-status\x03\0\x18\x01@\x02\x0asession-id\x03\
+\x06update\x05\x01\0\x04\0\x0eupdate-session\x01\x1a\x01j\x01\x09\x01\x01\x01@\x01\
+\x03req\x07\0\x1b\x04\0\x12request-permission\x01\x1c\x01j\x01\x0d\x01\x01\x01@\x01\
+\x03req\x0b\0\x1d\x04\0\x0eread-text-file\x01\x1e\x01j\0\x01\x01\x01@\x01\x03req\
+\x0f\0\x1f\x04\0\x0fwrite-text-file\x01\x20\x01j\x01\x15\x01\x01\x01@\x01\x03req\
+\x13\0!\x04\0\x0fcreate-terminal\x01\"\x01j\x01\x17\x01\x01\x01@\x02\x0asession-\
+id\x03\x0bterminal-id\x11\0#\x04\0\x13get-terminal-output\x01$\x01j\x01\x19\x01\x01\
+\x01@\x02\x0asession-id\x03\x0bterminal-id\x11\0%\x04\0\x16wait-for-terminal-exi\
+t\x01&\x01@\x02\x0asession-id\x03\x0bterminal-id\x11\0\x1f\x04\0\x0dkill-termina\
+l\x01'\x04\0\x10release-terminal\x01'\x03\0\x1cyoshuawuyts:acp/client@3.0.0\x05\x1b\
+\x01B\x19\x01ks\x01r\x03\x04names\x05title\0\x07versions\x04\0\x13implementation\
+-info\x03\0\x01\x01r\x02\x0eread-text-file\x7f\x0fwrite-text-file\x7f\x04\0\x0ff\
+s-capabilities\x03\0\x03\x01r\x02\x02fs\x04\x08terminal\x7f\x04\0\x13client-capa\
+bilities\x03\0\x05\x01r\x03\x05image\x7f\x05audio\x7f\x10embedded-context\x7f\x04\
+\0\x13prompt-capabilities\x03\0\x07\x01r\x02\x04http\x7f\x03sse\x7f\x04\0\x10mcp\
+-capabilities\x03\0\x09\x01r\x03\x04list\x7f\x06resume\x7f\x05close\x7f\x04\0\x14\
+session-capabilities\x03\0\x0b\x01r\x04\x0cload-session\x7f\x13prompt-capabiliti\
+es\x08\x10mcp-capabilities\x0a\x14session-capabilities\x0c\x04\0\x12agent-capabi\
+lities\x03\0\x0d\x01r\x03\x02ids\x04names\x0bdescription\0\x04\0\x0bauth-method\x03\
+\0\x0f\x01r\x01\x09method-ids\x04\0\x14authenticate-request\x03\0\x11\x01k\x02\x01\
+r\x03\x10protocol-versiony\x13client-capabilities\x06\x0bclient-info\x13\x04\0\x12\
+initialize-request\x03\0\x14\x01p\x10\x01r\x04\x10protocol-versiony\x12agent-cap\
+abilities\x0e\x0aagent-info\x13\x0cauth-methods\x16\x04\0\x13initialize-response\
+\x03\0\x17\x03\0\x1ayoshuawuyts:acp/init@3.0.0\x05\x1c\x02\x03\0\x08\x12initiali\
+ze-request\x02\x03\0\x08\x13initialize-response\x02\x03\0\x08\x14authenticate-re\
+quest\x02\x03\0\x01\x13new-session-request\x02\x03\0\x01\x14new-session-response\
+\x02\x03\0\x01\x14load-session-request\x02\x03\0\x01\x15load-session-response\x02\
+\x03\0\x01\x15list-sessions-request\x02\x03\0\x01\x16list-sessions-response\x02\x03\
+\0\x01\x16resume-session-request\x02\x03\0\x01\x17resume-session-response\x02\x03\
+\0\x01\x18set-session-mode-request\x02\x03\0\x05\x0eprompt-request\x02\x03\0\x05\
+\x0fprompt-response\x01B;\x02\x03\x02\x01\x10\x04\0\x05error\x03\0\0\x02\x03\x02\
+\x01\x1d\x04\0\x12initialize-request\x03\0\x02\x02\x03\x02\x01\x1e\x04\0\x13init\
+ialize-response\x03\0\x04\x02\x03\x02\x01\x1f\x04\0\x14authenticate-request\x03\0\
+\x06\x02\x03\x02\x01\x03\x04\0\x0asession-id\x03\0\x08\x02\x03\x02\x01\x20\x04\0\
+\x13new-session-request\x03\0\x0a\x02\x03\x02\x01!\x04\0\x14new-session-response\
+\x03\0\x0c\x02\x03\x02\x01\"\x04\0\x14load-session-request\x03\0\x0e\x02\x03\x02\
+\x01#\x04\0\x15load-session-response\x03\0\x10\x02\x03\x02\x01$\x04\0\x15list-se\
+ssions-request\x03\0\x12\x02\x03\x02\x01%\x04\0\x16list-sessions-response\x03\0\x14\
+\x02\x03\x02\x01&\x04\0\x16resume-session-request\x03\0\x16\x02\x03\x02\x01'\x04\
+\0\x17resume-session-response\x03\0\x18\x02\x03\x02\x01(\x04\0\x18set-session-mo\
+de-request\x03\0\x1a\x02\x03\x02\x01)\x04\0\x0eprompt-request\x03\0\x1c\x02\x03\x02\
+\x01*\x04\0\x0fprompt-response\x03\0\x1e\x01j\x01\x05\x01\x01\x01@\x01\x03req\x03\
+\0\x20\x04\0\x0ainitialize\x01!\x01j\0\x01\x01\x01@\x01\x03req\x07\0\"\x04\0\x0c\
+authenticate\x01#\x01j\x01\x0d\x01\x01\x01@\x01\x03req\x0b\0$\x04\0\x0bnew-sessi\
+on\x01%\x01j\x01\x11\x01\x01\x01@\x01\x03req\x0f\0&\x04\0\x0cload-session\x01'\x01\
+j\x01\x15\x01\x01\x01@\x01\x03req\x13\0(\x04\0\x0dlist-sessions\x01)\x01j\x01\x19\
+\x01\x01\x01@\x01\x03req\x17\0*\x04\0\x0eresume-session\x01+\x01@\x01\x0asession\
+-id\x09\0\"\x04\0\x0dclose-session\x01,\x01@\x01\x03req\x1b\0\"\x04\0\x10set-ses\
+sion-mode\x01-\x01j\x01\x1f\x01\x01\x01@\x01\x03req\x1d\0.\x04\0\x06prompt\x01/\x01\
+@\x01\x0asession-id\x09\x01\0\x04\0\x06cancel\x010\x04\0\x1byoshuawuyts:acp/agen\
+t@3.0.0\x05+\x04\0\x1eyoshuawuyts:acp/provider@3.0.0\x04\0\x0b\x0e\x01\0\x08prov\
+ider\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.247.0\
+\x10wit-bindgen-rust\x060.57.1";
         };
     };
 }
 #[doc(inline)]
-pub use __export_agent_plugin_impl as export;
+pub use __export_provider_impl as export;
 #[rustfmt::skip]
 #[cfg(target_arch = "wasm32")]
 #[unsafe(
-    link_section = "component-type:wit-bindgen:0.57.1:yoshuawuyts:acp@2.0.6:agent-plugin-with-all-of-its-exports-removed:encoded world"
+    link_section = "component-type:wit-bindgen:0.57.1:yoshuawuyts:acp@3.0.0:provider-with-all-of-its-exports-removed:encoded world"
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 4732] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xd9#\x01A\x02\x01A\x11\
-\x01B\x8c\x01\x01q\x08\x0bparse-error\0\0\x0finvalid-request\0\0\x10method-not-f\
-ound\0\0\x0einvalid-params\0\0\x0einternal-error\0\0\x0dauth-required\0\0\x12res\
-ource-not-found\0\0\x05other\x01z\0\x04\0\x0aerror-code\x03\0\0\x01r\x02\x04code\
-\x01\x07messages\x04\0\x05error\x03\0\x02\x01s\x04\0\x0asession-id\x03\0\x04\x01\
-s\x04\0\x0ctool-call-id\x03\0\x06\x01s\x04\0\x0bterminal-id\x03\0\x08\x01ks\x01r\
-\x03\x04names\x05title\x0a\x07versions\x04\0\x13implementation-info\x03\0\x0b\x01\
-r\x02\x0eread-text-file\x7f\x0fwrite-text-file\x7f\x04\0\x0ffs-capabilities\x03\0\
-\x0d\x01r\x02\x02fs\x0e\x08terminal\x7f\x04\0\x13client-capabilities\x03\0\x0f\x01\
-r\x03\x05image\x7f\x05audio\x7f\x10embedded-context\x7f\x04\0\x13prompt-capabili\
-ties\x03\0\x11\x01r\x02\x04http\x7f\x03sse\x7f\x04\0\x10mcp-capabilities\x03\0\x13\
-\x01r\x03\x0cload-session\x7f\x13prompt-capabilities\x12\x10mcp-capabilities\x14\
-\x04\0\x12agent-capabilities\x03\0\x15\x01r\x03\x02ids\x04names\x0bdescription\x0a\
-\x04\0\x0bauth-method\x03\0\x17\x01k\x0c\x01r\x03\x10protocol-versiony\x13client\
--capabilities\x10\x0bclient-info\x19\x04\0\x12initialize-request\x03\0\x1a\x01p\x18\
-\x01r\x04\x10protocol-versiony\x12agent-capabilities\x16\x0aagent-info\x19\x0cau\
-th-methods\x1c\x04\0\x13initialize-response\x03\0\x1d\x01r\x01\x09method-ids\x04\
-\0\x14authenticate-request\x03\0\x1f\x01r\x02\x04names\x05values\x04\0\x07env-va\
-r\x03\0!\x01r\x02\x04names\x05values\x04\0\x0bhttp-header\x03\0#\x01ps\x01p\"\x01\
-r\x04\x04names\x07commands\x04args%\x03env&\x04\0\x10mcp-server-stdio\x03\0'\x01\
-p$\x01r\x03\x04names\x03urls\x07headers)\x04\0\x0fmcp-server-http\x03\0*\x01r\x03\
-\x04names\x03urls\x07headers)\x04\0\x0emcp-server-sse\x03\0,\x01q\x03\x05stdio\x01\
-(\0\x04http\x01+\0\x03sse\x01-\0\x04\0\x0amcp-server\x03\0.\x01p/\x01r\x02\x03cw\
-ds\x0bmcp-servers0\x04\0\x13new-session-request\x03\01\x01r\x01\x0asession-id\x05\
-\x04\0\x14new-session-response\x03\03\x01r\x03\x0asession-id\x05\x03cwds\x0bmcp-\
-servers0\x04\0\x14load-session-request\x03\05\x01r\x01\x04texts\x04\0\x0ctext-co\
-ntent\x03\07\x01r\x03\x04datas\x09mime-types\x03uri\x0a\x04\0\x0dimage-content\x03\
-\09\x01r\x02\x04datas\x09mime-types\x04\0\x0daudio-content\x03\0;\x01kw\x01r\x06\
-\x03uris\x04names\x09mime-type\x0a\x05title\x0a\x0bdescription\x0a\x04size=\x04\0\
-\x0dresource-link\x03\0>\x01r\x03\x03uris\x09mime-type\x0a\x04texts\x04\0\x16tex\
-t-resource-contents\x03\0@\x01r\x03\x03uris\x09mime-type\x0a\x04blobs\x04\0\x16b\
-lob-resource-contents\x03\0B\x01q\x02\x04text\x01\xc1\0\0\x04blob\x01\xc3\0\0\x04\
-\0\x11resource-contents\x03\0D\x01r\x01\x08resource\xc5\0\x04\0\x11embedded-reso\
-urce\x03\0F\x01q\x05\x04text\x018\0\x05image\x01:\0\x05audio\x01<\0\x0dresource-\
-link\x01?\0\x08resource\x01\xc7\0\0\x04\0\x0dcontent-block\x03\0H\x01p\xc9\0\x01\
-r\x02\x0asession-id\x05\x06prompt\xca\0\x04\0\x0eprompt-request\x03\0K\x01m\x05\x08\
-end-turn\x0amax-tokens\x11max-turn-requests\x07refusal\x09cancelled\x04\0\x0bsto\
-p-reason\x03\0M\x01r\x01\x0bstop-reason\xce\0\x04\0\x0fprompt-response\x03\0O\x01\
-m\x09\x04read\x04edit\x06delete\x04move\x06search\x07execute\x05think\x05fetch\x05\
-other\x04\0\x09tool-kind\x03\0Q\x01m\x04\x07pending\x0bin-progress\x09completed\x06\
-failed\x04\0\x10tool-call-status\x03\0S\x01r\x03\x04paths\x08old-text\x0a\x08new\
--texts\x04\0\x04diff\x03\0U\x01q\x03\x07content\x01\xc9\0\0\x04diff\x01\xd6\0\0\x08\
-terminal\x01\x09\0\x04\0\x11tool-call-content\x03\0W\x01ky\x01r\x02\x04paths\x04\
-line\xd9\0\x04\0\x12tool-call-location\x03\0Z\x01p\xd8\0\x01p\xdb\0\x01r\x08\x02\
-id\x07\x05titles\x04kind\xd2\0\x06status\xd4\0\x07content\xdc\0\x09locations\xdd\
-\0\x09raw-input\x0a\x0araw-output\x0a\x04\0\x09tool-call\x03\0^\x01k\xd2\0\x01k\xd4\
-\0\x01k\xdc\0\x01k\xdd\0\x01r\x08\x02id\x07\x05title\x0a\x04kind\xe0\0\x06status\
-\xe1\0\x07content\xe2\0\x09locations\xe3\0\x09raw-input\x0a\x0araw-output\x0a\x04\
-\0\x10tool-call-update\x03\0d\x01m\x03\x04high\x06medium\x03low\x04\0\x13plan-en\
-try-priority\x03\0f\x01m\x03\x07pending\x0bin-progress\x09completed\x04\0\x11pla\
-n-entry-status\x03\0h\x01r\x03\x07contents\x08priority\xe7\0\x06status\xe9\0\x04\
-\0\x0aplan-entry\x03\0j\x01p\xeb\0\x01r\x01\x07entries\xec\0\x04\0\x04plan\x03\0\
-m\x01q\x06\x12user-message-chunk\x01\xc9\0\0\x13agent-message-chunk\x01\xc9\0\0\x13\
-agent-thought-chunk\x01\xc9\0\0\x09tool-call\x01\xdf\0\0\x10tool-call-update\x01\
-\xe5\0\0\x04plan\x01\xee\0\0\x04\0\x0esession-update\x03\0o\x01m\x04\x0aallow-on\
-ce\x0callow-always\x0breject-once\x0dreject-always\x04\0\x16permission-option-ki\
-nd\x03\0q\x01r\x03\x02ids\x04names\x04kind\xf2\0\x04\0\x11permission-option\x03\0\
-s\x01p\xf4\0\x01r\x03\x0asession-id\x05\x09tool-call\xe5\0\x07options\xf5\0\x04\0\
-\x1arequest-permission-request\x03\0v\x01q\x02\x09cancelled\0\0\x08selected\x01s\
-\0\x04\0\x12permission-outcome\x03\0x\x01r\x01\x07outcome\xf9\0\x04\0\x1brequest\
--permission-response\x03\0z\x01r\x04\x0asession-id\x05\x04paths\x04line\xd9\0\x05\
-limit\xd9\0\x04\0\x16read-text-file-request\x03\0|\x01r\x01\x07contents\x04\0\x17\
-read-text-file-response\x03\0~\x01r\x03\x0asession-id\x05\x04paths\x07contents\x04\
-\0\x17write-text-file-request\x03\0\x80\x01\x01r\x06\x0asession-id\x05\x07comman\
-ds\x04args%\x03env&\x03cwd\x0a\x11output-byte-limit=\x04\0\x17create-terminal-re\
-quest\x03\0\x82\x01\x01r\x01\x0bterminal-id\x09\x04\0\x18create-terminal-respons\
-e\x03\0\x84\x01\x01kz\x01r\x02\x09exit-code\x86\x01\x06signal\x0a\x04\0\x14termi\
-nal-exit-status\x03\0\x87\x01\x01k\x88\x01\x01r\x03\x06outputs\x09truncated\x7f\x0b\
-exit-status\x89\x01\x04\0\x0fterminal-output\x03\0\x8a\x01\x03\0\x1byoshuawuyts:\
-acp/types@2.0.6\x05\0\x02\x03\0\0\x0asession-id\x02\x03\0\0\x0esession-update\x02\
-\x03\0\0\x1arequest-permission-request\x02\x03\0\0\x1brequest-permission-respons\
-e\x02\x03\0\0\x16read-text-file-request\x02\x03\0\0\x17read-text-file-response\x02\
-\x03\0\0\x17write-text-file-request\x02\x03\0\0\x17create-terminal-request\x02\x03\
-\0\0\x18create-terminal-response\x02\x03\0\0\x0bterminal-id\x02\x03\0\0\x0ftermi\
-nal-output\x02\x03\0\0\x14terminal-exit-status\x02\x03\0\0\x05error\x01B1\x02\x03\
-\x02\x01\x01\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x02\x04\0\x0esession-up\
-date\x03\0\x02\x02\x03\x02\x01\x03\x04\0\x1arequest-permission-request\x03\0\x04\
-\x02\x03\x02\x01\x04\x04\0\x1brequest-permission-response\x03\0\x06\x02\x03\x02\x01\
-\x05\x04\0\x16read-text-file-request\x03\0\x08\x02\x03\x02\x01\x06\x04\0\x17read\
--text-file-response\x03\0\x0a\x02\x03\x02\x01\x07\x04\0\x17write-text-file-reque\
-st\x03\0\x0c\x02\x03\x02\x01\x08\x04\0\x17create-terminal-request\x03\0\x0e\x02\x03\
-\x02\x01\x09\x04\0\x18create-terminal-response\x03\0\x10\x02\x03\x02\x01\x0a\x04\
-\0\x0bterminal-id\x03\0\x12\x02\x03\x02\x01\x0b\x04\0\x0fterminal-output\x03\0\x14\
-\x02\x03\x02\x01\x0c\x04\0\x14terminal-exit-status\x03\0\x16\x02\x03\x02\x01\x0d\
-\x04\0\x05error\x03\0\x18\x01@\x02\x0asession-id\x01\x06update\x03\x01\0\x04\0\x0e\
-update-session\x01\x1a\x01j\x01\x07\x01\x19\x01@\x01\x03req\x05\0\x1b\x04\0\x12r\
-equest-permission\x01\x1c\x01j\x01\x0b\x01\x19\x01@\x01\x03req\x09\0\x1d\x04\0\x0e\
-read-text-file\x01\x1e\x01j\0\x01\x19\x01@\x01\x03req\x0d\0\x1f\x04\0\x0fwrite-t\
-ext-file\x01\x20\x01j\x01\x11\x01\x19\x01@\x01\x03req\x0f\0!\x04\0\x0fcreate-ter\
-minal\x01\"\x01j\x01\x15\x01\x19\x01@\x02\x0asession-id\x01\x0bterminal-id\x13\0\
-#\x04\0\x13get-terminal-output\x01$\x01j\x01\x17\x01\x19\x01@\x02\x0asession-id\x01\
-\x0bterminal-id\x13\0%\x04\0\x16wait-for-terminal-exit\x01&\x01@\x02\x0asession-\
-id\x01\x0bterminal-id\x13\0\x1f\x04\0\x0dkill-terminal\x01'\x04\0\x10release-ter\
-minal\x01'\x03\0\x1cyoshuawuyts:acp/client@2.0.6\x05\x0e\x04\0Byoshuawuyts:acp/a\
-gent-plugin-with-all-of-its-exports-removed@2.0.6\x04\0\x0b2\x01\0,agent-plugin-\
-with-all-of-its-exports-removed\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0d\
-wit-component\x070.247.0\x10wit-bindgen-rust\x060.57.1";
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 6146] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xe3.\x01A\x02\x01A&\x01\
+B\x04\x01q\x08\x0bparse-error\0\0\x0finvalid-request\0\0\x10method-not-found\0\0\
+\x0einvalid-params\0\0\x0einternal-error\0\0\x0dauth-required\0\0\x12resource-no\
+t-found\0\0\x05other\x01z\0\x04\0\x0aerror-code\x03\0\0\x01r\x02\x04code\x01\x07\
+messages\x04\0\x05error\x03\0\x02\x03\0\x1cyoshuawuyts:acp/errors@3.0.0\x05\0\x01\
+B2\x01s\x04\0\x0asession-id\x03\0\0\x01s\x04\0\x0fsession-mode-id\x03\0\x02\x01r\
+\x02\x04names\x05values\x04\0\x07env-var\x03\0\x04\x01r\x02\x04names\x05values\x04\
+\0\x0bhttp-header\x03\0\x06\x01ps\x01p\x05\x01r\x04\x04names\x07commands\x04args\
+\x08\x03env\x09\x04\0\x10mcp-server-stdio\x03\0\x0a\x01p\x07\x01r\x03\x04names\x03\
+urls\x07headers\x0c\x04\0\x0fmcp-server-http\x03\0\x0d\x01r\x03\x04names\x03urls\
+\x07headers\x0c\x04\0\x0emcp-server-sse\x03\0\x0f\x01q\x03\x05stdio\x01\x0b\0\x04\
+http\x01\x0e\0\x03sse\x01\x10\0\x04\0\x0amcp-server\x03\0\x11\x01ks\x01r\x03\x02\
+id\x03\x04names\x0bdescription\x13\x04\0\x0csession-mode\x03\0\x14\x01p\x15\x01r\
+\x02\x0fcurrent-mode-id\x03\x0favailable-modes\x16\x04\0\x12session-mode-state\x03\
+\0\x17\x01r\x02\x0asession-id\x01\x07mode-id\x03\x04\0\x18set-session-mode-reque\
+st\x03\0\x19\x01p\x12\x01r\x02\x03cwds\x0bmcp-servers\x1b\x04\0\x13new-session-r\
+equest\x03\0\x1c\x01k\x18\x01r\x02\x0asession-id\x01\x05modes\x1e\x04\0\x14new-s\
+ession-response\x03\0\x1f\x01r\x03\x0asession-id\x01\x03cwds\x0bmcp-servers\x1b\x04\
+\0\x14load-session-request\x03\0!\x01r\x01\x05modes\x1e\x04\0\x15load-session-re\
+sponse\x03\0#\x01r\x04\x0asession-id\x01\x03cwds\x05title\x13\x0aupdated-at\x13\x04\
+\0\x0csession-info\x03\0%\x01r\x02\x03cwd\x13\x06cursor\x13\x04\0\x15list-sessio\
+ns-request\x03\0'\x01p&\x01r\x02\x08sessions)\x0bnext-cursor\x13\x04\0\x16list-s\
+essions-response\x03\0*\x01r\x03\x0asession-id\x01\x03cwds\x0bmcp-servers\x1b\x04\
+\0\x16resume-session-request\x03\0,\x01r\x01\x05modes\x1e\x04\0\x17resume-sessio\
+n-response\x03\0.\x01r\x02\x05title\x13\x0aupdated-at\x13\x04\0\x13session-info-\
+update\x03\00\x03\0\x1eyoshuawuyts:acp/sessions@3.0.0\x05\x01\x01B\x14\x01r\x01\x04\
+texts\x04\0\x0ctext-content\x03\0\0\x01ks\x01r\x03\x04datas\x09mime-types\x03uri\
+\x02\x04\0\x0dimage-content\x03\0\x03\x01r\x02\x04datas\x09mime-types\x04\0\x0da\
+udio-content\x03\0\x05\x01kw\x01r\x06\x03uris\x04names\x09mime-type\x02\x05title\
+\x02\x0bdescription\x02\x04size\x07\x04\0\x0dresource-link\x03\0\x08\x01r\x03\x03\
+uris\x09mime-type\x02\x04texts\x04\0\x16text-resource-contents\x03\0\x0a\x01r\x03\
+\x03uris\x09mime-type\x02\x04blobs\x04\0\x16blob-resource-contents\x03\0\x0c\x01\
+q\x02\x04text\x01\x0b\0\x04blob\x01\x0d\0\x04\0\x11resource-contents\x03\0\x0e\x01\
+r\x01\x08resource\x0f\x04\0\x11embedded-resource\x03\0\x10\x01q\x05\x04text\x01\x01\
+\0\x05image\x01\x04\0\x05audio\x01\x06\0\x0dresource-link\x01\x09\0\x08resource\x01\
+\x11\0\x04\0\x0dcontent-block\x03\0\x12\x03\0\x1dyoshuawuyts:acp/content@3.0.0\x05\
+\x02\x02\x03\0\x01\x0asession-id\x02\x03\0\x01\x07env-var\x01B\x14\x02\x03\x02\x01\
+\x03\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x04\x04\0\x07env-var\x03\0\x02\x01\
+s\x04\0\x0bterminal-id\x03\0\x04\x01ps\x01p\x03\x01ks\x01kw\x01r\x06\x0asession-\
+id\x01\x07commands\x04args\x06\x03env\x07\x03cwd\x08\x11output-byte-limit\x09\x04\
+\0\x17create-terminal-request\x03\0\x0a\x01r\x01\x0bterminal-id\x05\x04\0\x18cre\
+ate-terminal-response\x03\0\x0c\x01kz\x01r\x02\x09exit-code\x0e\x06signal\x08\x04\
+\0\x14terminal-exit-status\x03\0\x0f\x01k\x10\x01r\x03\x06outputs\x09truncated\x7f\
+\x0bexit-status\x11\x04\0\x0fterminal-output\x03\0\x12\x03\0\x1fyoshuawuyts:acp/\
+terminals@3.0.0\x05\x05\x02\x03\0\x02\x0dcontent-block\x02\x03\0\x03\x0bterminal\
+-id\x01B2\x02\x03\x02\x01\x03\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x06\x04\
+\0\x0dcontent-block\x03\0\x02\x02\x03\x02\x01\x07\x04\0\x0bterminal-id\x03\0\x04\
+\x01s\x04\0\x0ctool-call-id\x03\0\x06\x01m\x09\x04read\x04edit\x06delete\x04move\
+\x06search\x07execute\x05think\x05fetch\x05other\x04\0\x09tool-kind\x03\0\x08\x01\
+m\x04\x07pending\x0bin-progress\x09completed\x06failed\x04\0\x10tool-call-status\
+\x03\0\x0a\x01ks\x01r\x03\x04paths\x08old-text\x0c\x08new-texts\x04\0\x04diff\x03\
+\0\x0d\x01q\x03\x07content\x01\x03\0\x04diff\x01\x0e\0\x08terminal\x01\x05\0\x04\
+\0\x11tool-call-content\x03\0\x0f\x01ky\x01r\x02\x04paths\x04line\x11\x04\0\x12t\
+ool-call-location\x03\0\x12\x01p\x10\x01p\x13\x01r\x08\x02id\x07\x05titles\x04ki\
+nd\x09\x06status\x0b\x07content\x14\x09locations\x15\x09raw-input\x0c\x0araw-out\
+put\x0c\x04\0\x09tool-call\x03\0\x16\x01k\x09\x01k\x0b\x01k\x14\x01k\x15\x01r\x08\
+\x02id\x07\x05title\x0c\x04kind\x18\x06status\x19\x07content\x1a\x09locations\x1b\
+\x09raw-input\x0c\x0araw-output\x0c\x04\0\x10tool-call-update\x03\0\x1c\x01m\x03\
+\x04high\x06medium\x03low\x04\0\x13plan-entry-priority\x03\0\x1e\x01m\x03\x07pen\
+ding\x0bin-progress\x09completed\x04\0\x11plan-entry-status\x03\0\x20\x01r\x03\x07\
+contents\x08priority\x1f\x06status!\x04\0\x0aplan-entry\x03\0\"\x01p#\x01r\x01\x07\
+entries$\x04\0\x04plan\x03\0%\x01m\x04\x0aallow-once\x0callow-always\x0breject-o\
+nce\x0dreject-always\x04\0\x16permission-option-kind\x03\0'\x01r\x03\x02ids\x04n\
+ames\x04kind(\x04\0\x11permission-option\x03\0)\x01p*\x01r\x03\x0asession-id\x01\
+\x09tool-call\x1d\x07options+\x04\0\x1arequest-permission-request\x03\0,\x01q\x02\
+\x09cancelled\0\0\x08selected\x01s\0\x04\0\x12permission-outcome\x03\0.\x01r\x01\
+\x07outcome/\x04\0\x1brequest-permission-response\x03\00\x03\0\x1byoshuawuyts:ac\
+p/tools@3.0.0\x05\x08\x02\x03\0\x01\x0fsession-mode-id\x02\x03\0\x01\x13session-\
+info-update\x02\x03\0\x04\x09tool-call\x02\x03\0\x04\x10tool-call-update\x02\x03\
+\0\x04\x04plan\x01B\x1d\x02\x03\x02\x01\x03\x04\0\x0asession-id\x03\0\0\x02\x03\x02\
+\x01\x09\x04\0\x0fsession-mode-id\x03\0\x02\x02\x03\x02\x01\x0a\x04\0\x13session\
+-info-update\x03\0\x04\x02\x03\x02\x01\x06\x04\0\x0dcontent-block\x03\0\x06\x02\x03\
+\x02\x01\x0b\x04\0\x09tool-call\x03\0\x08\x02\x03\x02\x01\x0c\x04\0\x10tool-call\
+-update\x03\0\x0a\x02\x03\x02\x01\x0d\x04\0\x04plan\x03\0\x0c\x01p\x07\x01r\x02\x0a\
+session-id\x01\x06prompt\x0e\x04\0\x0eprompt-request\x03\0\x0f\x01m\x05\x08end-t\
+urn\x0amax-tokens\x11max-turn-requests\x07refusal\x09cancelled\x04\0\x0bstop-rea\
+son\x03\0\x11\x01r\x01\x0bstop-reason\x12\x04\0\x0fprompt-response\x03\0\x13\x01\
+r\x01\x04hints\x04\0\x17available-command-input\x03\0\x15\x01k\x16\x01r\x03\x04n\
+ames\x0bdescriptions\x05input\x17\x04\0\x11available-command\x03\0\x18\x01p\x19\x01\
+q\x09\x12user-message-chunk\x01\x07\0\x13agent-message-chunk\x01\x07\0\x13agent-\
+thought-chunk\x01\x07\0\x09tool-call\x01\x09\0\x10tool-call-update\x01\x0b\0\x04\
+plan\x01\x0d\0\x13current-mode-update\x01\x03\0\x13session-info-update\x01\x05\0\
+\x19available-commands-update\x01\x1a\0\x04\0\x0esession-update\x03\0\x1b\x03\0\x1d\
+yoshuawuyts:acp/prompts@3.0.0\x05\x0e\x01B\x09\x02\x03\x02\x01\x03\x04\0\x0asess\
+ion-id\x03\0\0\x01ky\x01r\x04\x0asession-id\x01\x04paths\x04line\x02\x05limit\x02\
+\x04\0\x16read-text-file-request\x03\0\x03\x01r\x01\x07contents\x04\0\x17read-te\
+xt-file-response\x03\0\x05\x01r\x03\x0asession-id\x01\x04paths\x07contents\x04\0\
+\x17write-text-file-request\x03\0\x07\x03\0\x20yoshuawuyts:acp/filesystem@3.0.0\x05\
+\x0f\x02\x03\0\0\x05error\x02\x03\0\x05\x0esession-update\x02\x03\0\x04\x1areque\
+st-permission-request\x02\x03\0\x04\x1brequest-permission-response\x02\x03\0\x06\
+\x16read-text-file-request\x02\x03\0\x06\x17read-text-file-response\x02\x03\0\x06\
+\x17write-text-file-request\x02\x03\0\x03\x17create-terminal-request\x02\x03\0\x03\
+\x18create-terminal-response\x02\x03\0\x03\x0fterminal-output\x02\x03\0\x03\x14t\
+erminal-exit-status\x01B1\x02\x03\x02\x01\x10\x04\0\x05error\x03\0\0\x02\x03\x02\
+\x01\x03\x04\0\x0asession-id\x03\0\x02\x02\x03\x02\x01\x11\x04\0\x0esession-upda\
+te\x03\0\x04\x02\x03\x02\x01\x12\x04\0\x1arequest-permission-request\x03\0\x06\x02\
+\x03\x02\x01\x13\x04\0\x1brequest-permission-response\x03\0\x08\x02\x03\x02\x01\x14\
+\x04\0\x16read-text-file-request\x03\0\x0a\x02\x03\x02\x01\x15\x04\0\x17read-tex\
+t-file-response\x03\0\x0c\x02\x03\x02\x01\x16\x04\0\x17write-text-file-request\x03\
+\0\x0e\x02\x03\x02\x01\x07\x04\0\x0bterminal-id\x03\0\x10\x02\x03\x02\x01\x17\x04\
+\0\x17create-terminal-request\x03\0\x12\x02\x03\x02\x01\x18\x04\0\x18create-term\
+inal-response\x03\0\x14\x02\x03\x02\x01\x19\x04\0\x0fterminal-output\x03\0\x16\x02\
+\x03\x02\x01\x1a\x04\0\x14terminal-exit-status\x03\0\x18\x01@\x02\x0asession-id\x03\
+\x06update\x05\x01\0\x04\0\x0eupdate-session\x01\x1a\x01j\x01\x09\x01\x01\x01@\x01\
+\x03req\x07\0\x1b\x04\0\x12request-permission\x01\x1c\x01j\x01\x0d\x01\x01\x01@\x01\
+\x03req\x0b\0\x1d\x04\0\x0eread-text-file\x01\x1e\x01j\0\x01\x01\x01@\x01\x03req\
+\x0f\0\x1f\x04\0\x0fwrite-text-file\x01\x20\x01j\x01\x15\x01\x01\x01@\x01\x03req\
+\x13\0!\x04\0\x0fcreate-terminal\x01\"\x01j\x01\x17\x01\x01\x01@\x02\x0asession-\
+id\x03\x0bterminal-id\x11\0#\x04\0\x13get-terminal-output\x01$\x01j\x01\x19\x01\x01\
+\x01@\x02\x0asession-id\x03\x0bterminal-id\x11\0%\x04\0\x16wait-for-terminal-exi\
+t\x01&\x01@\x02\x0asession-id\x03\x0bterminal-id\x11\0\x1f\x04\0\x0dkill-termina\
+l\x01'\x04\0\x10release-terminal\x01'\x03\0\x1cyoshuawuyts:acp/client@3.0.0\x05\x1b\
+\x01B\x19\x01ks\x01r\x03\x04names\x05title\0\x07versions\x04\0\x13implementation\
+-info\x03\0\x01\x01r\x02\x0eread-text-file\x7f\x0fwrite-text-file\x7f\x04\0\x0ff\
+s-capabilities\x03\0\x03\x01r\x02\x02fs\x04\x08terminal\x7f\x04\0\x13client-capa\
+bilities\x03\0\x05\x01r\x03\x05image\x7f\x05audio\x7f\x10embedded-context\x7f\x04\
+\0\x13prompt-capabilities\x03\0\x07\x01r\x02\x04http\x7f\x03sse\x7f\x04\0\x10mcp\
+-capabilities\x03\0\x09\x01r\x03\x04list\x7f\x06resume\x7f\x05close\x7f\x04\0\x14\
+session-capabilities\x03\0\x0b\x01r\x04\x0cload-session\x7f\x13prompt-capabiliti\
+es\x08\x10mcp-capabilities\x0a\x14session-capabilities\x0c\x04\0\x12agent-capabi\
+lities\x03\0\x0d\x01r\x03\x02ids\x04names\x0bdescription\0\x04\0\x0bauth-method\x03\
+\0\x0f\x01r\x01\x09method-ids\x04\0\x14authenticate-request\x03\0\x11\x01k\x02\x01\
+r\x03\x10protocol-versiony\x13client-capabilities\x06\x0bclient-info\x13\x04\0\x12\
+initialize-request\x03\0\x14\x01p\x10\x01r\x04\x10protocol-versiony\x12agent-cap\
+abilities\x0e\x0aagent-info\x13\x0cauth-methods\x16\x04\0\x13initialize-response\
+\x03\0\x17\x03\0\x1ayoshuawuyts:acp/init@3.0.0\x05\x1c\x04\0>yoshuawuyts:acp/pro\
+vider-with-all-of-its-exports-removed@3.0.0\x04\0\x0b.\x01\0(provider-with-all-o\
+f-its-exports-removed\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-com\
+ponent\x070.247.0\x10wit-bindgen-rust\x060.57.1";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

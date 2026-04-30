@@ -5,10 +5,10 @@
 use agent_client_protocol::Error as AcpError;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::acp;
 use crate::state::{HostState, OutboundEvent};
 use crate::translate;
 use crate::yoshuawuyts::acp::client;
-use crate::yoshuawuyts::acp::types as acp;
 
 /// Send an outbound event and await the bridge task's reply, translating
 /// any transport-level failure (channel closed, no response) into an ACP

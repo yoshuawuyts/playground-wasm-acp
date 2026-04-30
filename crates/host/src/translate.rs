@@ -11,7 +11,7 @@ use agent_client_protocol::schema;
 use agent_client_protocol::{Error as AcpError, ErrorCode as AcpErrorCode};
 use tracing::debug;
 
-use crate::yoshuawuyts::acp::types as wit;
+use crate::acp as wit;
 
 // -----------------------------------------------------------------------------
 // JSON synthesis helper
@@ -276,6 +276,18 @@ pub fn session_update_wit_to_schema(
             debug!(session = %session_id, "dropped session update: plan (not yet wired)");
             None
         }
+        wit::SessionUpdate::CurrentModeUpdate(_) => {
+            debug!(session = %session_id, "dropped session update: current-mode-update (not yet wired)");
+            None
+        }
+        wit::SessionUpdate::SessionInfoUpdate(_) => {
+            debug!(session = %session_id, "dropped session update: session-info-update (not yet wired)");
+            None
+        }
+        wit::SessionUpdate::AvailableCommandsUpdate(_) => {
+            debug!(session = %session_id, "dropped session update: available-commands-update (not yet wired)");
+            None
+        }
     }?;
     let (kind, b) = block;
     let schema_block = content_block_wit_to_schema(&session_id, b)?;
@@ -531,6 +543,11 @@ mod tests {
                 mcp_capabilities: wit::McpCapabilities {
                     http: true,
                     sse: false,
+                },
+                session_capabilities: wit::SessionCapabilities {
+                    list: false,
+                    resume: false,
+                    close: false,
                 },
             },
             agent_info: Some(wit::ImplementationInfo {

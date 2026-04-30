@@ -8,11 +8,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use acp_wasm_sys::exports::yoshuawuyts::acp::agent::Guest;
 use acp_wasm_sys::yoshuawuyts::acp::client;
-use acp_wasm_sys::yoshuawuyts::acp::types::{
-    AgentCapabilities, AuthenticateRequest, ContentBlock, Error, ErrorCode, ImplementationInfo,
-    InitializeRequest, InitializeResponse, LoadSessionRequest, McpCapabilities, NewSessionRequest,
-    NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse, SessionId,
-    SessionUpdate, StopReason, TextContent,
+use acp_wasm_sys::yoshuawuyts::acp::content::{ContentBlock, TextContent};
+use acp_wasm_sys::yoshuawuyts::acp::errors::{Error, ErrorCode};
+use acp_wasm_sys::yoshuawuyts::acp::init::{
+    AgentCapabilities, AuthenticateRequest, ImplementationInfo, InitializeRequest,
+    InitializeResponse, McpCapabilities, PromptCapabilities, SessionCapabilities,
+};
+use acp_wasm_sys::yoshuawuyts::acp::prompts::{
+    PromptRequest, PromptResponse, SessionUpdate, StopReason,
+};
+use acp_wasm_sys::yoshuawuyts::acp::sessions::{
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
+    NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse, SessionId,
+    SetSessionModeRequest,
 };
 
 use crate::ollama::Message;
@@ -68,6 +76,11 @@ impl Guest for Agent {
                     http: false,
                     sse: false,
                 },
+                session_capabilities: SessionCapabilities {
+                    list: false,
+                    resume: false,
+                    close: false,
+                },
             },
             agent_info: Some(ImplementationInfo {
                 name: "ollama-wasm-agent".to_string(),
@@ -88,11 +101,42 @@ impl Guest for Agent {
     fn new_session(_req: NewSessionRequest) -> Result<NewSessionResponse, Error> {
         let id = next_session_id();
         SESSIONS.with(|s| s.borrow_mut().insert(id.clone(), Vec::new()));
-        Ok(NewSessionResponse { session_id: id })
+        Ok(NewSessionResponse {
+            session_id: id,
+            modes: None,
+        })
     }
 
-    fn load_session(_req: LoadSessionRequest) -> Result<(), Error> {
+    fn load_session(_req: LoadSessionRequest) -> Result<LoadSessionResponse, Error> {
         Err(err(ErrorCode::MethodNotFound, "load-session not supported"))
+    }
+
+    fn list_sessions(_req: ListSessionsRequest) -> Result<ListSessionsResponse, Error> {
+        Err(err(
+            ErrorCode::MethodNotFound,
+            "list-sessions not supported",
+        ))
+    }
+
+    fn resume_session(_req: ResumeSessionRequest) -> Result<ResumeSessionResponse, Error> {
+        Err(err(
+            ErrorCode::MethodNotFound,
+            "resume-session not supported",
+        ))
+    }
+
+    fn close_session(_session_id: SessionId) -> Result<(), Error> {
+        Err(err(
+            ErrorCode::MethodNotFound,
+            "close-session not supported",
+        ))
+    }
+
+    fn set_session_mode(_req: SetSessionModeRequest) -> Result<(), Error> {
+        Err(err(
+            ErrorCode::MethodNotFound,
+            "set-session-mode not supported",
+        ))
     }
 
     fn prompt(req: PromptRequest) -> Result<PromptResponse, Error> {
