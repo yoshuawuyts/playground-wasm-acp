@@ -85,6 +85,13 @@ impl SessionFactory {
         WasmAgent::new(&self.engine, &self.component, self.outbound.clone(), None).await
     }
 
+    /// The configured component id (typically the wasm filename stem).
+    /// Used by the bridge to label session modes with a registry-style
+    /// `namespace:name` prefix.
+    pub fn component_id(&self) -> &str {
+        &self.component_id
+    }
+
     /// Build a wasm instance with `/data` preopened to a project- and
     /// component-scoped subdirectory of the data root. Creates the
     /// directory if missing and updates the project's `meta.json` sidecar.

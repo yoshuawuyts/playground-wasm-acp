@@ -130,7 +130,10 @@ pub async fn run(
                 let (actor, handle) = SessionActor::new(agent, 8, registry_new.clone());
                 tokio::task::spawn_local(actor.run());
                 registry_new.insert(session_id, handle);
-                responder.respond(translate::new_session_response_wit_to_schema(resp)?)
+                responder.respond(translate::new_session_response_wit_to_schema(
+                    resp,
+                    factory_new.component_id(),
+                )?)
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -151,7 +154,10 @@ pub async fn run(
                 let (actor, handle) = SessionActor::new(agent, 8, registry_load.clone());
                 tokio::task::spawn_local(actor.run());
                 registry_load.insert(session_key, handle);
-                responder.respond(translate::load_session_response_wit_to_schema(resp)?)
+                responder.respond(translate::load_session_response_wit_to_schema(
+                    resp,
+                    factory_load.component_id(),
+                )?)
             },
             agent_client_protocol::on_receive_request!(),
         )

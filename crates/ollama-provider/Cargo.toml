@@ -1,5 +1,5 @@
 [package]
-name = "guest"
+name = "ollama-provider"
 version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
@@ -17,6 +17,6 @@ futures = { workspace = true }
 acp-wasm-sys = { workspace = true }
 
 [package.metadata.component]
-package = "component:guest"
+package = "component:ollama-provider"
 
 [package.metadata.component.dependencies]

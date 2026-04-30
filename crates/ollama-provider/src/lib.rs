@@ -1,4 +1,4 @@
-//! ACP wasm guest agent that forwards prompts to a local Ollama server.
+//! ACP wasm provider that forwards prompts to a local Ollama server.
 
 mod ollama;
 mod storage;

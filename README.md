@@ -54,8 +54,8 @@ ollama pull llama3.2
 The repo uses [`just`](https://github.com/casey/just) for common tasks:
 
 ```shell
-just build          # build guest wasm component + host binary
-just build-guest    # build only the guest (release, wasm32-wasip2)
+just build          # build the ollama-provider wasm component + host binary
+just build-guest    # build only the ollama-provider (release, wasm32-wasip2)
 just build-host     # build only the host
 just run            # build everything, then run the host on stdio
 just bindgen-guest  # regenerate WIT bindings into crates/acp-wasm-sys
@@ -87,7 +87,7 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false}}}' \
   '{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}' \
   '{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"ollama-session-0","prompt":[{"type":"text","text":"hi"}]}}' \
-  | cargo run -p host -- target/wasm32-wasip2/release/guest.wasm
+  | cargo run -p host -- target/wasm32-wasip2/release/ollama_provider.wasm
 ```
 
 Expect an `initialize` response, a `session/new` response, a sequence of
@@ -98,11 +98,12 @@ the `session/prompt` response with `stopReason: "end_turn"`.
 
 - [`crates/acp-wasm-sys`](crates/acp-wasm-sys) — auto-generated WIT bindings
   for the `agent-plugin` world (regenerate with `just bindgen-guest`).
-- [`crates/guest`](crates/guest) — the wasm component: implements the ACP
-  `agent` interface, calls Ollama via `wstd::http`, keeps per-session
-  conversation history.
-- [`crates/host`](crates/host) — the wasmtime host: instantiates the guest,
-  speaks ACP JSON-RPC over stdio, translates between WIT and ACP schema types.
+- [`crates/ollama-provider`](crates/ollama-provider) — the wasm component:
+  implements the ACP `agent` interface, calls Ollama via `wstd::http`, keeps
+  per-session conversation history.
+- [`crates/host`](crates/host) — the wasmtime host: instantiates the
+  ollama-provider component, speaks ACP JSON-RPC over stdio, translates
+  between WIT and ACP schema types.
 
 ## Limitations
 

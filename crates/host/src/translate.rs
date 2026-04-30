@@ -186,12 +186,13 @@ pub fn new_session_request_schema_to_wit(req: schema::NewSessionRequest) -> NewS
 
 pub fn new_session_response_wit_to_schema(
     resp: NewSessionResponse,
+    component_id: &str,
 ) -> Result<schema::NewSessionResponse, AcpError> {
     // schema::NewSessionResponse is `non_exhaustive`. Roundtrip via JSON to
     // construct it without depending on the (unstable) field set.
     let mut json = serde_json::json!({ "sessionId": resp.session_id });
     if let Some(modes) = resp.modes {
-        json["modes"] = session_mode_state_to_json(modes);
+        json["modes"] = session_mode_state_to_json(modes, component_id);
     }
     synth("new-session response", json)
 }
@@ -213,10 +214,11 @@ pub fn load_session_request_schema_to_wit(req: schema::LoadSessionRequest) -> Lo
 /// for resumed sessions.
 pub fn load_session_response_wit_to_schema(
     resp: LoadSessionResponse,
+    component_id: &str,
 ) -> Result<schema::LoadSessionResponse, AcpError> {
     let mut json = serde_json::json!({});
     if let Some(modes) = resp.modes {
-        json["modes"] = session_mode_state_to_json(modes);
+        json["modes"] = session_mode_state_to_json(modes, component_id);
     }
     synth("load-session response", json)
 }
@@ -240,7 +242,7 @@ pub fn empty_set_session_mode_response() -> Result<schema::SetSessionModeRespons
     synth("set-session-mode response", serde_json::json!({}))
 }
 
-fn session_mode_state_to_json(state: SessionModeState) -> serde_json::Value {
+fn session_mode_state_to_json(state: SessionModeState, component_id: &str) -> serde_json::Value {
     let SessionModeState {
         current_mode_id,
         available_modes,
@@ -249,18 +251,35 @@ fn session_mode_state_to_json(state: SessionModeState) -> serde_json::Value {
         "currentModeId": current_mode_id,
         "availableModes": available_modes
             .into_iter()
-            .map(session_mode_to_json)
+            .map(|m| session_mode_to_json(m, component_id))
             .collect::<Vec<_>>(),
     })
 }
 
-fn session_mode_to_json(mode: SessionMode) -> serde_json::Value {
+/// Split a component id into a `(namespace, name)` pair using `:` as the
+/// separator. If the id has no `:`, it's treated as a bare name in the
+/// implicit `local` namespace, mirroring how `wasm.toml` would refer to an
+/// unregistered local component.
+fn split_component_id(component_id: &str) -> (&str, &str) {
+    match component_id.split_once(':') {
+        Some((ns, name)) if !ns.is_empty() && !name.is_empty() => (ns, name),
+        _ => ("local", component_id),
+    }
+}
+
+fn session_mode_to_json(mode: SessionMode, component_id: &str) -> serde_json::Value {
     let SessionMode {
         id,
         name,
         description,
     } = mode;
-    let mut entry = serde_json::json!({ "id": id, "name": name });
+    // Prefix the display name with the component's `namespace:name` so the
+    // editor's mode picker shows which provider each model belongs to —
+    // useful when several components are loaded side-by-side. The mode
+    // `id` is left untouched so `set-session-mode` round-trips cleanly.
+    let (ns, comp_name) = split_component_id(component_id);
+    let display = format!("{ns}:{comp_name} - {name}");
+    let mut entry = serde_json::json!({ "id": id, "name": display });
     if let Some(d) = description {
         entry["description"] = serde_json::Value::String(d);
     }

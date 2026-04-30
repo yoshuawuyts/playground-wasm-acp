@@ -1,27 +1,27 @@
-# Generate WIT bindings for the guest crate.
+# Generate WIT bindings for the ollama-provider crate.
 bindgen: bindgen-guest
 
-# Build everything: guest wasm component + host binary.
+# Build everything: ollama-provider wasm component + host binary.
 build: build-guest build-host
 
-# Build the guest wasm component (release).
+# Build the ollama-provider wasm component (release).
 build-guest:
-    cargo build -p guest --target wasm32-wasip2 --release
+    cargo build -p ollama-provider --target wasm32-wasip2 --release
 
 # Build the host binary.
 build-host:
     cargo build -p host
 
-# Build the guest, then run the host pointed at it. Extra args are forwarded
-# to the host binary's stdin (use `just run < fixture.jsonl` to drive it).
+# Build the ollama-provider, then run the host pointed at it. Extra args are
+# forwarded to the host binary's stdin (use `just run < fixture.jsonl` to drive it).
 run: build
-    cargo run -p host -- target/wasm32-wasip2/release/guest.wasm
+    cargo run -p host -- target/wasm32-wasip2/release/ollama_provider.wasm
 
-# Build and open docs for the guest bindings.
+# Build and open docs for the ollama-provider bindings.
 doc-guest:
     cargo doc -p acp-wasm-sys --no-deps --open
 
-# Generate guest bindings (provider world).
+# Generate ollama-provider bindings (provider world).
 bindgen-guest:
     rm -rf crates/acp-wasm-sys/wit
     cp -r vendor/wit crates/acp-wasm-sys/wit
