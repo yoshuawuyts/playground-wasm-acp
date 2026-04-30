@@ -15,7 +15,6 @@ use tracing::info;
 use wasmtime::component::Component;
 use wasmtime::{Config, Engine};
 
-mod acp;
 mod bridge;
 mod client_impl;
 mod state;

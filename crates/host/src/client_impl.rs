@@ -5,10 +5,19 @@
 use agent_client_protocol::Error as AcpError;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::acp;
 use crate::state::{HostState, OutboundEvent};
 use crate::translate;
 use crate::yoshuawuyts::acp::client;
+use crate::yoshuawuyts::acp::errors::Error;
+use crate::yoshuawuyts::acp::filesystem::{
+    ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest,
+};
+use crate::yoshuawuyts::acp::prompts::SessionUpdate;
+use crate::yoshuawuyts::acp::sessions::SessionId;
+use crate::yoshuawuyts::acp::terminals::{
+    CreateTerminalRequest, CreateTerminalResponse, TerminalExitStatus, TerminalId, TerminalOutput,
+};
+use crate::yoshuawuyts::acp::tools::{RequestPermissionRequest, RequestPermissionResponse};
 
 /// Send an outbound event and await the bridge task's reply, translating
 /// any transport-level failure (channel closed, no response) into an ACP
@@ -17,7 +26,7 @@ async fn send_and_await<T>(
     outbound: &mpsc::Sender<OutboundEvent>,
     make_event: impl FnOnce(oneshot::Sender<Result<T, AcpError>>) -> OutboundEvent,
     context: &'static str,
-) -> Result<T, acp::Error> {
+) -> Result<T, Error> {
     let (tx, rx) = oneshot::channel();
     // Bounded send: if the bridge task is backed up, this awaits — natural
     // backpressure into the wasm guest.
@@ -35,7 +44,7 @@ async fn send_and_await<T>(
 }
 
 impl client::Host for HostState {
-    async fn update_session(&mut self, session_id: acp::SessionId, update: acp::SessionUpdate) {
+    async fn update_session(&mut self, session_id: SessionId, update: SessionUpdate) {
         if let Some(notif) = translate::session_update_wit_to_schema(session_id, update) {
             // Best-effort: if the receiver is gone, the connection has shut
             // down; nothing useful to do here. Use bounded `send` so we
@@ -49,15 +58,15 @@ impl client::Host for HostState {
 
     async fn request_permission(
         &mut self,
-        _req: acp::RequestPermissionRequest,
-    ) -> Result<acp::RequestPermissionResponse, acp::Error> {
+        _req: RequestPermissionRequest,
+    ) -> Result<RequestPermissionResponse, Error> {
         Err(translate::method_not_found("request-permission not wired"))
     }
 
     async fn read_text_file(
         &mut self,
-        req: acp::ReadTextFileRequest,
-    ) -> Result<acp::ReadTextFileResponse, acp::Error> {
+        req: ReadTextFileRequest,
+    ) -> Result<ReadTextFileResponse, Error> {
         let schema_req = translate::read_text_file_request_wit_to_schema(req);
         let outbound = self.outbound.clone();
         let resp = send_and_await(
@@ -69,7 +78,7 @@ impl client::Host for HostState {
         Ok(translate::read_text_file_response_schema_to_wit(resp))
     }
 
-    async fn write_text_file(&mut self, req: acp::WriteTextFileRequest) -> Result<(), acp::Error> {
+    async fn write_text_file(&mut self, req: WriteTextFileRequest) -> Result<(), Error> {
         let schema_req = translate::write_text_file_request_wit_to_schema(req);
         let outbound = self.outbound.clone();
         send_and_await(
@@ -83,16 +92,16 @@ impl client::Host for HostState {
 
     async fn create_terminal(
         &mut self,
-        _req: acp::CreateTerminalRequest,
-    ) -> Result<acp::CreateTerminalResponse, acp::Error> {
+        _req: CreateTerminalRequest,
+    ) -> Result<CreateTerminalResponse, Error> {
         Err(translate::method_not_found("create-terminal not supported"))
     }
 
     async fn get_terminal_output(
         &mut self,
-        _session_id: acp::SessionId,
-        _terminal_id: acp::TerminalId,
-    ) -> Result<acp::TerminalOutput, acp::Error> {
+        _session_id: SessionId,
+        _terminal_id: TerminalId,
+    ) -> Result<TerminalOutput, Error> {
         Err(translate::method_not_found(
             "get-terminal-output not supported",
         ))
@@ -100,9 +109,9 @@ impl client::Host for HostState {
 
     async fn wait_for_terminal_exit(
         &mut self,
-        _session_id: acp::SessionId,
-        _terminal_id: acp::TerminalId,
-    ) -> Result<acp::TerminalExitStatus, acp::Error> {
+        _session_id: SessionId,
+        _terminal_id: TerminalId,
+    ) -> Result<TerminalExitStatus, Error> {
         Err(translate::method_not_found(
             "wait-for-terminal-exit not supported",
         ))
@@ -110,17 +119,17 @@ impl client::Host for HostState {
 
     async fn kill_terminal(
         &mut self,
-        _session_id: acp::SessionId,
-        _terminal_id: acp::TerminalId,
-    ) -> Result<(), acp::Error> {
+        _session_id: SessionId,
+        _terminal_id: TerminalId,
+    ) -> Result<(), Error> {
         Err(translate::method_not_found("kill-terminal not supported"))
     }
 
     async fn release_terminal(
         &mut self,
-        _session_id: acp::SessionId,
-        _terminal_id: acp::TerminalId,
-    ) -> Result<(), acp::Error> {
+        _session_id: SessionId,
+        _terminal_id: TerminalId,
+    ) -> Result<(), Error> {
         Err(translate::method_not_found(
             "release-terminal not supported",
         ))

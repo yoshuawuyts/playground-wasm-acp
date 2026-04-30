@@ -26,8 +26,13 @@ use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi_http::WasiHttpCtx;
 
 use crate::Provider;
-use crate::acp;
 use crate::state::{HostState, OutboundEvent};
+use crate::yoshuawuyts::acp::errors::Error;
+use crate::yoshuawuyts::acp::init::{AuthenticateRequest, InitializeRequest, InitializeResponse};
+use crate::yoshuawuyts::acp::prompts::{PromptRequest, PromptResponse};
+use crate::yoshuawuyts::acp::sessions::{
+    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
+};
 
 // -----------------------------------------------------------------------------
 // Factory
@@ -109,9 +114,9 @@ impl SessionRegistry {
 /// Outcome of a `prompt` turn. Translation to ACP wire types lives in the
 /// bridge; this is the actor-internal vocabulary.
 pub enum PromptOutcome {
-    Done(acp::PromptResponse),
+    Done(PromptResponse),
     Cancelled,
-    Wit(acp::Error),
+    Wit(Error),
     Trap(wasmtime::Error),
 }
 
@@ -126,7 +131,7 @@ pub enum SessionError {
 /// Commands the bridge sends to a [`SessionActor`].
 enum Message {
     Prompt {
-        req: acp::PromptRequest,
+        req: PromptRequest,
         reply: oneshot::Sender<PromptOutcome>,
     },
 }
@@ -143,7 +148,7 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
-    pub async fn prompt(&self, req: acp::PromptRequest) -> Result<PromptOutcome, SessionError> {
+    pub async fn prompt(&self, req: PromptRequest) -> Result<PromptOutcome, SessionError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Message::Prompt { req, reply: tx })
@@ -276,8 +281,8 @@ impl WasmAgent {
 
     pub async fn call_initialize(
         &mut self,
-        req: &acp::InitializeRequest,
-    ) -> wasmtime::Result<Result<acp::InitializeResponse, acp::Error>> {
+        req: &InitializeRequest,
+    ) -> wasmtime::Result<Result<InitializeResponse, Error>> {
         self.bindings
             .yoshuawuyts_acp_agent()
             .call_initialize(&mut self.store, req)
@@ -286,8 +291,8 @@ impl WasmAgent {
 
     pub async fn call_authenticate(
         &mut self,
-        req: &acp::AuthenticateRequest,
-    ) -> wasmtime::Result<Result<(), acp::Error>> {
+        req: &AuthenticateRequest,
+    ) -> wasmtime::Result<Result<(), Error>> {
         self.bindings
             .yoshuawuyts_acp_agent()
             .call_authenticate(&mut self.store, req)
@@ -296,8 +301,8 @@ impl WasmAgent {
 
     pub async fn call_new_session(
         &mut self,
-        req: &acp::NewSessionRequest,
-    ) -> wasmtime::Result<Result<acp::NewSessionResponse, acp::Error>> {
+        req: &NewSessionRequest,
+    ) -> wasmtime::Result<Result<NewSessionResponse, Error>> {
         self.bindings
             .yoshuawuyts_acp_agent()
             .call_new_session(&mut self.store, req)
@@ -306,8 +311,8 @@ impl WasmAgent {
 
     pub async fn call_load_session(
         &mut self,
-        req: &acp::LoadSessionRequest,
-    ) -> wasmtime::Result<Result<acp::LoadSessionResponse, acp::Error>> {
+        req: &LoadSessionRequest,
+    ) -> wasmtime::Result<Result<LoadSessionResponse, Error>> {
         self.bindings
             .yoshuawuyts_acp_agent()
             .call_load_session(&mut self.store, req)
@@ -316,8 +321,8 @@ impl WasmAgent {
 
     pub async fn call_prompt(
         &mut self,
-        req: &acp::PromptRequest,
-    ) -> wasmtime::Result<Result<acp::PromptResponse, acp::Error>> {
+        req: &PromptRequest,
+    ) -> wasmtime::Result<Result<PromptResponse, Error>> {
         self.bindings
             .yoshuawuyts_acp_agent()
             .call_prompt(&mut self.store, req)

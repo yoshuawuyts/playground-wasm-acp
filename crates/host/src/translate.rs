@@ -1,5 +1,5 @@
 //! Type translation between the wasmtime-generated WIT types
-//! (`yoshuawuyts::acp::types`) and the `agent_client_protocol::schema` types.
+//! (`yoshuawuyts::acp` interfaces) and the `agent_client_protocol::schema` types.
 //!
 //! Only covers the variants the MVP exercises (text content, end-turn,
 //! agent-message-chunk, etc.). Anything we can't translate yields an error
@@ -11,7 +11,20 @@ use agent_client_protocol::schema;
 use agent_client_protocol::{Error as AcpError, ErrorCode as AcpErrorCode};
 use tracing::debug;
 
-use crate::acp as wit;
+use crate::yoshuawuyts::acp::content::{ContentBlock, TextContent};
+use crate::yoshuawuyts::acp::errors::{Error, ErrorCode};
+use crate::yoshuawuyts::acp::filesystem::{
+    ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest,
+};
+use crate::yoshuawuyts::acp::init::{
+    AuthenticateRequest, ClientCapabilities, FsCapabilities, ImplementationInfo,
+    InitializeRequest, InitializeResponse,
+};
+use crate::yoshuawuyts::acp::prompts::{PromptRequest, PromptResponse, SessionUpdate, StopReason};
+use crate::yoshuawuyts::acp::sessions::{
+    EnvVar, HttpHeader, LoadSessionRequest, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
+    NewSessionRequest, NewSessionResponse, SessionId,
+};
 
 // -----------------------------------------------------------------------------
 // JSON synthesis helper
@@ -38,25 +51,25 @@ fn synth<T: serde::de::DeserializeOwned>(
 
 /// Build a WIT `Error` with `method-not-found` semantics. Used by the host's
 /// `client` interface stubs.
-pub fn method_not_found(message: &str) -> wit::Error {
-    wit::Error {
-        code: wit::ErrorCode::MethodNotFound,
+pub fn method_not_found(message: &str) -> Error {
+    Error {
+        code: ErrorCode::MethodNotFound,
         message: message.to_string(),
     }
 }
 
 /// Convert a WIT-side ACP `Error` (returned by the wasm guest) into the
 /// JSON-RPC `Error` shape the `agent_client_protocol` crate expects.
-pub fn wit_error_to_acp(e: wit::Error) -> AcpError {
+pub fn wit_error_to_acp(e: Error) -> AcpError {
     let mut out = match e.code {
-        wit::ErrorCode::ParseError => AcpError::parse_error(),
-        wit::ErrorCode::InvalidRequest => AcpError::invalid_request(),
-        wit::ErrorCode::MethodNotFound => AcpError::method_not_found(),
-        wit::ErrorCode::InvalidParams => AcpError::invalid_params(),
-        wit::ErrorCode::InternalError => AcpError::internal_error(),
-        wit::ErrorCode::AuthRequired => AcpError::auth_required(),
-        wit::ErrorCode::ResourceNotFound => AcpError::resource_not_found(None),
-        wit::ErrorCode::Other(n) => {
+        ErrorCode::ParseError => AcpError::parse_error(),
+        ErrorCode::InvalidRequest => AcpError::invalid_request(),
+        ErrorCode::MethodNotFound => AcpError::method_not_found(),
+        ErrorCode::InvalidParams => AcpError::invalid_params(),
+        ErrorCode::InternalError => AcpError::internal_error(),
+        ErrorCode::AuthRequired => AcpError::auth_required(),
+        ErrorCode::ResourceNotFound => AcpError::resource_not_found(None),
+        ErrorCode::Other(n) => {
             let mut e = AcpError::internal_error();
             e.code = AcpErrorCode::Other(n);
             e
@@ -83,9 +96,9 @@ pub fn anyhow_to_acp(context: &str, e: anyhow::Error) -> AcpError {
 
 /// Build a WIT `Error` with `internal-error` code and the given message.
 /// Used for host-side transport failures bubbling back to the wasm guest.
-pub fn internal_error(message: &str) -> wit::Error {
-    wit::Error {
-        code: wit::ErrorCode::InternalError,
+pub fn internal_error(message: &str) -> Error {
+    Error {
+        code: ErrorCode::InternalError,
         message: message.to_string(),
     }
 }
@@ -106,18 +119,18 @@ pub fn pv_from_u32(n: u32) -> schema::ProtocolVersion {
 // Initialize
 // -----------------------------------------------------------------------------
 
-pub fn init_request_schema_to_wit(req: schema::InitializeRequest) -> wit::InitializeRequest {
+pub fn init_request_schema_to_wit(req: schema::InitializeRequest) -> InitializeRequest {
     let cc = &req.client_capabilities;
-    wit::InitializeRequest {
+    InitializeRequest {
         protocol_version: pv_to_u32(&req.protocol_version),
-        client_capabilities: wit::ClientCapabilities {
-            fs: wit::FsCapabilities {
+        client_capabilities: ClientCapabilities {
+            fs: FsCapabilities {
                 read_text_file: cc.fs.read_text_file,
                 write_text_file: cc.fs.write_text_file,
             },
             terminal: cc.terminal,
         },
-        client_info: req.client_info.map(|i| wit::ImplementationInfo {
+        client_info: req.client_info.map(|i| ImplementationInfo {
             name: i.name,
             title: i.title,
             version: i.version,
@@ -125,7 +138,7 @@ pub fn init_request_schema_to_wit(req: schema::InitializeRequest) -> wit::Initia
     }
 }
 
-pub fn init_response_wit_to_schema(resp: wit::InitializeResponse) -> schema::InitializeResponse {
+pub fn init_response_wit_to_schema(resp: InitializeResponse) -> schema::InitializeResponse {
     let agent_caps = schema::AgentCapabilities::new()
         .load_session(resp.agent_capabilities.load_session)
         .prompt_capabilities(
@@ -153,10 +166,8 @@ pub fn init_response_wit_to_schema(resp: wit::InitializeResponse) -> schema::Ini
 // Authenticate
 // -----------------------------------------------------------------------------
 
-pub fn authenticate_request_schema_to_wit(
-    req: schema::AuthenticateRequest,
-) -> wit::AuthenticateRequest {
-    wit::AuthenticateRequest {
+pub fn authenticate_request_schema_to_wit(req: schema::AuthenticateRequest) -> AuthenticateRequest {
+    AuthenticateRequest {
         method_id: req.method_id.to_string(),
     }
 }
@@ -165,15 +176,15 @@ pub fn authenticate_request_schema_to_wit(
 // New session
 // -----------------------------------------------------------------------------
 
-pub fn new_session_request_schema_to_wit(req: schema::NewSessionRequest) -> wit::NewSessionRequest {
-    wit::NewSessionRequest {
+pub fn new_session_request_schema_to_wit(req: schema::NewSessionRequest) -> NewSessionRequest {
+    NewSessionRequest {
         cwd: path_to_string(&req.cwd),
         mcp_servers: req.mcp_servers.into_iter().map(mcp_server_to_wit).collect(),
     }
 }
 
 pub fn new_session_response_wit_to_schema(
-    resp: wit::NewSessionResponse,
+    resp: NewSessionResponse,
 ) -> Result<schema::NewSessionResponse, AcpError> {
     // schema::NewSessionResponse is `non_exhaustive`. Roundtrip via JSON to
     // construct it without depending on the (unstable) field set.
@@ -187,10 +198,8 @@ pub fn new_session_response_wit_to_schema(
 // Load session
 // -----------------------------------------------------------------------------
 
-pub fn load_session_request_schema_to_wit(
-    req: schema::LoadSessionRequest,
-) -> wit::LoadSessionRequest {
-    wit::LoadSessionRequest {
+pub fn load_session_request_schema_to_wit(req: schema::LoadSessionRequest) -> LoadSessionRequest {
+    LoadSessionRequest {
         session_id: req.session_id.0.to_string(),
         cwd: path_to_string(&req.cwd),
         mcp_servers: req.mcp_servers.into_iter().map(mcp_server_to_wit).collect(),
@@ -201,8 +210,8 @@ pub fn load_session_request_schema_to_wit(
 // Prompt
 // -----------------------------------------------------------------------------
 
-pub fn prompt_request_schema_to_wit(req: schema::PromptRequest) -> wit::PromptRequest {
-    wit::PromptRequest {
+pub fn prompt_request_schema_to_wit(req: schema::PromptRequest) -> PromptRequest {
+    PromptRequest {
         session_id: req.session_id.0.to_string(),
         prompt: req
             .prompt
@@ -213,14 +222,14 @@ pub fn prompt_request_schema_to_wit(req: schema::PromptRequest) -> wit::PromptRe
 }
 
 pub fn prompt_response_wit_to_schema(
-    resp: wit::PromptResponse,
+    resp: PromptResponse,
 ) -> Result<schema::PromptResponse, AcpError> {
     let stop_reason = match resp.stop_reason {
-        wit::StopReason::EndTurn => "end_turn",
-        wit::StopReason::MaxTokens => "max_tokens",
-        wit::StopReason::MaxTurnRequests => "max_turn_requests",
-        wit::StopReason::Refusal => "refusal",
-        wit::StopReason::Cancelled => "cancelled",
+        StopReason::EndTurn => "end_turn",
+        StopReason::MaxTokens => "max_tokens",
+        StopReason::MaxTurnRequests => "max_turn_requests",
+        StopReason::Refusal => "refusal",
+        StopReason::Cancelled => "cancelled",
     };
     synth(
         "prompt response",
@@ -232,8 +241,8 @@ pub fn prompt_response_wit_to_schema(
 /// requires the agent to return this when a `session/cancel` notification
 /// arrives during a prompt turn.
 pub fn synthesised_cancelled_response() -> Result<schema::PromptResponse, AcpError> {
-    prompt_response_wit_to_schema(wit::PromptResponse {
-        stop_reason: wit::StopReason::Cancelled,
+    prompt_response_wit_to_schema(PromptResponse {
+        stop_reason: StopReason::Cancelled,
     })
 }
 
@@ -257,34 +266,34 @@ pub fn empty_load_session_response() -> Result<schema::LoadSessionResponse, AcpE
 /// `SessionNotification` to forward to the editor. Returns `None` for variants
 /// we don't yet support.
 pub fn session_update_wit_to_schema(
-    session_id: wit::SessionId,
-    update: wit::SessionUpdate,
+    session_id: SessionId,
+    update: SessionUpdate,
 ) -> Option<schema::SessionNotification> {
     let block = match update {
-        wit::SessionUpdate::AgentMessageChunk(b) => Some(("agent", b)),
-        wit::SessionUpdate::AgentThoughtChunk(b) => Some(("thought", b)),
-        wit::SessionUpdate::UserMessageChunk(b) => Some(("user", b)),
-        wit::SessionUpdate::ToolCall(_) => {
+        SessionUpdate::AgentMessageChunk(b) => Some(("agent", b)),
+        SessionUpdate::AgentThoughtChunk(b) => Some(("thought", b)),
+        SessionUpdate::UserMessageChunk(b) => Some(("user", b)),
+        SessionUpdate::ToolCall(_) => {
             debug!(session = %session_id, "dropped session update: tool-call (not yet wired)");
             None
         }
-        wit::SessionUpdate::ToolCallUpdate(_) => {
+        SessionUpdate::ToolCallUpdate(_) => {
             debug!(session = %session_id, "dropped session update: tool-call-update (not yet wired)");
             None
         }
-        wit::SessionUpdate::Plan(_) => {
+        SessionUpdate::Plan(_) => {
             debug!(session = %session_id, "dropped session update: plan (not yet wired)");
             None
         }
-        wit::SessionUpdate::CurrentModeUpdate(_) => {
+        SessionUpdate::CurrentModeUpdate(_) => {
             debug!(session = %session_id, "dropped session update: current-mode-update (not yet wired)");
             None
         }
-        wit::SessionUpdate::SessionInfoUpdate(_) => {
+        SessionUpdate::SessionInfoUpdate(_) => {
             debug!(session = %session_id, "dropped session update: session-info-update (not yet wired)");
             None
         }
-        wit::SessionUpdate::AvailableCommandsUpdate(_) => {
+        SessionUpdate::AvailableCommandsUpdate(_) => {
             debug!(session = %session_id, "dropped session update: available-commands-update (not yet wired)");
             None
         }
@@ -308,9 +317,9 @@ pub fn session_update_wit_to_schema(
 // Content blocks (text-only for MVP; non-text variants are dropped)
 // -----------------------------------------------------------------------------
 
-fn content_block_schema_to_wit(block: schema::ContentBlock) -> Option<wit::ContentBlock> {
+fn content_block_schema_to_wit(block: schema::ContentBlock) -> Option<ContentBlock> {
     Some(match block {
-        schema::ContentBlock::Text(t) => wit::ContentBlock::Text(wit::TextContent { text: t.text }),
+        schema::ContentBlock::Text(t) => ContentBlock::Text(TextContent { text: t.text }),
         // Non-text variants ignored for MVP; the wasm guest only handles text.
         other => {
             debug!(
@@ -324,10 +333,10 @@ fn content_block_schema_to_wit(block: schema::ContentBlock) -> Option<wit::Conte
 
 fn content_block_wit_to_schema(
     session_id: &str,
-    block: wit::ContentBlock,
+    block: ContentBlock,
 ) -> Option<schema::ContentBlock> {
     Some(match block {
-        wit::ContentBlock::Text(t) => schema::ContentBlock::Text(schema::TextContent::new(t.text)),
+        ContentBlock::Text(t) => schema::ContentBlock::Text(schema::TextContent::new(t.text)),
         _ => {
             debug!(
                 session = %session_id,
@@ -346,40 +355,40 @@ fn path_to_string(p: &std::path::Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
-fn mcp_server_to_wit(s: schema::McpServer) -> wit::McpServer {
+fn mcp_server_to_wit(s: schema::McpServer) -> McpServer {
     match s {
-        schema::McpServer::Stdio(server) => wit::McpServer::Stdio(wit::McpServerStdio {
+        schema::McpServer::Stdio(server) => McpServer::Stdio(McpServerStdio {
             name: server.name,
             command: path_to_string(&PathBuf::from(server.command)),
             args: server.args,
             env: server
                 .env
                 .into_iter()
-                .map(|e| wit::EnvVar {
+                .map(|e| EnvVar {
                     name: e.name,
                     value: e.value,
                 })
                 .collect(),
         }),
-        schema::McpServer::Http(server) => wit::McpServer::Http(wit::McpServerHttp {
+        schema::McpServer::Http(server) => McpServer::Http(McpServerHttp {
             name: server.name,
             url: server.url.to_string(),
             headers: server
                 .headers
                 .into_iter()
-                .map(|h| wit::HttpHeader {
+                .map(|h| HttpHeader {
                     name: h.name,
                     value: h.value,
                 })
                 .collect(),
         }),
-        schema::McpServer::Sse(server) => wit::McpServer::Sse(wit::McpServerSse {
+        schema::McpServer::Sse(server) => McpServer::Sse(McpServerSse {
             name: server.name,
             url: server.url.to_string(),
             headers: server
                 .headers
                 .into_iter()
-                .map(|h| wit::HttpHeader {
+                .map(|h| HttpHeader {
                     name: h.name,
                     value: h.value,
                 })
@@ -392,7 +401,7 @@ fn mcp_server_to_wit(s: schema::McpServer) -> wit::McpServer {
                 variant = ?std::mem::discriminant(&other),
                 "unknown McpServer variant: substituting empty stdio stub"
             );
-            wit::McpServer::Stdio(wit::McpServerStdio {
+            McpServer::Stdio(McpServerStdio {
                 name: String::from("<unknown>"),
                 command: String::new(),
                 args: Vec::new(),
@@ -407,7 +416,7 @@ fn mcp_server_to_wit(s: schema::McpServer) -> wit::McpServer {
 // -----------------------------------------------------------------------------
 
 pub fn read_text_file_request_wit_to_schema(
-    req: wit::ReadTextFileRequest,
+    req: ReadTextFileRequest,
 ) -> schema::ReadTextFileRequest {
     let mut out = schema::ReadTextFileRequest::new(
         schema::SessionId::from(req.session_id),
@@ -420,14 +429,14 @@ pub fn read_text_file_request_wit_to_schema(
 
 pub fn read_text_file_response_schema_to_wit(
     resp: schema::ReadTextFileResponse,
-) -> wit::ReadTextFileResponse {
-    wit::ReadTextFileResponse {
+) -> ReadTextFileResponse {
+    ReadTextFileResponse {
         content: resp.content,
     }
 }
 
 pub fn write_text_file_request_wit_to_schema(
-    req: wit::WriteTextFileRequest,
+    req: WriteTextFileRequest,
 ) -> schema::WriteTextFileRequest {
     schema::WriteTextFileRequest::new(
         schema::SessionId::from(req.session_id),
@@ -438,21 +447,21 @@ pub fn write_text_file_request_wit_to_schema(
 
 /// Convert an ACP JSON-RPC error into a WIT error to return to the wasm
 /// guest. Inverse of [`wit_error_to_acp`].
-pub fn acp_error_to_wit(e: AcpError) -> wit::Error {
+pub fn acp_error_to_wit(e: AcpError) -> Error {
     let code = match e.code {
-        schema::ErrorCode::ParseError => wit::ErrorCode::ParseError,
-        schema::ErrorCode::InvalidRequest => wit::ErrorCode::InvalidRequest,
-        schema::ErrorCode::MethodNotFound => wit::ErrorCode::MethodNotFound,
-        schema::ErrorCode::InvalidParams => wit::ErrorCode::InvalidParams,
-        schema::ErrorCode::InternalError => wit::ErrorCode::InternalError,
-        schema::ErrorCode::AuthRequired => wit::ErrorCode::AuthRequired,
-        schema::ErrorCode::ResourceNotFound => wit::ErrorCode::ResourceNotFound,
-        AcpErrorCode::Other(n) => wit::ErrorCode::Other(n),
+        schema::ErrorCode::ParseError => ErrorCode::ParseError,
+        schema::ErrorCode::InvalidRequest => ErrorCode::InvalidRequest,
+        schema::ErrorCode::MethodNotFound => ErrorCode::MethodNotFound,
+        schema::ErrorCode::InvalidParams => ErrorCode::InvalidParams,
+        schema::ErrorCode::InternalError => ErrorCode::InternalError,
+        schema::ErrorCode::AuthRequired => ErrorCode::AuthRequired,
+        schema::ErrorCode::ResourceNotFound => ErrorCode::ResourceNotFound,
+        AcpErrorCode::Other(n) => ErrorCode::Other(n),
         // schema::ErrorCode is `non_exhaustive`. Anything new gets reported
         // as InternalError to keep our errors well-typed.
-        _ => wit::ErrorCode::InternalError,
+        _ => ErrorCode::InternalError,
     };
-    wit::Error {
+    Error {
         code,
         message: e.message,
     }
@@ -461,38 +470,27 @@ pub fn acp_error_to_wit(e: AcpError) -> wit::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::yoshuawuyts::acp::content::ImageContent;
+    use crate::yoshuawuyts::acp::init::{
+        AgentCapabilities, McpCapabilities, PromptCapabilities, SessionCapabilities,
+    };
 
     #[test]
     fn error_code_roundtrip() {
         let cases = [
-            (wit::ErrorCode::ParseError, schema::ErrorCode::ParseError),
+            (ErrorCode::ParseError, schema::ErrorCode::ParseError),
+            (ErrorCode::InvalidRequest, schema::ErrorCode::InvalidRequest),
+            (ErrorCode::MethodNotFound, schema::ErrorCode::MethodNotFound),
+            (ErrorCode::InvalidParams, schema::ErrorCode::InvalidParams),
+            (ErrorCode::InternalError, schema::ErrorCode::InternalError),
+            (ErrorCode::AuthRequired, schema::ErrorCode::AuthRequired),
             (
-                wit::ErrorCode::InvalidRequest,
-                schema::ErrorCode::InvalidRequest,
-            ),
-            (
-                wit::ErrorCode::MethodNotFound,
-                schema::ErrorCode::MethodNotFound,
-            ),
-            (
-                wit::ErrorCode::InvalidParams,
-                schema::ErrorCode::InvalidParams,
-            ),
-            (
-                wit::ErrorCode::InternalError,
-                schema::ErrorCode::InternalError,
-            ),
-            (
-                wit::ErrorCode::AuthRequired,
-                schema::ErrorCode::AuthRequired,
-            ),
-            (
-                wit::ErrorCode::ResourceNotFound,
+                ErrorCode::ResourceNotFound,
                 schema::ErrorCode::ResourceNotFound,
             ),
         ];
         for (wit_code, schema_code) in cases {
-            let acp = wit_error_to_acp(wit::Error {
+            let acp = wit_error_to_acp(Error {
                 code: wit_code,
                 message: "msg".into(),
             });
@@ -503,8 +501,8 @@ mod tests {
 
     #[test]
     fn error_code_other_passthrough() {
-        let acp = wit_error_to_acp(wit::Error {
-            code: wit::ErrorCode::Other(-12345),
+        let acp = wit_error_to_acp(Error {
+            code: ErrorCode::Other(-12345),
             message: "boom".into(),
         });
         assert_eq!(acp.code, AcpErrorCode::Other(-12345));
@@ -531,26 +529,26 @@ mod tests {
 
     #[test]
     fn initialize_response_translation() {
-        let resp = wit::InitializeResponse {
+        let resp = InitializeResponse {
             protocol_version: 1,
-            agent_capabilities: wit::AgentCapabilities {
+            agent_capabilities: AgentCapabilities {
                 load_session: true,
-                prompt_capabilities: wit::PromptCapabilities {
+                prompt_capabilities: PromptCapabilities {
                     image: true,
                     audio: false,
                     embedded_context: false,
                 },
-                mcp_capabilities: wit::McpCapabilities {
+                mcp_capabilities: McpCapabilities {
                     http: true,
                     sse: false,
                 },
-                session_capabilities: wit::SessionCapabilities {
+                session_capabilities: SessionCapabilities {
                     list: false,
                     resume: false,
                     close: false,
                 },
             },
-            agent_info: Some(wit::ImplementationInfo {
+            agent_info: Some(ImplementationInfo {
                 name: "ag".into(),
                 title: None,
                 version: "0.1".into(),
@@ -579,7 +577,7 @@ mod tests {
         assert_eq!(wit_req.session_id, "sess-1");
         assert_eq!(wit_req.prompt.len(), 1);
         match &wit_req.prompt[0] {
-            wit::ContentBlock::Text(t) => assert_eq!(t.text, "hello"),
+            ContentBlock::Text(t) => assert_eq!(t.text, "hello"),
             other => panic!("expected text, got {other:?}"),
         }
     }
@@ -587,12 +585,12 @@ mod tests {
     #[test]
     fn prompt_response_stop_reasons() {
         for (wit_sr, json_sr) in [
-            (wit::StopReason::EndTurn, "end_turn"),
-            (wit::StopReason::MaxTokens, "max_tokens"),
-            (wit::StopReason::Refusal, "refusal"),
-            (wit::StopReason::Cancelled, "cancelled"),
+            (StopReason::EndTurn, "end_turn"),
+            (StopReason::MaxTokens, "max_tokens"),
+            (StopReason::Refusal, "refusal"),
+            (StopReason::Cancelled, "cancelled"),
         ] {
-            let resp = prompt_response_wit_to_schema(wit::PromptResponse {
+            let resp = prompt_response_wit_to_schema(PromptResponse {
                 stop_reason: wit_sr,
             })
             .expect("synth ok");
@@ -605,9 +603,7 @@ mod tests {
     fn session_update_agent_chunk() {
         let notif = session_update_wit_to_schema(
             "s1".into(),
-            wit::SessionUpdate::AgentMessageChunk(wit::ContentBlock::Text(wit::TextContent {
-                text: "hi".into(),
-            })),
+            SessionUpdate::AgentMessageChunk(ContentBlock::Text(TextContent { text: "hi".into() })),
         )
         .unwrap();
         let json = serde_json::to_value(&notif).unwrap();
@@ -622,7 +618,7 @@ mod tests {
         // dropped rather than panicking or sending malformed data.
         let dropped = session_update_wit_to_schema(
             "s".into(),
-            wit::SessionUpdate::AgentMessageChunk(wit::ContentBlock::Image(wit::ImageContent {
+            SessionUpdate::AgentMessageChunk(ContentBlock::Image(ImageContent {
                 data: "x".into(),
                 mime_type: "image/png".into(),
                 uri: None,
