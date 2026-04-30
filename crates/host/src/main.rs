@@ -58,6 +58,24 @@ fn main() -> Result<()> {
         .map_err(anyhow::Error::from)
         .with_context(|| format!("loading {}", args.wasm_path.display()))?;
 
+    // Per-app data root. Each session gets a project- and component-scoped
+    // subdirectory underneath this:
+    //
+    //   <data_root>/<project_id>/<component_id>/    <-- mounted at /data
+    //
+    // `<project_id>` is a hash of the session's cwd (no path leakage in
+    // the dir name); `<component_id>` is the wasm filename stem. The
+    // result: data is naturally siloed per project so an agent can't
+    // accidentally leak history between unrelated codebases.
+    let data_root = resolve_data_root().context("resolving data root")?;
+    std::fs::create_dir_all(&data_root)
+        .with_context(|| format!("creating data root {}", data_root.display()))?;
+    info!(path = %data_root.display(), "data root");
+
+    let component_id = component_id_from_path(&args.wasm_path)
+        .context("deriving component id from wasm filename")?;
+    info!(component = %component_id, "component id");
+
     // Single-threaded runtime + `LocalSet`: lets us host `!Send` session
     // actors via `spawn_local` while the bridge's `Send`-bound handlers
     // (required by `agent_client_protocol::Builder`) cross the boundary
@@ -69,7 +87,13 @@ fn main() -> Result<()> {
     let local = LocalSet::new();
     local.block_on(&runtime, async move {
         let (outbound_tx, outbound_rx) = mpsc::channel(64);
-        let factory = Arc::new(SessionFactory::new(engine, component, outbound_tx));
+        let factory = Arc::new(SessionFactory::new(
+            engine,
+            component,
+            outbound_tx,
+            data_root,
+            component_id,
+        ));
         let registry = Arc::new(SessionRegistry::new());
 
         info!(path = %args.wasm_path.display(), "loaded wasm component");
@@ -77,4 +101,39 @@ fn main() -> Result<()> {
 
         bridge::run(factory, registry, outbound_rx).await
     })
+}
+
+/// `$XDG_STATE_HOME/playground-wasm-acp`, falling back to
+/// `$HOME/.local/state/playground-wasm-acp`. This is the *root*; per-session
+/// data dirs are subpaths underneath.
+fn resolve_data_root() -> Result<PathBuf> {
+    const APP: &str = "playground-wasm-acp";
+    if let Some(base) = std::env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(base).join(APP));
+    }
+    let home = std::env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("neither XDG_STATE_HOME nor HOME is set"))?;
+    Ok(PathBuf::from(home).join(".local").join("state").join(APP))
+}
+
+/// Derive a component id from the wasm path. We use the file stem; renaming
+/// the binary therefore loses prior data (acceptable for a sample, and a
+/// future `--component-id` flag can override). Restricted to a small
+/// alphabet to avoid surprising filesystem behaviour.
+fn component_id_from_path(path: &std::path::Path) -> Result<String> {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("wasm path has no usable file stem: {}", path.display()))?;
+    let ok = !stem.is_empty()
+        && stem
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+    if !ok {
+        anyhow::bail!(
+            "wasm filename stem {stem:?} contains characters not allowed in a component id (allow [A-Za-z0-9._-])"
+        );
+    }
+    Ok(stem.to_string())
 }

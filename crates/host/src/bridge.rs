@@ -101,17 +101,19 @@ pub async fn run(
         )
         .on_receive_request(
             async move |req: schema::NewSessionRequest, responder, _cx| {
-                // Spin up a fresh instance, run `new-session` on it
-                // directly, then transfer ownership to a [`SessionActor`]
-                // spawned on the local set. The guest mints the session id;
-                // we register the actor under that id.
+                // Spin up a fresh instance scoped to the session's project
+                // (cwd-derived data dir under `/data`), run `new-session`
+                // on it directly, then transfer ownership to a
+                // [`SessionActor`] spawned on the local set. The guest
+                // mints the session id; we register the actor under that
+                // id.
                 //
                 // Outbound `update-session` events emitted *during*
-                // `new-session` carry the guest-minted id and route through
-                // the shared outbound channel, so they reach the editor
-                // even before the registry has the entry.
+                // `new-session` carry the guest-minted id and route
+                // through the shared outbound channel, so they reach the
+                // editor even before the registry has the entry.
                 let mut agent = factory_new
-                    .instantiate()
+                    .instantiate_for_project(&req.cwd)
                     .await
                     .map_err(|e| translate::anyhow_to_acp("new-session: instantiate", e))?;
                 let wit_req = translate::new_session_request_schema_to_wit(req);
@@ -134,7 +136,7 @@ pub async fn run(
                 let session_key = req.session_id.0.to_string();
                 debug!(session = %session_key, "session/load");
                 let mut agent = factory_load
-                    .instantiate()
+                    .instantiate_for_project(&req.cwd)
                     .await
                     .map_err(|e| translate::anyhow_to_acp("load-session: instantiate", e))?;
                 let wit_req = translate::load_session_request_schema_to_wit(req);

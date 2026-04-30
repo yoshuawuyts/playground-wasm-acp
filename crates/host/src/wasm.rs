@@ -15,14 +15,15 @@
 //! once, and drops it.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
-use wasmtime_wasi::WasiCtxBuilder;
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 use wasmtime_wasi_http::WasiHttpCtx;
 
 use crate::Provider;
@@ -40,10 +41,23 @@ use crate::yoshuawuyts::acp::sessions::{
 
 /// Produces fresh wasm instances on demand. Cheap: instantiation from a
 /// pre-loaded `Component` is microseconds.
+///
+/// The factory owns the data *root* and the component id. Per-session data
+/// dirs are constructed at instantiation time as
+/// `<data_root>/<project_id>/<component_id>/`, where `project_id` is a
+/// deterministic hash of the session's working directory. This keeps state
+/// siloed per project so an agent can't accidentally leak data between
+/// codebases.
+///
+/// Stateless calls (`initialize`, `authenticate`) bypass `/data` entirely
+/// via [`Self::instantiate`]; session-creating calls use
+/// [`Self::instantiate_for_project`].
 pub struct SessionFactory {
     engine: Engine,
     component: Component,
     outbound: mpsc::Sender<OutboundEvent>,
+    data_root: PathBuf,
+    component_id: String,
 }
 
 impl SessionFactory {
@@ -51,20 +65,101 @@ impl SessionFactory {
         engine: Engine,
         component: Component,
         outbound: mpsc::Sender<OutboundEvent>,
+        data_root: PathBuf,
+        component_id: String,
     ) -> Self {
         Self {
             engine,
             component,
             outbound,
+            data_root,
+            component_id,
         }
     }
 
-    /// Build a fresh wasm instance with its own store and `HostState`. All
-    /// instances share the same outbound channel, so the bridge task can
-    /// drain events from any session through one receiver.
+    /// Build a wasm instance with no `/data` preopen. Used for stateless
+    /// calls like `initialize` and `authenticate` where there is no
+    /// session and therefore no project scope.
     pub async fn instantiate(&self) -> Result<WasmAgent> {
-        WasmAgent::new(&self.engine, &self.component, self.outbound.clone()).await
+        WasmAgent::new(&self.engine, &self.component, self.outbound.clone(), None).await
     }
+
+    /// Build a wasm instance with `/data` preopened to a project- and
+    /// component-scoped subdirectory of the data root. Creates the
+    /// directory if missing and updates the project's `meta.json` sidecar.
+    pub async fn instantiate_for_project(&self, cwd: &std::path::Path) -> Result<WasmAgent> {
+        let project_id = project_id_from_cwd(cwd);
+        let project_dir = self.data_root.join(&project_id);
+        let component_dir = project_dir.join(&self.component_id);
+        std::fs::create_dir_all(&component_dir)
+            .with_context(|| format!("creating project data dir {}", component_dir.display()))?;
+        // The sidecar lives in `<data_root>/<project_id>/meta.json`, one
+        // level above the wasm preopen. Wasm cannot escape upward, so the
+        // sidecar is structurally read-only from the guest's perspective.
+        update_project_meta(&project_dir, cwd);
+        WasmAgent::new(
+            &self.engine,
+            &self.component,
+            self.outbound.clone(),
+            Some(&component_dir),
+        )
+        .await
+    }
+}
+
+/// Project sidecar: human-readable metadata so an operator inspecting the
+/// data root can tell which directory belongs to which project. Not used
+/// by the runtime; deleting it is harmless.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct ProjectMeta {
+    /// Canonicalised cwd (best-effort) the project id was hashed from.
+    cwd: String,
+    /// RFC3339 timestamp of when this project dir was first created.
+    first_seen: Option<String>,
+    /// RFC3339 timestamp of the last instantiation against this project.
+    last_used: Option<String>,
+}
+
+/// Best-effort write/refresh of the project meta sidecar. Failures are
+/// logged at `debug!` and otherwise ignored — the sidecar is purely a
+/// debugging aid and must never block instantiation.
+fn update_project_meta(project_dir: &std::path::Path, cwd: &std::path::Path) {
+    let meta_path = project_dir.join("meta.json");
+    let canon = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| format!("{}", d.as_secs()));
+    let mut meta: ProjectMeta = std::fs::read(&meta_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    if meta.first_seen.is_none() {
+        meta.first_seen = now.clone();
+    }
+    meta.last_used = now;
+    meta.cwd = canon.to_string_lossy().into_owned();
+    if let Ok(bytes) = serde_json::to_vec_pretty(&meta) {
+        if let Err(e) = std::fs::write(&meta_path, bytes) {
+            tracing::debug!(path = %meta_path.display(), error = %e, "failed to write project meta");
+        }
+    }
+}
+
+/// Hash a working directory to a stable, opaque project id. We canonicalize
+/// best-effort (so symlinked variants of the same path collide on the same
+/// id) and fall back to the raw path on canonicalization failure (e.g. the
+/// directory doesn't exist yet).
+///
+/// Not cryptographic — this is only a directory bucket. The hash is
+/// deliberately opaque so that listing `<data_root>` doesn't reveal which
+/// directories the user has worked in.
+fn project_id_from_cwd(cwd: &std::path::Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let canon = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    canon.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 // -----------------------------------------------------------------------------
@@ -258,18 +353,20 @@ impl WasmAgent {
         engine: &Engine,
         component: &Component,
         outbound: mpsc::Sender<OutboundEvent>,
+        data_dir: Option<&std::path::Path>,
     ) -> Result<Self> {
         let mut linker: Linker<HostState> = Linker::new(engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
         Provider::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |s| s)?;
 
+        let mut wasi = WasiCtxBuilder::new();
+        wasi.inherit_stderr().inherit_stdout().inherit_network();
+        if let Some(dir) = data_dir {
+            wasi.preopened_dir(dir, "/data", DirPerms::all(), FilePerms::all())?;
+        }
         let state = HostState {
-            wasi: WasiCtxBuilder::new()
-                .inherit_stderr()
-                .inherit_stdout()
-                .inherit_network()
-                .build(),
+            wasi: wasi.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
             outbound,

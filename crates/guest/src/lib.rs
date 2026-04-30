@@ -1,6 +1,7 @@
 //! ACP wasm guest agent that forwards prompts to a local Ollama server.
 
 mod ollama;
+mod storage;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -66,7 +67,7 @@ impl Guest for Agent {
         Ok(InitializeResponse {
             protocol_version: 1,
             agent_capabilities: AgentCapabilities {
-                load_session: false,
+                load_session: true,
                 prompt_capabilities: PromptCapabilities {
                     image: false,
                     audio: false,
@@ -78,7 +79,7 @@ impl Guest for Agent {
                 },
                 session_capabilities: SessionCapabilities {
                     list: false,
-                    resume: false,
+                    resume: true,
                     close: false,
                 },
             },
@@ -107,8 +108,30 @@ impl Guest for Agent {
         })
     }
 
-    fn load_session(_req: LoadSessionRequest) -> Result<LoadSessionResponse, Error> {
-        Err(err(ErrorCode::MethodNotFound, "load-session not supported"))
+    fn load_session(req: LoadSessionRequest) -> Result<LoadSessionResponse, Error> {
+        // Load history from `/sessions/<id>.json` if present, then replay
+        // it to the client as `update-session` notifications (per the
+        // ACP spec for `session/load`). Missing file = fresh session.
+        let history = match storage::load(&req.session_id) {
+            Ok(Some(h)) => h,
+            Ok(None) => Vec::new(),
+            Err(e) => return Err(err(ErrorCode::InternalError, &format!("load: {e}"))),
+        };
+        for msg in &history {
+            let block = ContentBlock::Text(TextContent {
+                text: msg.content.clone(),
+            });
+            let update = match msg.role.as_str() {
+                "user" => SessionUpdate::UserMessageChunk(block),
+                "assistant" => SessionUpdate::AgentMessageChunk(block),
+                _ => continue,
+            };
+            client::update_session(&req.session_id, &update);
+        }
+        SESSIONS.with(|s| {
+            s.borrow_mut().insert(req.session_id.clone(), history);
+        });
+        Ok(LoadSessionResponse { modes: None })
     }
 
     fn list_sessions(_req: ListSessionsRequest) -> Result<ListSessionsResponse, Error> {
@@ -118,11 +141,18 @@ impl Guest for Agent {
         ))
     }
 
-    fn resume_session(_req: ResumeSessionRequest) -> Result<ResumeSessionResponse, Error> {
-        Err(err(
-            ErrorCode::MethodNotFound,
-            "resume-session not supported",
-        ))
+    fn resume_session(req: ResumeSessionRequest) -> Result<ResumeSessionResponse, Error> {
+        // Like `load_session`, but the spec forbids replaying history
+        // via `update-session`. Just rehydrate the in-memory map.
+        let history = match storage::load(&req.session_id) {
+            Ok(Some(h)) => h,
+            Ok(None) => Vec::new(),
+            Err(e) => return Err(err(ErrorCode::InternalError, &format!("resume: {e}"))),
+        };
+        SESSIONS.with(|s| {
+            s.borrow_mut().insert(req.session_id, history);
+        });
+        Ok(ResumeSessionResponse { modes: None })
     }
 
     fn close_session(_session_id: SessionId) -> Result<(), Error> {
@@ -171,15 +201,33 @@ impl Guest for Agent {
         }))
         .map_err(|e| err(ErrorCode::InternalError, &format!("ollama: {e}")))?;
 
-        // Record the assistant's reply for the next turn.
-        SESSIONS.with(|s| {
-            if let Some(entry) = s.borrow_mut().get_mut(&req.session_id) {
+        // Record the assistant's reply for the next turn, then persist
+        // the updated history so the next instance can `load`/`resume`.
+        let history_snapshot = SESSIONS.with(|s| {
+            let mut sessions = s.borrow_mut();
+            if let Some(entry) = sessions.get_mut(&req.session_id) {
                 entry.push(Message {
                     role: "assistant".to_string(),
                     content: assistant,
                 });
+                entry.clone()
+            } else {
+                Vec::new()
             }
         });
+        if !history_snapshot.is_empty() {
+            if let Err(e) = storage::save(&req.session_id, &history_snapshot) {
+                // Persistence is best-effort: a failed save shouldn't fail
+                // the prompt turn (the user already saw the reply). Log
+                // via a thought chunk so it's visible.
+                client::update_session(
+                    &req.session_id,
+                    &SessionUpdate::AgentThoughtChunk(ContentBlock::Text(TextContent {
+                        text: format!("(failed to persist session: {e})"),
+                    })),
+                );
+            }
+        }
 
         Ok(PromptResponse {
             stop_reason: StopReason::EndTurn,
