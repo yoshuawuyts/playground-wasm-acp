@@ -363,6 +363,12 @@ impl WasmAgent {
         let mut wasi = WasiCtxBuilder::new();
         wasi.inherit_stderr().inherit_stdout().inherit_network();
         if let Some(dir) = data_dir {
+            // `/data` is the component's private read-write state. File
+            // access to the user's workspace deliberately *not* preopened:
+            // ACP's `fs/read_text_file` / `fs/write_text_file` go through
+            // the editor (sees unsaved buffers, capability-gated). A raw
+            // preopen would bypass all of that and grant access to every
+            // file under cwd, including dotfiles and secrets.
             wasi.preopened_dir(dir, "/data", DirPerms::all(), FilePerms::all())?;
         }
         let state = HostState {
