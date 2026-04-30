@@ -21,6 +21,9 @@ use crate::yoshuawuyts::acp::init::{
     InitializeResponse,
 };
 use crate::yoshuawuyts::acp::prompts::{PromptRequest, PromptResponse, SessionUpdate, StopReason};
+use crate::yoshuawuyts::acp::tools::{
+    ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
+};
 use crate::yoshuawuyts::acp::sessions::{
     EnvVar, HttpHeader, LoadSessionRequest, LoadSessionResponse, McpServer, McpServerHttp,
     McpServerSse, McpServerStdio, NewSessionRequest, NewSessionResponse, SessionId, SessionMode,
@@ -351,13 +354,19 @@ pub fn session_update_wit_to_schema(
         SessionUpdate::AgentMessageChunk(b) => Some(("agent", b)),
         SessionUpdate::AgentThoughtChunk(b) => Some(("thought", b)),
         SessionUpdate::UserMessageChunk(b) => Some(("user", b)),
-        SessionUpdate::ToolCall(_) => {
-            debug!(session = %session_id, "dropped session update: tool-call (not yet wired)");
-            None
+        SessionUpdate::ToolCall(call) => {
+            let upd = tool_call_to_schema_update(&session_id, call)?;
+            return Some(schema::SessionNotification::new(
+                schema::SessionId::from(session_id),
+                upd,
+            ));
         }
-        SessionUpdate::ToolCallUpdate(_) => {
-            debug!(session = %session_id, "dropped session update: tool-call-update (not yet wired)");
-            None
+        SessionUpdate::ToolCallUpdate(update) => {
+            let upd = tool_call_update_to_schema_update(&session_id, update)?;
+            return Some(schema::SessionNotification::new(
+                schema::SessionId::from(session_id),
+                upd,
+            ));
         }
         SessionUpdate::Plan(_) => {
             debug!(session = %session_id, "dropped session update: plan (not yet wired)");
@@ -553,6 +562,133 @@ pub fn acp_error_to_wit(e: AcpError) -> Error {
         code,
         message: e.message,
     }
+}
+
+
+
+// -----------------------------------------------------------------------------
+// Tool calls (wasm → editor)
+// -----------------------------------------------------------------------------
+
+/// Map our WIT `ToolKind` to the ACP wire string.
+fn tool_kind_str(kind: ToolKind) -> &'static str {
+    match kind {
+        ToolKind::Read => "read",
+        ToolKind::Edit => "edit",
+        ToolKind::Delete => "delete",
+        ToolKind::Move => "move",
+        ToolKind::Search => "search",
+        ToolKind::Execute => "execute",
+        ToolKind::Think => "think",
+        ToolKind::Fetch => "fetch",
+        ToolKind::Other => "other",
+    }
+}
+
+/// Map our WIT `ToolCallStatus` to the ACP wire string.
+fn tool_status_str(status: ToolCallStatus) -> &'static str {
+    match status {
+        ToolCallStatus::Pending => "pending",
+        ToolCallStatus::InProgress => "in_progress",
+        ToolCallStatus::Completed => "completed",
+        ToolCallStatus::Failed => "failed",
+    }
+}
+
+/// Render a `ToolCallContent` element into the JSON object the wire
+/// expects. Currently only the `content` (standard content block) variant
+/// is forwarded — diff and terminal variants are logged-and-dropped until
+/// they're needed.
+fn tool_call_content_to_json(
+    session_id: &str,
+    content: ToolCallContent,
+) -> Option<serde_json::Value> {
+    match content {
+        ToolCallContent::Content(block) => {
+            let schema_block = content_block_wit_to_schema(session_id, block)?;
+            let inner = serde_json::to_value(schema_block).ok()?;
+            Some(serde_json::json!({ "type": "content", "content": inner }))
+        }
+        ToolCallContent::Diff(_) => {
+            debug!(session = %session_id, "dropped tool-call diff content (not yet wired)");
+            None
+        }
+        ToolCallContent::Terminal(_) => {
+            debug!(session = %session_id, "dropped tool-call terminal content (not yet wired)");
+            None
+        }
+    }
+}
+
+fn tool_call_to_schema_update(
+    session_id: &str,
+    call: ToolCall,
+) -> Option<schema::SessionUpdate> {
+    let content: Vec<serde_json::Value> = call
+        .content
+        .into_iter()
+        .filter_map(|c| tool_call_content_to_json(session_id, c))
+        .collect();
+    let raw_input = call
+        .raw_input
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    let raw_output = call
+        .raw_output
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .or_else(|| call.raw_output.map(serde_json::Value::String));
+    let mut json = serde_json::json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": call.id,
+        "title": call.title,
+        "kind": tool_kind_str(call.kind),
+        "status": tool_status_str(call.status),
+        "content": content,
+    });
+    if let Some(v) = raw_input {
+        json["rawInput"] = v;
+    }
+    if let Some(v) = raw_output {
+        json["rawOutput"] = v;
+    }
+    serde_json::from_value(json).ok()
+}
+
+fn tool_call_update_to_schema_update(
+    session_id: &str,
+    update: ToolCallUpdate,
+) -> Option<schema::SessionUpdate> {
+    let mut json = serde_json::json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": update.id,
+    });
+    if let Some(t) = update.title {
+        json["title"] = serde_json::Value::String(t);
+    }
+    if let Some(k) = update.kind {
+        json["kind"] = serde_json::Value::String(tool_kind_str(k).to_string());
+    }
+    if let Some(s) = update.status {
+        json["status"] = serde_json::Value::String(tool_status_str(s).to_string());
+    }
+    if let Some(content) = update.content {
+        let arr: Vec<serde_json::Value> = content
+            .into_iter()
+            .filter_map(|c| tool_call_content_to_json(session_id, c))
+            .collect();
+        json["content"] = serde_json::Value::Array(arr);
+    }
+    if let Some(raw) = update.raw_input {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            json["rawInput"] = v;
+        }
+    }
+    if let Some(raw) = update.raw_output {
+        json["rawOutput"] = serde_json::from_str::<serde_json::Value>(&raw)
+            .unwrap_or(serde_json::Value::String(raw));
+    }
+    serde_json::from_value(json).ok()
 }
 
 #[cfg(test)]

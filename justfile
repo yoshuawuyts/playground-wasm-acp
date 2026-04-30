@@ -1,11 +1,11 @@
 # Generate WIT bindings for the ollama-provider crate.
-bindgen: bindgen-guest
+bindgen: bindgen-provider
 
 # Build everything: ollama-provider wasm component + host binary.
-build: build-guest build-host
+build: build-provider build-host
 
 # Build the ollama-provider wasm component (release).
-build-guest:
+build-provider:
     cargo build -p ollama-provider --target wasm32-wasip2 --release
 
 # Build the host binary.
@@ -18,11 +18,11 @@ run: build
     cargo run -p host -- target/wasm32-wasip2/release/ollama_provider.wasm
 
 # Build and open docs for the ollama-provider bindings.
-doc-guest:
+doc-provider:
     cargo doc -p acp-wasm-sys --no-deps --open
 
 # Generate ollama-provider bindings (provider world).
-bindgen-guest:
+bindgen-provider:
     rm -rf crates/acp-wasm-sys/wit
     cp -r vendor/wit crates/acp-wasm-sys/wit
     wit-bindgen rust crates/acp-wasm-sys/wit \

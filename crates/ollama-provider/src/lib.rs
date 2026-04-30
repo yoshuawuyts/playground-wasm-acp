@@ -2,6 +2,7 @@
 
 mod ollama;
 mod storage;
+mod tools;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -18,6 +19,7 @@ use acp_wasm_sys::yoshuawuyts::acp::init::{
 use acp_wasm_sys::yoshuawuyts::acp::prompts::{
     PromptRequest, PromptResponse, SessionUpdate, StopReason,
 };
+use acp_wasm_sys::yoshuawuyts::acp::tools::ToolKind;
 use acp_wasm_sys::yoshuawuyts::acp::sessions::{
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
     NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse, SessionId,
@@ -289,7 +291,7 @@ impl Guest for Agent {
         // (plus the active model) to send to Ollama. New sessions can land
         // here without going through `new-session` (e.g. tests); fall back
         // to the default model in that case.
-        let (history, model) = SESSIONS.with(|s| {
+        let (mut history, model) = SESSIONS.with(|s| {
             let mut sessions = s.borrow_mut();
             let entry = sessions
                 .entry(req.session_id.clone())
@@ -297,33 +299,145 @@ impl Guest for Agent {
                     history: Vec::new(),
                     model: ollama::default_model(),
                 });
-            entry.history.push(Message {
-                role: "user".to_string(),
-                content: user_text.clone(),
-            });
+            entry.history.push(Message::user(user_text.clone()));
             (entry.history.clone(), entry.model.clone())
         });
 
+        // Probe whether the active model supports tool-calling. We only
+        // advertise tools when it does; otherwise the request is plain
+        // chat. The probe is best-effort: if `/api/show` fails we just
+        // assume no tool support and degrade to chat. We also surface a
+        // one-time thought chunk so users understand why their model
+        // isn't using tools.
         let session_id = req.session_id.clone();
-        let assistant = wstd::runtime::block_on(ollama::chat(&model, &history, |chunk| {
+        let tools_supported =
+            wstd::runtime::block_on(ollama::supports_tools(&model)).unwrap_or(false);
+        if !tools_supported {
             client::update_session(
                 &session_id,
-                &SessionUpdate::AgentMessageChunk(ContentBlock::Text(TextContent {
-                    text: chunk.to_string(),
+                &SessionUpdate::AgentThoughtChunk(ContentBlock::Text(TextContent {
+                    text: format!(
+                        "(model `{model}` does not advertise tool support; running in chat-only mode)"
+                    ),
                 })),
             );
-        }))
-        .map_err(|e| err(ErrorCode::InternalError, &format!("ollama: {e}")))?;
+        }
+        let advertised_tools = if tools_supported {
+            tools::ollama_tools()
+        } else {
+            Vec::new()
+        };
 
-        // Record the assistant's reply for the next turn, then persist
-        // the updated session so the next instance can `load`/`resume`.
+        // Tool-call loop. The model can answer in one turn (no tool calls
+        // → done) or it can request tools, in which case we dispatch each,
+        // append a `role: "tool"` message per result, and loop. We cap
+        // iterations to avoid runaway models.
+        const MAX_TURNS: usize = 8;
+        let mut tool_call_seq: u64 = 0;
+        let mut stop = StopReason::EndTurn;
+        let mut turns_remaining = MAX_TURNS;
+        loop {
+            if turns_remaining == 0 {
+                stop = StopReason::MaxTurnRequests;
+                break;
+            }
+            turns_remaining -= 1;
+
+            let session_id_chunk = session_id.clone();
+            let turn = wstd::runtime::block_on(ollama::chat(
+                &model,
+                &history,
+                &advertised_tools,
+                |chunk| {
+                    client::update_session(
+                        &session_id_chunk,
+                        &SessionUpdate::AgentMessageChunk(ContentBlock::Text(TextContent {
+                            text: chunk.to_string(),
+                        })),
+                    );
+                },
+            ))
+            .map_err(|e| err(ErrorCode::InternalError, &format!("ollama: {e}")))?;
+
+            // Persist the assistant turn (text + any tool-call requests)
+            // back into history so the next ollama call sees it.
+            history.push(Message::assistant(
+                turn.content.clone(),
+                turn.tool_calls.clone(),
+            ));
+
+            if turn.tool_calls.is_empty() {
+                break;
+            }
+
+            // Dispatch each tool call. For each one, send the editor a
+            // `tool_call` notification (status: in_progress), run the
+            // tool, send a `tool_call_update` (status: completed/failed
+            // with content), and feed the result back as a `role: "tool"`
+            // message for the next iteration.
+            use acp_wasm_sys::yoshuawuyts::acp::content::ContentBlock as Cb;
+            use acp_wasm_sys::yoshuawuyts::acp::content::TextContent as Tc;
+            use acp_wasm_sys::yoshuawuyts::acp::tools::{
+                ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
+            };
+            for call in &turn.tool_calls {
+                tool_call_seq += 1;
+                let tc_id = format!("tc-{tool_call_seq}");
+                let tool = tools::lookup(&call.function.name);
+                let title = tools::render_title(&call.function.name, &call.function.arguments);
+                let raw_input = serde_json::to_string(&call.function.arguments).ok();
+
+                client::update_session(
+                    &session_id,
+                    &SessionUpdate::ToolCall(ToolCall {
+                        id: tc_id.clone(),
+                        title: title.clone(),
+                        kind: tool.map(|t| t.kind).unwrap_or(ToolKind::Other),
+                        status: ToolCallStatus::InProgress,
+                        content: Vec::new(),
+                        locations: Vec::new(),
+                        raw_input: raw_input.clone(),
+                        raw_output: None,
+                    }),
+                );
+
+                let outcome = match tool {
+                    Some(tool) => (tool.run)(&session_id, &call.function.arguments),
+                    None => tools::ToolOutcome::fail(format!(
+                        "unknown tool `{}`",
+                        call.function.name
+                    )),
+                };
+
+                client::update_session(
+                    &session_id,
+                    &SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+                        id: tc_id.clone(),
+                        title: None,
+                        kind: None,
+                        status: Some(if outcome.failed {
+                            ToolCallStatus::Failed
+                        } else {
+                            ToolCallStatus::Completed
+                        }),
+                        content: Some(vec![ToolCallContent::Content(Cb::Text(Tc {
+                            text: outcome.content.clone(),
+                        }))]),
+                        locations: None,
+                        raw_input: None,
+                        raw_output: Some(outcome.content.clone()),
+                    }),
+                );
+
+                history.push(Message::tool(outcome.content));
+            }
+        }
+
+        // Replace the session's history with our updated copy and persist.
         let snapshot = SESSIONS.with(|s| {
             let mut sessions = s.borrow_mut();
             sessions.get_mut(&req.session_id).map(|entry| {
-                entry.history.push(Message {
-                    role: "assistant".to_string(),
-                    content: assistant,
-                });
+                entry.history = history;
                 entry.clone()
             })
         });
@@ -341,9 +455,7 @@ impl Guest for Agent {
             }
         }
 
-        Ok(PromptResponse {
-            stop_reason: StopReason::EndTurn,
-        })
+        Ok(PromptResponse { stop_reason: stop })
     }
 
     fn cancel(_session_id: SessionId) {
