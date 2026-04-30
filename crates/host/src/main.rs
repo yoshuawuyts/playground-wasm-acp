@@ -59,15 +59,15 @@ async fn main() -> Result<()> {
         .map_err(anyhow::Error::from)
         .with_context(|| format!("loading {}", args.wasm_path.display()))?;
 
-    let (updates_tx, updates_rx) = mpsc::unbounded_channel();
+    let (outbound_tx, outbound_rx) = mpsc::channel(64);
     let agent = Arc::new(Mutex::new(
-        WasmAgent::new(&engine, &component, updates_tx).await?,
+        WasmAgent::new(&engine, &component, outbound_tx).await?,
     ));
 
     info!(path = %args.wasm_path.display(), "loaded wasm component");
     info!("listening for ACP JSON-RPC on stdio");
 
-    bridge::run(agent, updates_rx).await
+    bridge::run(agent, outbound_rx).await
 }
 
 

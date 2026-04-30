@@ -53,6 +53,15 @@ pub fn trap_to_acp(context: &str, e: wasmtime::Error) -> AcpError {
     out
 }
 
+/// Build a WIT `Error` with `internal-error` code and the given message.
+/// Used for host-side transport failures bubbling back to the wasm guest.
+pub fn internal_error(message: &str) -> wit::Error {
+    wit::Error {
+        code: wit::ErrorCode::InternalError,
+        message: message.to_string(),
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Protocol version
 // -----------------------------------------------------------------------------
@@ -187,6 +196,15 @@ pub fn prompt_response_wit_to_schema(resp: wit::PromptResponse) -> schema::Promp
     serde_json::from_value(json).expect("PromptResponse JSON shape stable")
 }
 
+/// Build a `PromptResponse` with `stop_reason: cancelled`. The protocol
+/// requires the agent to return this when a `session/cancel` notification
+/// arrives during a prompt turn.
+pub fn synthesised_cancelled_response() -> schema::PromptResponse {
+    prompt_response_wit_to_schema(wit::PromptResponse {
+        stop_reason: wit::StopReason::Cancelled,
+    })
+}
+
 // -----------------------------------------------------------------------------
 // Cancel
 // -----------------------------------------------------------------------------
@@ -305,6 +323,62 @@ fn mcp_server_to_wit(s: schema::McpServer) -> wit::McpServer {
             args: Vec::new(),
             env: Vec::new(),
         }),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// File system (wasm → editor)
+// -----------------------------------------------------------------------------
+
+pub fn read_text_file_request_wit_to_schema(
+    req: wit::ReadTextFileRequest,
+) -> schema::ReadTextFileRequest {
+    let mut out = schema::ReadTextFileRequest::new(
+        schema::SessionId::from(req.session_id),
+        PathBuf::from(req.path),
+    );
+    out.line = req.line;
+    out.limit = req.limit;
+    out
+}
+
+pub fn read_text_file_response_schema_to_wit(
+    resp: schema::ReadTextFileResponse,
+) -> wit::ReadTextFileResponse {
+    wit::ReadTextFileResponse {
+        content: resp.content,
+    }
+}
+
+pub fn write_text_file_request_wit_to_schema(
+    req: wit::WriteTextFileRequest,
+) -> schema::WriteTextFileRequest {
+    schema::WriteTextFileRequest::new(
+        schema::SessionId::from(req.session_id),
+        PathBuf::from(req.path),
+        req.content,
+    )
+}
+
+/// Convert an ACP JSON-RPC error into a WIT error to return to the wasm
+/// guest. Inverse of [`wit_error_to_acp`].
+pub fn acp_error_to_wit(e: AcpError) -> wit::Error {
+    let code = match e.code {
+        schema::ErrorCode::ParseError => wit::ErrorCode::ParseError,
+        schema::ErrorCode::InvalidRequest => wit::ErrorCode::InvalidRequest,
+        schema::ErrorCode::MethodNotFound => wit::ErrorCode::MethodNotFound,
+        schema::ErrorCode::InvalidParams => wit::ErrorCode::InvalidParams,
+        schema::ErrorCode::InternalError => wit::ErrorCode::InternalError,
+        schema::ErrorCode::AuthRequired => wit::ErrorCode::AuthRequired,
+        schema::ErrorCode::ResourceNotFound => wit::ErrorCode::ResourceNotFound,
+        AcpErrorCode::Other(n) => wit::ErrorCode::Other(n),
+        // schema::ErrorCode is `non_exhaustive`. Anything new gets reported
+        // as InternalError to keep our errors well-typed.
+        _ => wit::ErrorCode::InternalError,
+    };
+    wit::Error {
+        code,
+        message: e.message,
     }
 }
 

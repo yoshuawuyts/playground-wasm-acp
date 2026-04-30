@@ -110,12 +110,13 @@ The MVP intentionally cuts a few corners:
 
 - **Text only.** Image, audio, resource-link, and embedded-resource content
   blocks are dropped both directions.
-- **No real cancellation.** `session/cancel` is a no-op; the host serializes
-  all wasm calls behind one mutex, so cancel can't run while prompt is in
-  flight.
-- **No fs/terminal/permission.** The host returns `method-not-found` for
-  these `client` interface methods, so the agent can't read files, run
-  commands, or ask for permission.
+- **Cancellation is host-side only.** A `session/cancel` notification drops
+  the host's `await` on the wasm prompt and returns `stopReason: cancelled`,
+  but the wasm guest itself doesn't get an interrupt — any in-flight HTTP
+  request to Ollama still completes (its result is just discarded).
+- **No terminal/permission methods.** The host returns `method-not-found`
+  for `terminal/*` and `session/request_permission`. `fs/read_text_file`
+  and `fs/write_text_file` are wired through to the editor.
 - **No MCP servers.** Servers passed in `session/new` are accepted but the
   guest doesn't connect to them.
 

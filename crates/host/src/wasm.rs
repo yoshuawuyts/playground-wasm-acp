@@ -2,7 +2,6 @@
 //! bindings. Exposes thin helpers that disjoint-borrow `&mut self.store` and
 //! `&self.bindings` so each call site doesn't have to.
 
-use agent_client_protocol::schema;
 use anyhow::Result;
 use tokio::sync::mpsc;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
@@ -11,7 +10,7 @@ use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi_http::WasiHttpCtx;
 
 use crate::AgentPlugin;
-use crate::state::HostState;
+use crate::state::{HostState, OutboundEvent};
 use crate::yoshuawuyts::acp::types as acp;
 
 /// Owns the wasmtime store + the instantiated `agent-plugin` bindings.
@@ -24,7 +23,7 @@ impl WasmAgent {
     pub async fn new(
         engine: &Engine,
         component: &Component,
-        updates_tx: mpsc::UnboundedSender<schema::SessionNotification>,
+        outbound: mpsc::Sender<OutboundEvent>,
     ) -> Result<Self> {
         let mut linker: Linker<HostState> = Linker::new(engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
@@ -39,7 +38,7 @@ impl WasmAgent {
                 .build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
-            updates: updates_tx,
+            outbound,
         };
         let mut store = Store::new(engine, state);
         let bindings = AgentPlugin::instantiate_async(&mut store, component, &linker).await?;
