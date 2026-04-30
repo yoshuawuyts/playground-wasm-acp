@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use tokio::task::LocalSet;
 use tracing::info;
 use wasmtime::component::Component;
 use wasmtime::{Config, Engine};
@@ -32,7 +32,7 @@ wasmtime::component::bindgen!({
     exports: { default: async },
 });
 
-use crate::wasm::WasmAgent;
+use crate::wasm::{SessionFactory, SessionRegistry};
 
 #[derive(Parser)]
 struct Args {
@@ -40,8 +40,7 @@ struct Args {
     wasm_path: PathBuf,
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -59,15 +58,23 @@ async fn main() -> Result<()> {
         .map_err(anyhow::Error::from)
         .with_context(|| format!("loading {}", args.wasm_path.display()))?;
 
-    let (outbound_tx, outbound_rx) = mpsc::channel(64);
-    let agent = Arc::new(Mutex::new(
-        WasmAgent::new(&engine, &component, outbound_tx).await?,
-    ));
+    // Single-threaded runtime + `LocalSet`: lets us host `!Send` session
+    // actors via `spawn_local` while the bridge's `Send`-bound handlers
+    // (required by `agent_client_protocol::Builder`) cross the boundary
+    // through `Send + Sync` channel handles.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
 
-    info!(path = %args.wasm_path.display(), "loaded wasm component");
-    info!("listening for ACP JSON-RPC on stdio");
+    let local = LocalSet::new();
+    local.block_on(&runtime, async move {
+        let (outbound_tx, outbound_rx) = mpsc::channel(64);
+        let factory = Arc::new(SessionFactory::new(engine, component, outbound_tx));
+        let registry = Arc::new(SessionRegistry::new());
 
-    bridge::run(agent, outbound_rx).await
+        info!(path = %args.wasm_path.display(), "loaded wasm component");
+        info!("listening for ACP JSON-RPC on stdio");
+
+        bridge::run(factory, registry, outbound_rx).await
+    })
 }
-
-

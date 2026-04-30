@@ -18,5 +18,6 @@ wasmtime-wasi-http = { workspace = true }
 agent-client-protocol = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = "1.0"

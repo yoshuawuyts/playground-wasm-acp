@@ -40,7 +40,10 @@ impl client::Host for HostState {
             // Best-effort: if the receiver is gone, the connection has shut
             // down; nothing useful to do here. Use bounded `send` so we
             // backpressure the wasm guest if the editor is slow.
-            let _ = self.outbound.send(OutboundEvent::SessionUpdate(notif)).await;
+            let _ = self
+                .outbound
+                .send(OutboundEvent::SessionUpdate(notif))
+                .await;
         }
     }
 

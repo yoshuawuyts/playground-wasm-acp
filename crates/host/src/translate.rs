@@ -9,8 +9,28 @@ use std::path::PathBuf;
 
 use agent_client_protocol::schema;
 use agent_client_protocol::{Error as AcpError, ErrorCode as AcpErrorCode};
+use tracing::debug;
 
 use crate::yoshuawuyts::acp::types as wit;
+
+// -----------------------------------------------------------------------------
+// JSON synthesis helper
+// -----------------------------------------------------------------------------
+
+/// Some `agent_client_protocol::schema` response types are `non_exhaustive`.
+/// We construct them via JSON to avoid depending on private fields. If the
+/// schema shape ever drifts, surface the failure as an ACP `internal-error`
+/// rather than panicking.
+fn synth<T: serde::de::DeserializeOwned>(
+    context: &'static str,
+    json: serde_json::Value,
+) -> Result<T, AcpError> {
+    serde_json::from_value(json).map_err(|e| {
+        let mut out = AcpError::internal_error();
+        out.message = format!("{context}: schema drift: {e}");
+        out
+    })
+}
 
 // -----------------------------------------------------------------------------
 // Errors
@@ -48,6 +68,14 @@ pub fn wit_error_to_acp(e: wit::Error) -> AcpError {
 
 /// Wrap a wasmtime trap as an internal JSON-RPC error.
 pub fn trap_to_acp(context: &str, e: wasmtime::Error) -> AcpError {
+    let mut out = AcpError::internal_error();
+    out.message = format!("{context}: {e:#}");
+    out
+}
+
+/// Wrap an anyhow error (e.g. from instantiation) as an internal JSON-RPC
+/// error.
+pub fn anyhow_to_acp(context: &str, e: anyhow::Error) -> AcpError {
     let mut out = AcpError::internal_error();
     out.message = format!("{context}: {e:#}");
     out
@@ -137,9 +165,7 @@ pub fn authenticate_request_schema_to_wit(
 // New session
 // -----------------------------------------------------------------------------
 
-pub fn new_session_request_schema_to_wit(
-    req: schema::NewSessionRequest,
-) -> wit::NewSessionRequest {
+pub fn new_session_request_schema_to_wit(req: schema::NewSessionRequest) -> wit::NewSessionRequest {
     wit::NewSessionRequest {
         cwd: path_to_string(&req.cwd),
         mcp_servers: req.mcp_servers.into_iter().map(mcp_server_to_wit).collect(),
@@ -148,11 +174,13 @@ pub fn new_session_request_schema_to_wit(
 
 pub fn new_session_response_wit_to_schema(
     resp: wit::NewSessionResponse,
-) -> schema::NewSessionResponse {
+) -> Result<schema::NewSessionResponse, AcpError> {
     // schema::NewSessionResponse is `non_exhaustive`. Roundtrip via JSON to
     // construct it without depending on the (unstable) field set.
-    let json = serde_json::json!({ "sessionId": resp.session_id });
-    serde_json::from_value(json).expect("NewSessionResponse JSON shape stable")
+    synth(
+        "new-session response",
+        serde_json::json!({ "sessionId": resp.session_id }),
+    )
 }
 
 // -----------------------------------------------------------------------------
@@ -184,7 +212,9 @@ pub fn prompt_request_schema_to_wit(req: schema::PromptRequest) -> wit::PromptRe
     }
 }
 
-pub fn prompt_response_wit_to_schema(resp: wit::PromptResponse) -> schema::PromptResponse {
+pub fn prompt_response_wit_to_schema(
+    resp: wit::PromptResponse,
+) -> Result<schema::PromptResponse, AcpError> {
     let stop_reason = match resp.stop_reason {
         wit::StopReason::EndTurn => "end_turn",
         wit::StopReason::MaxTokens => "max_tokens",
@@ -192,25 +222,31 @@ pub fn prompt_response_wit_to_schema(resp: wit::PromptResponse) -> schema::Promp
         wit::StopReason::Refusal => "refusal",
         wit::StopReason::Cancelled => "cancelled",
     };
-    let json = serde_json::json!({ "stopReason": stop_reason });
-    serde_json::from_value(json).expect("PromptResponse JSON shape stable")
+    synth(
+        "prompt response",
+        serde_json::json!({ "stopReason": stop_reason }),
+    )
 }
 
 /// Build a `PromptResponse` with `stop_reason: cancelled`. The protocol
 /// requires the agent to return this when a `session/cancel` notification
 /// arrives during a prompt turn.
-pub fn synthesised_cancelled_response() -> schema::PromptResponse {
+pub fn synthesised_cancelled_response() -> Result<schema::PromptResponse, AcpError> {
     prompt_response_wit_to_schema(wit::PromptResponse {
         stop_reason: wit::StopReason::Cancelled,
     })
 }
 
-// -----------------------------------------------------------------------------
-// Cancel
-// -----------------------------------------------------------------------------
+/// Empty `AuthenticateResponse`. Constructed via JSON because the schema
+/// type is `non_exhaustive`.
+pub fn empty_authenticate_response() -> Result<schema::AuthenticateResponse, AcpError> {
+    synth("authenticate response", serde_json::json!({}))
+}
 
-pub fn cancel_session_id_schema_to_wit(notif: &schema::CancelNotification) -> wit::SessionId {
-    notif.session_id.0.to_string()
+/// Empty `LoadSessionResponse`. Constructed via JSON because the schema
+/// type is `non_exhaustive`.
+pub fn empty_load_session_response() -> Result<schema::LoadSessionResponse, AcpError> {
+    synth("load-session response", serde_json::json!({}))
 }
 
 // -----------------------------------------------------------------------------
@@ -228,12 +264,21 @@ pub fn session_update_wit_to_schema(
         wit::SessionUpdate::AgentMessageChunk(b) => Some(("agent", b)),
         wit::SessionUpdate::AgentThoughtChunk(b) => Some(("thought", b)),
         wit::SessionUpdate::UserMessageChunk(b) => Some(("user", b)),
-        wit::SessionUpdate::ToolCall(_)
-        | wit::SessionUpdate::ToolCallUpdate(_)
-        | wit::SessionUpdate::Plan(_) => None,
+        wit::SessionUpdate::ToolCall(_) => {
+            debug!(session = %session_id, "dropped session update: tool-call (not yet wired)");
+            None
+        }
+        wit::SessionUpdate::ToolCallUpdate(_) => {
+            debug!(session = %session_id, "dropped session update: tool-call-update (not yet wired)");
+            None
+        }
+        wit::SessionUpdate::Plan(_) => {
+            debug!(session = %session_id, "dropped session update: plan (not yet wired)");
+            None
+        }
     }?;
     let (kind, b) = block;
-    let schema_block = content_block_wit_to_schema(b)?;
+    let schema_block = content_block_wit_to_schema(&session_id, b)?;
     let chunk = schema::ContentChunk::new(schema_block);
     let upd = match kind {
         "agent" => schema::SessionUpdate::AgentMessageChunk(chunk),
@@ -255,16 +300,29 @@ fn content_block_schema_to_wit(block: schema::ContentBlock) -> Option<wit::Conte
     Some(match block {
         schema::ContentBlock::Text(t) => wit::ContentBlock::Text(wit::TextContent { text: t.text }),
         // Non-text variants ignored for MVP; the wasm guest only handles text.
-        _ => return None,
+        other => {
+            debug!(
+                variant = ?std::mem::discriminant(&other),
+                "dropped inbound content block: non-text variant not yet supported"
+            );
+            return None;
+        }
     })
 }
 
-fn content_block_wit_to_schema(block: wit::ContentBlock) -> Option<schema::ContentBlock> {
+fn content_block_wit_to_schema(
+    session_id: &str,
+    block: wit::ContentBlock,
+) -> Option<schema::ContentBlock> {
     Some(match block {
-        wit::ContentBlock::Text(t) => {
-            schema::ContentBlock::Text(schema::TextContent::new(t.text))
+        wit::ContentBlock::Text(t) => schema::ContentBlock::Text(schema::TextContent::new(t.text)),
+        _ => {
+            debug!(
+                session = %session_id,
+                "dropped outbound content block: non-text variant not yet supported"
+            );
+            return None;
         }
-        _ => return None,
     })
 }
 
@@ -317,12 +375,18 @@ fn mcp_server_to_wit(s: schema::McpServer) -> wit::McpServer {
         }),
         // Schema enum is `non_exhaustive`; future variants are dropped to a
         // stub stdio entry so we don't crash on protocol additions.
-        _ => wit::McpServer::Stdio(wit::McpServerStdio {
-            name: String::from("<unknown>"),
-            command: String::new(),
-            args: Vec::new(),
-            env: Vec::new(),
-        }),
+        other => {
+            debug!(
+                variant = ?std::mem::discriminant(&other),
+                "unknown McpServer variant: substituting empty stdio stub"
+            );
+            wit::McpServer::Stdio(wit::McpServerStdio {
+                name: String::from("<unknown>"),
+                command: String::new(),
+                args: Vec::new(),
+                env: Vec::new(),
+            })
+        }
     }
 }
 
@@ -511,7 +575,10 @@ mod tests {
             (wit::StopReason::Refusal, "refusal"),
             (wit::StopReason::Cancelled, "cancelled"),
         ] {
-            let resp = prompt_response_wit_to_schema(wit::PromptResponse { stop_reason: wit_sr });
+            let resp = prompt_response_wit_to_schema(wit::PromptResponse {
+                stop_reason: wit_sr,
+            })
+            .expect("synth ok");
             let json = serde_json::to_value(&resp).unwrap();
             assert_eq!(json["stopReason"], json_sr);
         }

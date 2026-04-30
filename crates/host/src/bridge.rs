@@ -1,29 +1,48 @@
 //! Wires the ACP `agent_client_protocol::Builder` over stdio and dispatches
-//! incoming JSON-RPC messages into the wasm component.
+//! incoming JSON-RPC messages to per-session actors.
+//!
+//! Each session is owned by a [`SessionActor`] hosted on the top-level
+//! `LocalSet`. The bridge looks up the session's [`SessionHandle`] in the
+//! [`SessionRegistry`] and sends commands over its channel; the actor owns
+//! its [`WasmAgent`] outright. No mutex around the wasm instance.
+//!
+//! Stateless calls (`initialize`, `authenticate`) bypass the actor system:
+//! the bridge spins up a throwaway instance via the [`SessionFactory`],
+//! uses it, and drops it.
+//!
+//! Cancellation: the bridge calls [`SessionHandle::cancel`], which sends on
+//! a `watch` channel that the actor's `tokio::select!` is racing against.
+//! Cancel does not need to acquire the actor's queue and so doesn't wait
+//! behind the very prompt it's interrupting.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use agent_client_protocol::role::acp::Agent as AgentRole;
-use agent_client_protocol::{ByteStreams, schema};
+use agent_client_protocol::{ByteStreams, Error as AcpError, schema};
 use anyhow::Result;
-use tokio::sync::Mutex;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{debug, warn};
 
 use crate::state::OutboundEvent;
 use crate::translate;
-use crate::wasm::WasmAgent;
+use crate::wasm::{PromptOutcome, SessionActor, SessionFactory, SessionHandle, SessionRegistry};
 
-/// Per-session cancellation flag. The cancel handler signals; the prompt
-/// handler watches.
-type CancelMap = Arc<std::sync::Mutex<HashMap<String, watch::Sender<bool>>>>;
+/// Look up a session's handle, or return an ACP `invalid-params` error if
+/// the session id is unknown.
+fn require_session(registry: &SessionRegistry, id: &str) -> Result<SessionHandle, AcpError> {
+    registry.get(id).ok_or_else(|| {
+        let mut e = AcpError::invalid_params();
+        e.message = format!("unknown session id: {id}");
+        e
+    })
+}
 
 /// Run the ACP bridge to completion. Returns when the editor disconnects
 /// (stdin EOF) or an error occurs.
 pub async fn run(
-    agent: Arc<Mutex<WasmAgent>>,
+    factory: Arc<SessionFactory>,
+    registry: Arc<SessionRegistry>,
     mut outbound_rx: mpsc::Receiver<OutboundEvent>,
 ) -> Result<()> {
     let transport = ByteStreams::new(
@@ -31,25 +50,29 @@ pub async fn run(
         tokio::io::stdin().compat(),
     );
 
-    let cancels: CancelMap = Arc::new(std::sync::Mutex::new(HashMap::new()));
-
-    let agent_init = agent.clone();
-    let agent_auth = agent.clone();
-    let agent_new = agent.clone();
-    let agent_load = agent.clone();
-    let agent_prompt = agent.clone();
-    let agent_cancel = agent.clone();
-    let cancels_prompt = cancels.clone();
-    let cancels_cancel = cancels.clone();
+    // Clone the Arcs once per handler closure. Cheap (Arc bump) and keeps
+    // the closures `'static`.
+    let factory_init = factory.clone();
+    let factory_auth = factory.clone();
+    let factory_new = factory.clone();
+    let factory_load = factory.clone();
+    let registry_new = registry.clone();
+    let registry_load = registry.clone();
+    let registry_prompt = registry.clone();
+    let registry_cancel = registry.clone();
 
     AgentRole
         .builder()
         .name("ollama-wasm-host")
         .on_receive_request(
             async move |req: schema::InitializeRequest, responder, _cx| {
-                let mut a = agent_init.lock().await;
+                // Throwaway instance: `initialize` carries no session state.
+                let mut agent = factory_init
+                    .instantiate()
+                    .await
+                    .map_err(|e| translate::anyhow_to_acp("initialize: instantiate", e))?;
                 let wit_req = translate::init_request_schema_to_wit(req);
-                let result = a
+                let result = agent
                     .call_initialize(&wit_req)
                     .await
                     .map_err(|e| translate::trap_to_acp("initialize", e))?;
@@ -60,44 +83,70 @@ pub async fn run(
         )
         .on_receive_request(
             async move |req: schema::AuthenticateRequest, responder, _cx| {
-                let mut a = agent_auth.lock().await;
+                // Throwaway instance: `authenticate` is stateless; the host
+                // doesn't carry credentials between calls.
+                let mut agent = factory_auth
+                    .instantiate()
+                    .await
+                    .map_err(|e| translate::anyhow_to_acp("authenticate: instantiate", e))?;
                 let wit_req = translate::authenticate_request_schema_to_wit(req);
-                let result = a
+                let result = agent
                     .call_authenticate(&wit_req)
                     .await
                     .map_err(|e| translate::trap_to_acp("authenticate", e))?;
                 result.map_err(translate::wit_error_to_acp)?;
-                let empty: schema::AuthenticateResponse =
-                    serde_json::from_value(serde_json::json!({})).expect("empty auth response");
-                responder.respond(empty)
+                responder.respond(translate::empty_authenticate_response()?)
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
             async move |req: schema::NewSessionRequest, responder, _cx| {
-                let mut a = agent_new.lock().await;
+                // Spin up a fresh instance, run `new-session` on it
+                // directly, then transfer ownership to a [`SessionActor`]
+                // spawned on the local set. The guest mints the session id;
+                // we register the actor under that id.
+                //
+                // Outbound `update-session` events emitted *during*
+                // `new-session` carry the guest-minted id and route through
+                // the shared outbound channel, so they reach the editor
+                // even before the registry has the entry.
+                let mut agent = factory_new
+                    .instantiate()
+                    .await
+                    .map_err(|e| translate::anyhow_to_acp("new-session: instantiate", e))?;
                 let wit_req = translate::new_session_request_schema_to_wit(req);
-                let result = a
+                let result = agent
                     .call_new_session(&wit_req)
                     .await
                     .map_err(|e| translate::trap_to_acp("new-session", e))?;
                 let resp = result.map_err(translate::wit_error_to_acp)?;
-                responder.respond(translate::new_session_response_wit_to_schema(resp))
+                debug!(session = %resp.session_id, "session/new");
+                let session_id = resp.session_id.clone();
+                let (actor, handle) = SessionActor::new(agent, 8);
+                tokio::task::spawn_local(actor.run());
+                registry_new.insert(session_id, handle);
+                responder.respond(translate::new_session_response_wit_to_schema(resp)?)
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
             async move |req: schema::LoadSessionRequest, responder, _cx| {
-                let mut a = agent_load.lock().await;
+                let session_key = req.session_id.0.to_string();
+                debug!(session = %session_key, "session/load");
+                let mut agent = factory_load
+                    .instantiate()
+                    .await
+                    .map_err(|e| translate::anyhow_to_acp("load-session: instantiate", e))?;
                 let wit_req = translate::load_session_request_schema_to_wit(req);
-                let result = a
+                let result = agent
                     .call_load_session(&wit_req)
                     .await
                     .map_err(|e| translate::trap_to_acp("load-session", e))?;
                 result.map_err(translate::wit_error_to_acp)?;
-                let empty: schema::LoadSessionResponse =
-                    serde_json::from_value(serde_json::json!({})).expect("empty load response");
-                responder.respond(empty)
+                let (actor, handle) = SessionActor::new(agent, 8);
+                tokio::task::spawn_local(actor.run());
+                registry_load.insert(session_key, handle);
+                responder.respond(translate::empty_load_session_response()?)
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -106,52 +155,42 @@ pub async fn run(
                 let session_key = req.session_id.0.to_string();
                 debug!(session = %session_key, "session/prompt");
 
-                // Register a cancel watch for this turn so a concurrent
-                // session/cancel can interrupt our wasm-side `await`s.
-                let (cancel_tx, mut cancel_rx) = watch::channel(false);
-                cancels_prompt
-                    .lock()
-                    .unwrap()
-                    .insert(session_key.clone(), cancel_tx);
+                let handle = require_session(&registry_prompt, &session_key)?;
+                let wit_req = translate::prompt_request_schema_to_wit(req);
 
-                let result = {
-                    let mut a = agent_prompt.lock().await;
-                    let wit_req = translate::prompt_request_schema_to_wit(req);
-                    tokio::select! {
-                        biased;
-                        // If cancel arrives while we're awaiting the wasm
-                        // call, drop the future and synthesise the spec-
-                        // mandated `cancelled` stop reason.
-                        _ = cancel_rx.changed() => {
-                            Ok(translate::synthesised_cancelled_response())
-                        }
-                        r = a.call_prompt(&wit_req) => match r {
-                            Err(e) => Err(translate::trap_to_acp("prompt", e)),
-                            Ok(Err(e)) => Err(translate::wit_error_to_acp(e)),
-                            Ok(Ok(resp)) => Ok(translate::prompt_response_wit_to_schema(resp)),
-                        }
+                let outcome = handle.prompt(wit_req).await.map_err(|_| {
+                    let mut e = AcpError::internal_error();
+                    e.message = format!("session actor for {session_key} is gone");
+                    e
+                })?;
+
+                let resp = match outcome {
+                    PromptOutcome::Done(r) => translate::prompt_response_wit_to_schema(r)?,
+                    PromptOutcome::Cancelled => {
+                        debug!(session = %session_key, "session/prompt cancelled");
+                        translate::synthesised_cancelled_response()?
                     }
+                    PromptOutcome::Wit(e) => return Err(translate::wit_error_to_acp(e)),
+                    PromptOutcome::Trap(e) => return Err(translate::trap_to_acp("prompt", e)),
                 };
 
-                cancels_prompt.lock().unwrap().remove(&session_key);
-
-                responder.respond(result?)
+                responder.respond(resp)
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_notification(
             async move |notif: schema::CancelNotification, _cx| {
                 let key = notif.session_id.0.to_string();
-                // Signal an in-flight prompt for this session, if any. We
-                // also forward to the wasm guest in case it has any
-                // cooperative cancellation logic of its own (currently a
-                // no-op there).
-                if let Some(tx) = cancels_cancel.lock().unwrap().get(&key) {
-                    let _ = tx.send(true);
+                debug!(session = %key, "session/cancel");
+                // Signal the in-flight prompt via the actor's out-of-band
+                // watch channel. The actor's `tokio::select!` will pick it
+                // up and return `Cancelled` for the current turn. We don't
+                // attempt to deliver a guest-side `cancel` call here:
+                // that's a TODO no-op anyway and would have to queue
+                // behind the running prompt.
+                if let Some(handle) = registry_cancel.get(&key) {
+                    handle.cancel();
                 }
-                let mut a = agent_cancel.lock().await;
-                let sid = translate::cancel_session_id_schema_to_wit(&notif);
-                a.call_cancel(&sid).await.ok();
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
