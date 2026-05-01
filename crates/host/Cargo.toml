@@ -11,7 +11,9 @@ publish = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
 futures = { workspace = true }
+futures-concurrency = { workspace = true }
 wasmtime = { workspace = true, features = ["component-model"] }
 wasmtime-wasi = { workspace = true }
 wasmtime-wasi-http = { workspace = true }

@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use futures_concurrency::future::Race;
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
@@ -256,7 +257,7 @@ pub enum SetModeOutcome {
 pub struct SessionHandle {
     tx: mpsc::Sender<Message>,
     /// Out-of-band cancel signal. The actor races each prompt against this
-    /// via `tokio::select!`, so cancel bypasses the message queue. Putting
+    /// via `futures_concurrency::Race`, so cancel bypasses the message queue. Putting
     /// cancel on the queue would defeat the purpose: it would wait behind
     /// the very prompt it's supposed to interrupt.
     cancel: watch::Sender<bool>,
@@ -355,15 +356,25 @@ impl SessionActor {
                     // only fires for cancel signals arriving *during*
                     // this turn.
                     self.cancel.mark_unchanged();
-                    let outcome = tokio::select! {
-                        biased;
-                        _ = self.cancel.changed() => PromptOutcome::Cancelled,
-                        r = self.agent.call_prompt(&req) => match r {
+                    // Race the prompt against an out-of-band cancel
+                    // signal. Whichever future resolves first decides
+                    // the outcome; the loser is dropped (which for the
+                    // prompt means tearing down its in-flight wasm
+                    // call). `Race` returns the value of whichever
+                    // arm wins, so each arm yields a fully-formed
+                    // `PromptOutcome`.
+                    let prompt_arm = async {
+                        match self.agent.call_prompt(&req).await {
                             Err(e) => PromptOutcome::Trap(e),
                             Ok(Err(e)) => PromptOutcome::Wit(e),
                             Ok(Ok(resp)) => PromptOutcome::Done(resp),
                         }
                     };
+                    let cancel_arm = async {
+                        let _ = self.cancel.changed().await;
+                        PromptOutcome::Cancelled
+                    };
+                    let outcome = (cancel_arm, prompt_arm).race().await;
                     if reply.send(outcome).is_err() {
                         warn!("prompt caller dropped before response was sent");
                     }

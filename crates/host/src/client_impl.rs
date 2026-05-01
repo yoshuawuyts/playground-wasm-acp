@@ -29,7 +29,7 @@ use crate::yoshuawuyts::acp::tools::{RequestPermissionRequest, RequestPermission
 ///
 /// 10s is a guess; tune later. If a tool legitimately needs longer, we
 /// should add a per-call override rather than raise this globally.
-const OUTBOUND_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const OUTBOUND_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 async fn send_and_await<T>(
     outbound: &mpsc::Sender<OutboundEvent>,

@@ -237,9 +237,22 @@ pub async fn run(
             agent_client_protocol::on_receive_notification!(),
         )
         .connect_with(transport, async move |cx| {
-            // Drain wasm-emitted outbound events. Notifications are sent
-            // directly; fs requests are spawned so the dispatch loop can
-            // serve their responses concurrently with our drain loop.
+            // Drain wasm-emitted outbound events.
+            //
+            // The drain loop awaits `outbound_rx.recv()` directly so the
+            // surrounding `connect_with` future polls it continuously.
+            // Notifications go out inline; fs requests get their own
+            // task via `tokio::task::spawn_local`, so each
+            // `block_task().await` is driven by our LocalSet rather than
+            // by whatever ad-hoc executor the for_each body would run
+            // on.
+            //
+            // History: `cx.spawn` left replies stranded, and a
+            // `ConcurrentStream::for_each` body never woke `block_task`
+            // reliably either (replies showed up on the wire instantly
+            // but the future only resolved when our outer timeout fired).
+            // `spawn_local` is the only variant that consistently
+            // routes the reply.
             while let Some(event) = outbound_rx.recv().await {
                 match event {
                     OutboundEvent::SessionUpdate(notif) => {
@@ -253,7 +266,7 @@ pub async fn run(
                         let session = req.session_id.0.to_string();
                         debug!(session = %session, path = %path, "fs/read_text_file dispatched");
                         let sent = cx.send_request(req);
-                        if let Err(e) = cx.spawn(async move {
+                        tokio::task::spawn_local(async move {
                             let result = sent.block_task().await;
                             match &result {
                                 Ok(_) => debug!(
@@ -269,17 +282,14 @@ pub async fn run(
                                 ),
                             }
                             let _ = reply.send(result);
-                            Ok(())
-                        }) {
-                            warn!("failed to spawn fs/read responder: {e:?}");
-                        }
+                        });
                     }
                     OutboundEvent::WriteTextFile(req, reply) => {
                         let path = req.path.display().to_string();
                         let session = req.session_id.0.to_string();
                         debug!(session = %session, path = %path, "fs/write_text_file dispatched");
                         let sent = cx.send_request(req);
-                        if let Err(e) = cx.spawn(async move {
+                        tokio::task::spawn_local(async move {
                             let result = sent.block_task().await;
                             match &result {
                                 Ok(_) => debug!(
@@ -295,10 +305,7 @@ pub async fn run(
                                 ),
                             }
                             let _ = reply.send(result);
-                            Ok(())
-                        }) {
-                            warn!("failed to spawn fs/write responder: {e:?}");
-                        }
+                        });
                     }
                 }
             }
