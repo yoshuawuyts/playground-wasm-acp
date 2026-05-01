@@ -22,9 +22,14 @@ use crate::ollama::{OllamaTool, OllamaToolCall};
 /// Outcome of running a tool. Either a string result to feed back into
 /// the model, or an error message that surfaces to the user as a failed
 /// tool-call status.
+///
+/// `locations` are file paths the call ended up acting on (resolved to
+/// absolute form). The bridge forwards these to the editor on the
+/// `tool_call_update`, so the editor can highlight or anchor the activity.
 pub struct ToolOutcome {
     pub content: String,
     pub failed: bool,
+    pub locations: Vec<String>,
 }
 
 impl ToolOutcome {
@@ -32,6 +37,7 @@ impl ToolOutcome {
         Self {
             content: content.into(),
             failed: false,
+            locations: Vec::new(),
         }
     }
 
@@ -39,7 +45,13 @@ impl ToolOutcome {
         Self {
             content: content.into(),
             failed: true,
+            locations: Vec::new(),
         }
+    }
+
+    pub fn with_location(mut self, path: impl Into<String>) -> Self {
+        self.locations.push(path.into());
+        self
     }
 }
 
@@ -73,9 +85,15 @@ pub fn all() -> &'static [Tool] {
         name: "read_file",
         kind: ToolKind::Read,
         description: "Read a UTF-8 text file from the user's project. \
-                      Use this to inspect source files the user mentions \
-                      or that you need to understand. Path may be \
-                      absolute, or relative to the project root.",
+                      Only call this tool when the user explicitly asks \
+                      you to look at a file, or when reading is strictly \
+                      necessary to answer their question. Do NOT call \
+                      this for greetings or general chat. \
+                      \
+                      The `path` argument is a path to a specific file: \
+                      either absolute, or relative to the project root \
+                      (e.g. `src/main.rs`, `Cargo.toml`). It MUST NOT be \
+                      a directory, `/`, or empty.",
         parameters: read_file_schema,
         run: read_file_run,
     }];
@@ -115,15 +133,58 @@ fn read_file_run(session_id: &str, args: &Value) -> ToolOutcome {
     let Some(path) = args.get("path").and_then(Value::as_str) else {
         return ToolOutcome::fail("missing required argument `path`".to_string());
     };
+    // Reject obviously-bad paths up front. Models occasionally call
+    // `read_file` with `""`, `/`, or a bare directory name when they're
+    // confused; forwarding those to the editor wedges its fs handler.
+    let trimmed = path.trim();
+    if trimmed.is_empty()
+        || trimmed == "/"
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed.ends_with('/')
+    {
+        return ToolOutcome::fail(format!(
+            "`{path}` is not a file path. Provide a path to a specific file (e.g. `src/main.rs`)."
+        ));
+    }
+
+    // ACP `fs/read_text_file` requires absolute paths. Models reliably
+    // hand us paths relative to the project root (e.g. `src/main.rs`),
+    // so we resolve them against the session's `cwd` here. Absolute
+    // paths pass through unchanged.
+    let absolute = if std::path::Path::new(trimmed).is_absolute() {
+        trimmed.to_string()
+    } else {
+        let cwd = crate::session_cwd(session_id);
+        if cwd.is_empty() {
+            return ToolOutcome::fail(format!(
+                "cannot resolve relative path `{path}`: session has no working directory.                  Pass an absolute path."
+            ));
+        }
+        // Plain string concatenation is enough; we only handle POSIX
+        // paths (the editor's cwd is always absolute, the model's path
+        // is a project-relative segment).
+        let trimmed_path = trimmed.trim_start_matches("./");
+        if cwd.ends_with('/') {
+            format!("{cwd}{trimmed_path}")
+        } else {
+            format!("{cwd}/{trimmed_path}")
+        }
+    };
+
     let req = ReadTextFileRequest {
         session_id: session_id.to_string(),
-        path: path.to_string(),
+        path: absolute.clone(),
         line: None,
         limit: None,
     };
+    let absolute_for_loc = absolute.clone();
     match client::read_text_file(&req) {
-        Ok(resp) => ToolOutcome::ok(resp.content),
-        Err(e) => ToolOutcome::fail(format!("read_text_file({path}): {}", e.message)),
+        Ok(resp) => ToolOutcome::ok(resp.content).with_location(absolute_for_loc),
+        Err(e) => {
+            ToolOutcome::fail(format!("read_text_file({absolute}): {}", e.message))
+                .with_location(absolute_for_loc)
+        }
     }
 }
 

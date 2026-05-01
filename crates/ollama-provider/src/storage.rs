@@ -47,6 +47,12 @@ fn path_for(session_id: &str) -> Option<PathBuf> {
 pub struct Session {
     pub history: Vec<Message>,
     pub model: String,
+    /// Absolute working directory the editor sent on `session/new` /
+    /// `session/load`. Used by tool runners that need to resolve
+    /// relative paths into the absolute paths ACP requires (e.g.
+    /// `read_file`).
+    #[serde(default)]
+    pub cwd: String,
 }
 
 /// Untagged accept-both view of the on-disk format. New writes always use
@@ -74,6 +80,7 @@ pub fn load(session_id: &str, default_model: &str) -> Result<Option<Session>, St
                 OnDisk::Legacy(history) => Session {
                     history,
                     model: default_model.to_string(),
+                    cwd: String::new(),
                 },
             };
             Ok(Some(session))

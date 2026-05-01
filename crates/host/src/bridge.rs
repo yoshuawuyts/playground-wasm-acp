@@ -74,6 +74,12 @@ pub async fn run(
                     .instantiate()
                     .await
                     .map_err(|e| translate::anyhow_to_acp("initialize: instantiate", e))?;
+                tracing::info!(
+                    fs_read = req.client_capabilities.fs.read_text_file,
+                    fs_write = req.client_capabilities.fs.write_text_file,
+                    terminal = req.client_capabilities.terminal,
+                    "editor capabilities"
+                );
                 let wit_req = translate::init_request_schema_to_wit(req);
                 let result = agent
                     .call_initialize(&wit_req)
@@ -243,9 +249,25 @@ pub async fn run(
                         }
                     }
                     OutboundEvent::ReadTextFile(req, reply) => {
+                        let path = req.path.display().to_string();
+                        let session = req.session_id.0.to_string();
+                        debug!(session = %session, path = %path, "fs/read_text_file dispatched");
                         let sent = cx.send_request(req);
                         if let Err(e) = cx.spawn(async move {
                             let result = sent.block_task().await;
+                            match &result {
+                                Ok(_) => debug!(
+                                    session = %session,
+                                    path = %path,
+                                    "fs/read_text_file responded ok"
+                                ),
+                                Err(e) => debug!(
+                                    session = %session,
+                                    path = %path,
+                                    error = %e.message,
+                                    "fs/read_text_file responded err"
+                                ),
+                            }
                             let _ = reply.send(result);
                             Ok(())
                         }) {
@@ -253,9 +275,25 @@ pub async fn run(
                         }
                     }
                     OutboundEvent::WriteTextFile(req, reply) => {
+                        let path = req.path.display().to_string();
+                        let session = req.session_id.0.to_string();
+                        debug!(session = %session, path = %path, "fs/write_text_file dispatched");
                         let sent = cx.send_request(req);
                         if let Err(e) = cx.spawn(async move {
                             let result = sent.block_task().await;
+                            match &result {
+                                Ok(_) => debug!(
+                                    session = %session,
+                                    path = %path,
+                                    "fs/write_text_file responded ok"
+                                ),
+                                Err(e) => debug!(
+                                    session = %session,
+                                    path = %path,
+                                    error = %e.message,
+                                    "fs/write_text_file responded err"
+                                ),
+                            }
                             let _ = reply.send(result);
                             Ok(())
                         }) {

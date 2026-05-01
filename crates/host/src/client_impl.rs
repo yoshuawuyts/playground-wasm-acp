@@ -22,6 +22,15 @@ use crate::yoshuawuyts::acp::tools::{RequestPermissionRequest, RequestPermission
 /// Send an outbound event and await the bridge task's reply, translating
 /// any transport-level failure (channel closed, no response) into an ACP
 /// error suitable for returning to the wasm guest.
+/// Hard ceiling on how long we wait for the editor to reply to an outbound
+/// request. The ACP protocol has no built-in timeout; without this, a buggy
+/// or slow editor can wedge a wasm session forever (e.g. a `read_text_file`
+/// on a path the editor doesn't recognise but also doesn't error on).
+///
+/// 10s is a guess; tune later. If a tool legitimately needs longer, we
+/// should add a per-call override rather than raise this globally.
+const OUTBOUND_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn send_and_await<T>(
     outbound: &mpsc::Sender<OutboundEvent>,
     make_event: impl FnOnce(oneshot::Sender<Result<T, AcpError>>) -> OutboundEvent,
@@ -34,11 +43,15 @@ async fn send_and_await<T>(
         .send(make_event(tx))
         .await
         .map_err(|_| translate::internal_error(&format!("{context}: bridge task gone")))?;
-    match rx.await {
-        Ok(Ok(resp)) => Ok(resp),
-        Ok(Err(acp_err)) => Err(translate::acp_error_to_wit(acp_err)),
-        Err(_) => Err(translate::internal_error(&format!(
+    match tokio::time::timeout(OUTBOUND_REQUEST_TIMEOUT, rx).await {
+        Ok(Ok(Ok(resp))) => Ok(resp),
+        Ok(Ok(Err(acp_err))) => Err(translate::acp_error_to_wit(acp_err)),
+        Ok(Err(_)) => Err(translate::internal_error(&format!(
             "{context}: bridge dropped reply"
+        ))),
+        Err(_) => Err(translate::internal_error(&format!(
+            "{context}: editor did not respond within {}s",
+            OUTBOUND_REQUEST_TIMEOUT.as_secs()
         ))),
     }
 }

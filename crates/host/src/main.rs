@@ -3,6 +3,8 @@
 //! Loads an ACP agent component and bridges it to the editor over the ACP
 //! JSON-RPC wire protocol on stdio. Logs go to stderr; configure verbosity
 //! with the `RUST_LOG` environment variable (e.g. `RUST_LOG=host=debug`).
+//! Pass `--log-file <path>` to also write logs to a file (useful for
+//! debugging when stderr is hidden behind the editor).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,6 +14,8 @@ use clap::Parser;
 use tokio::sync::mpsc;
 use tokio::task::LocalSet;
 use tracing::info;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use wasmtime::component::Component;
 use wasmtime::{Config, Engine};
 
@@ -38,18 +42,100 @@ use crate::wasm::{SessionFactory, SessionRegistry};
 struct Args {
     /// Path to the ACP agent wasm component.
     wasm_path: PathBuf,
+
+    /// Optional path to a file to mirror logs into. The same events that
+    /// go to stderr are appended to this file (no ANSI colors). Useful
+    /// when running under an editor that swallows or hides the host's
+    /// stderr.
+    #[arg(long)]
+    log_file: Option<PathBuf>,
+
+    /// Coarse log level. Equivalent to `RUST_LOG=host=<level>`. Use
+    /// `--log-filter` for full `tracing` directive syntax (per-target
+    /// levels). `RUST_LOG`, if set, takes precedence over both flags.
+    #[arg(long, value_enum, default_value_t = LogLevel::Info)]
+    log_level: LogLevel,
+
+    /// Full `tracing-subscriber` env-filter directive. Overrides
+    /// `--log-level` when set. Example:
+    /// `--log-filter "host=debug,agent_client_protocol=trace"`.
+    #[arg(long)]
+    log_filter: Option<String>,
+}
+
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogLevel {
+    fn as_str(self) -> &'static str {
+        match self {
+            LogLevel::Trace => "trace",
+            LogLevel::Debug => "debug",
+            LogLevel::Info => "info",
+            LogLevel::Warn => "warn",
+            LogLevel::Error => "error",
+        }
+    }
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("host=info")),
+    let args = Args::parse();
+
+    // Verbosity: `RUST_LOG` wins if set (so existing habits keep working);
+    // otherwise we honour `--log-filter` (full directive syntax) and finally
+    // fall back to `--log-level` mapped to `host=<level>`.
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| {
+            let directive = args
+                .log_filter
+                .clone()
+                .unwrap_or_else(|| format!("host={}", args.log_level.as_str()));
+            tracing_subscriber::EnvFilter::new(directive)
+        });
+
+    // Stderr layer is always present.
+    let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+
+    // File layer is opt-in via `--log-file`. We open in append mode so a
+    // new run extends an existing file rather than truncating it. ANSI
+    // colors are off so the file is grep-friendly.
+    let file_layer = if let Some(path) = args.log_file.as_deref() {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("creating log directory {}", parent.display())
+                })?;
+            }
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("opening log file {}", path.display()))?;
+        Some(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(file),
         )
-        .with_writer(std::io::stderr)
+    } else {
+        None
+    };
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stderr_layer)
+        .with(file_layer)
         .init();
 
-    let args = Args::parse();
+    if let Some(path) = args.log_file.as_deref() {
+        info!(path = %path.display(), "mirroring logs to file");
+    }
 
     let mut config = Config::new();
     config.wasm_component_model(true);

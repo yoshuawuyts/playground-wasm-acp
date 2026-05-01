@@ -39,6 +39,15 @@ thread_local! {
     static SESSIONS: RefCell<HashMap<String, Session>> = RefCell::new(HashMap::new());
 }
 
+/// One-time system message inserted at the start of every fresh session.
+///
+/// Small tool-capable Ollama models will happily call any tool we
+/// advertise on the slimmest pretext, including bare greetings. The
+/// guidance below tells them to be conservative; it doesn't have to be
+/// perfectly obeyed (we also defensively validate args server-side), but
+/// it dramatically reduces useless tool-call storms.
+const SYSTEM_PROMPT: &str = "You are a coding assistant connected to the user's editor. You have access to a `read_file` tool that can read source files in the user's project. Only call tools when the user explicitly asks you to read a file, or when reading a specific file is strictly necessary to answer the user's request. For greetings, small talk, or general questions, respond in plain text without calling any tools. Never call `read_file` with an empty path, `/`, `.`, or any directory.";
+
 /// Build the [`SessionModeState`] for a freshly created or loaded session.
 ///
 /// Lists the locally installed Ollama models and exposes them as session
@@ -97,8 +106,17 @@ fn build_modes_state(preferred_model: Option<&str>) -> (SessionModeState, String
 }
 
 fn next_session_id() -> String {
+    // Mix wall-clock seconds with a per-process counter so ids are unique
+    // across host restarts. The editor's chat panel often retains the last
+    // session id and replays it via `session/load` after a host restart;
+    // returning the *same* id from a fresh `next_session_id()` call would
+    // make distinct sessions collide on disk.
     let n = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("ollama-session-{n}")
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("ollama-session-{secs:x}-{n}")
 }
 
 fn err(code: ErrorCode, message: &str) -> Error {
@@ -106,6 +124,18 @@ fn err(code: ErrorCode, message: &str) -> Error {
         code,
         message: message.to_string(),
     }
+}
+
+/// Look up the absolute working directory associated with a session.
+/// Returns the empty string when the session is unknown (which can happen
+/// in tests or if `prompt` is reached without a prior `new-session`).
+pub fn session_cwd(session_id: &str) -> String {
+    SESSIONS.with(|s| {
+        s.borrow()
+            .get(session_id)
+            .map(|sess| sess.cwd.clone())
+            .unwrap_or_default()
+    })
 }
 
 /// Pull all `text` content blocks from a prompt, joined with blank lines.
@@ -159,7 +189,7 @@ impl Guest for Agent {
         ))
     }
 
-    fn new_session(_req: NewSessionRequest) -> Result<NewSessionResponse, Error> {
+    fn new_session(req: NewSessionRequest) -> Result<NewSessionResponse, Error> {
         let id = next_session_id();
         let (modes, current_model) = build_modes_state(None);
         SESSIONS.with(|s| {
@@ -168,6 +198,7 @@ impl Guest for Agent {
                 Session {
                     history: Vec::new(),
                     model: current_model,
+                    cwd: req.cwd,
                 },
             )
         });
@@ -209,6 +240,7 @@ impl Guest for Agent {
                 Session {
                     history,
                     model: current_model,
+                    cwd: req.cwd,
                 },
             );
         });
@@ -242,6 +274,7 @@ impl Guest for Agent {
                 Session {
                     history,
                     model: current_model,
+                    cwd: req.cwd,
                 },
             );
         });
@@ -291,6 +324,11 @@ impl Guest for Agent {
         // (plus the active model) to send to Ollama. New sessions can land
         // here without going through `new-session` (e.g. tests); fall back
         // to the default model in that case.
+        //
+        // We also prepend a one-time `system` message on the first prompt
+        // of a session, instructing the model to be conservative about
+        // tool calls. Without this, small tool-capable models tend to call
+        // `read_file` on greetings like "hello" out of pure enthusiasm.
         let (mut history, model) = SESSIONS.with(|s| {
             let mut sessions = s.borrow_mut();
             let entry = sessions
@@ -298,7 +336,15 @@ impl Guest for Agent {
                 .or_insert_with(|| Session {
                     history: Vec::new(),
                     model: ollama::default_model(),
+                    cwd: String::new(),
                 });
+            if entry.history.is_empty() {
+                entry.history.push(Message {
+                    role: "system".to_string(),
+                    content: SYSTEM_PROMPT.to_string(),
+                    tool_calls: Vec::new(),
+                });
+            }
             entry.history.push(Message::user(user_text.clone()));
             (entry.history.clone(), entry.model.clone())
         });
@@ -332,7 +378,7 @@ impl Guest for Agent {
         // → done) or it can request tools, in which case we dispatch each,
         // append a `role: "tool"` message per result, and loop. We cap
         // iterations to avoid runaway models.
-        const MAX_TURNS: usize = 8;
+        const MAX_TURNS: usize = 3;
         let mut tool_call_seq: u64 = 0;
         let mut stop = StopReason::EndTurn;
         let mut turns_remaining = MAX_TURNS;
@@ -409,6 +455,21 @@ impl Guest for Agent {
                     )),
                 };
 
+                let locations = if outcome.locations.is_empty() {
+                    None
+                } else {
+                    use acp_wasm_sys::yoshuawuyts::acp::tools::ToolCallLocation;
+                    Some(
+                        outcome
+                            .locations
+                            .iter()
+                            .map(|p| ToolCallLocation {
+                                path: p.clone(),
+                                line: None,
+                            })
+                            .collect(),
+                    )
+                };
                 client::update_session(
                     &session_id,
                     &SessionUpdate::ToolCallUpdate(ToolCallUpdate {
@@ -423,13 +484,22 @@ impl Guest for Agent {
                         content: Some(vec![ToolCallContent::Content(Cb::Text(Tc {
                             text: outcome.content.clone(),
                         }))]),
-                        locations: None,
+                        locations,
                         raw_input: None,
                         raw_output: Some(outcome.content.clone()),
                     }),
                 );
 
-                history.push(Message::tool(outcome.content));
+                // Feed the result back to the model as a `role: "tool"`
+                // message. For failures, prefix with a clear marker so
+                // small models don't mistake the error text for data
+                // (Ollama's chat API doesn't carry an `is_error` flag).
+                let tool_msg = if outcome.failed {
+                    format!("Error: {}", outcome.content)
+                } else {
+                    outcome.content
+                };
+                history.push(Message::tool(tool_msg));
             }
         }
 
