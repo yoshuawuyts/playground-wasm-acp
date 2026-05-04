@@ -23,12 +23,12 @@ mod bridge;
 mod client_impl;
 mod state;
 mod translate;
+mod utils;
 mod wasm;
 
-// Generate wasmtime component bindings for the `provider` world. From the
-// host's perspective, bindgen flips imports/exports: the `client` interface
-// becomes a Host trait we implement (see [`client_impl`]), and the `agent`
-// interface becomes callable methods on the bindings struct (see [`wasm`]).
+// Generate wasmtime component bindings for the `provider` world. Bindgen
+// flips imports/exports from the host's perspective: `client` becomes a
+// Host trait we implement; `agent` becomes callable methods.
 wasmtime::component::bindgen!({
     path: "../../vendor/wit",
     world: "provider",
@@ -86,54 +86,7 @@ impl LogLevel {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-
-    // Verbosity: `RUST_LOG` wins if set (so existing habits keep working);
-    // otherwise we honour `--log-filter` (full directive syntax) and finally
-    // fall back to `--log-level` mapped to `host=<level>`.
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        let directive = args
-            .log_filter
-            .clone()
-            .unwrap_or_else(|| format!("host={}", args.log_level.as_str()));
-        tracing_subscriber::EnvFilter::new(directive)
-    });
-
-    // Stderr layer is always present.
-    let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
-
-    // File layer is opt-in via `--log-file`. We open in append mode so a
-    // new run extends an existing file rather than truncating it. ANSI
-    // colors are off so the file is grep-friendly.
-    let file_layer = if let Some(path) = args.log_file.as_deref() {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("creating log directory {}", parent.display()))?;
-            }
-        }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .with_context(|| format!("opening log file {}", path.display()))?;
-        Some(
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_writer(file),
-        )
-    } else {
-        None
-    };
-
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(stderr_layer)
-        .with(file_layer)
-        .init();
-
-    if let Some(path) = args.log_file.as_deref() {
-        info!(path = %path.display(), "mirroring logs to file");
-    }
+    init_logging(&args)?;
 
     let mut config = Config::new();
     config.wasm_component_model(true);
@@ -142,28 +95,14 @@ fn main() -> Result<()> {
         .map_err(anyhow::Error::from)
         .with_context(|| format!("loading {}", args.wasm_path.display()))?;
 
-    // Per-app data root. Each session gets a project- and component-scoped
-    // subdirectory underneath this:
-    //
-    //   <data_root>/<project_id>/<component_id>/    <-- mounted at /data
-    //
-    // `<project_id>` is a hash of the session's cwd (no path leakage in
-    // the dir name); `<component_id>` is the wasm filename stem. The
-    // result: data is naturally siloed per project so an agent can't
-    // accidentally leak history between unrelated codebases.
-    let data_root = resolve_data_root().context("resolving data root")?;
-    std::fs::create_dir_all(&data_root)
-        .with_context(|| format!("creating data root {}", data_root.display()))?;
-    info!(path = %data_root.display(), "data root");
+    let data_root = init_data_root()?;
 
-    let component_id = component_id_from_path(&args.wasm_path)
+    let component_id = utils::component_id_from_path(&args.wasm_path)
         .context("deriving component id from wasm filename")?;
     info!(component = %component_id, "component id");
 
-    // Multi-threaded runtime + `LocalSet`: the `LocalSet` pins `!Send`
-    // session actors (spawned via `spawn_local`) to the thread that calls
-    // `block_on`, while the rest of the runtime can drive `Send` work
-    // (the bridge's handlers, channels, I/O) across the worker pool.
+    // Multi-threaded runtime + `LocalSet`: pins `!Send` session actors to
+    // the `block_on` thread while `Send` work runs on the worker pool.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -187,6 +126,79 @@ fn main() -> Result<()> {
     })
 }
 
+/// Configure the global `tracing` subscriber. Stderr is always wired up;
+/// `--log-file` adds an opt-in append-mode file layer (ANSI off, so the
+/// file stays grep-friendly). `RUST_LOG` takes precedence over the
+/// `--log-filter` / `--log-level` flags.
+fn init_logging(args: &Args) -> Result<()> {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        let directive = args
+            .log_filter
+            .clone()
+            .unwrap_or_else(|| format!("host={}", args.log_level.as_str()));
+        tracing_subscriber::EnvFilter::new(directive)
+    });
+
+    let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+    let file_layer = args.log_file.as_deref().map(open_log_file).transpose()?;
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stderr_layer)
+        .with(file_layer)
+        .init();
+
+    if let Some(path) = args.log_file.as_deref() {
+        info!(path = %path.display(), "mirroring logs to file");
+    }
+
+    Ok(())
+}
+
+/// Open `path` (creating parent dirs as needed) and wrap it in a non-ANSI
+/// `tracing_subscriber` layer suitable for appending logs to.
+fn open_log_file<S>(
+    path: &std::path::Path,
+) -> Result<Box<dyn tracing_subscriber::Layer<S> + Send + Sync>>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating log directory {}", parent.display()))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening log file {}", path.display()))?;
+
+    let subscriber = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(file);
+
+    Ok(Box::new(subscriber))
+}
+
+/// Resolve and create the per-app data root, returning its path.
+///
+/// Each session gets a project- and component-scoped subdirectory
+/// underneath this:
+///
+///   `<data_root>/<project_id>/<component_id>/`    <-- mounted at /data
+///
+/// `<project_id>` is a hash of the session's cwd (no path leakage in
+/// the dir name); `<component_id>` is the wasm filename stem. The
+/// result: data is naturally siloed per project so an agent can't
+/// accidentally leak history between unrelated codebases.
+fn init_data_root() -> Result<PathBuf> {
+    let data_root = resolve_data_root().context("resolving data root")?;
+    std::fs::create_dir_all(&data_root)
+        .with_context(|| format!("creating data root {}", data_root.display()))?;
+    info!(path = %data_root.display(), "data root");
+    Ok(data_root)
+}
+
 /// `$XDG_STATE_HOME/playground-wasm-acp`, falling back to
 /// `$HOME/.local/state/playground-wasm-acp`. This is the *root*; per-session
 /// data dirs are subpaths underneath.
@@ -199,25 +211,4 @@ fn resolve_data_root() -> Result<PathBuf> {
         .filter(|v| !v.is_empty())
         .ok_or_else(|| anyhow::anyhow!("neither XDG_STATE_HOME nor HOME is set"))?;
     Ok(PathBuf::from(home).join(".local").join("state").join(APP))
-}
-
-/// Derive a component id from the wasm path. We use the file stem; renaming
-/// the binary therefore loses prior data (acceptable for a sample, and a
-/// future `--component-id` flag can override). Restricted to a small
-/// alphabet to avoid surprising filesystem behaviour.
-fn component_id_from_path(path: &std::path::Path) -> Result<String> {
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| anyhow::anyhow!("wasm path has no usable file stem: {}", path.display()))?;
-    let ok = !stem.is_empty()
-        && stem
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
-    if !ok {
-        anyhow::bail!(
-            "wasm filename stem {stem:?} contains characters not allowed in a component id (allow [A-Za-z0-9._-])"
-        );
-    }
-    Ok(stem.to_string())
 }
