@@ -127,8 +127,11 @@ fn main() -> Result<()> {
 }
 
 /// Configure the global `tracing` subscriber. Stderr is always wired up;
-/// `--log-file` adds an opt-in append-mode file layer (ANSI off, so the
-/// file stays grep-friendly). `RUST_LOG` takes precedence over the
+/// `--log-file` adds an opt-in file layer (ANSI off, so the file stays
+/// grep-friendly). Each boot writes to its own timestamped file —
+/// e.g. `host.log` becomes `host-<unix-ts>.log` — so runs never
+/// stomp each other and old logs stick around for postmortems.
+/// `RUST_LOG` takes precedence over the
 /// `--log-filter` / `--log-level` flags.
 fn init_logging(args: &Args) -> Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -140,7 +143,8 @@ fn init_logging(args: &Args) -> Result<()> {
     });
 
     let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
-    let file_layer = args.log_file.as_deref().map(open_log_file).transpose()?;
+    let log_path = args.log_file.as_deref().map(timestamped_log_path);
+    let file_layer = log_path.as_deref().map(open_log_file).transpose()?;
 
     tracing_subscriber::registry()
         .with(env_filter)
@@ -148,11 +152,33 @@ fn init_logging(args: &Args) -> Result<()> {
         .with(file_layer)
         .init();
 
-    if let Some(path) = args.log_file.as_deref() {
+    if let Some(path) = log_path.as_deref() {
         info!(path = %path.display(), "mirroring logs to file");
     }
 
     Ok(())
+}
+
+/// Insert a unix-seconds timestamp before the extension so each boot
+/// gets its own file. `logs/host.log` -> `logs/host-1714838400.log`.
+fn timestamped_log_path(path: &std::path::Path) -> std::path::PathBuf {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("host");
+    let ext = path.extension().and_then(|s| s.to_str());
+    let name = match ext {
+        Some(ext) => format!("{stem}-{ts}.{ext}"),
+        None => format!("{stem}-{ts}"),
+    };
+    match path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(parent) => parent.join(name),
+        None => std::path::PathBuf::from(name),
+    }
 }
 
 /// Open `path` (creating parent dirs as needed) and wrap it in a non-ANSI
@@ -169,9 +195,12 @@ where
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(path)
         .with_context(|| format!("opening log file {}", path.display()))?;
+    // truncate is a no-op on the fresh timestamped path, but keeps
+    // behavior sane if the user happens to point at an existing file.
 
     let subscriber = tracing_subscriber::fmt::layer()
         .with_ansi(false)
