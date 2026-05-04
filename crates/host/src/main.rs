@@ -90,14 +90,13 @@ fn main() -> Result<()> {
     // Verbosity: `RUST_LOG` wins if set (so existing habits keep working);
     // otherwise we honour `--log-filter` (full directive syntax) and finally
     // fall back to `--log-level` mapped to `host=<level>`.
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| {
-            let directive = args
-                .log_filter
-                .clone()
-                .unwrap_or_else(|| format!("host={}", args.log_level.as_str()));
-            tracing_subscriber::EnvFilter::new(directive)
-        });
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        let directive = args
+            .log_filter
+            .clone()
+            .unwrap_or_else(|| format!("host={}", args.log_level.as_str()));
+        tracing_subscriber::EnvFilter::new(directive)
+    });
 
     // Stderr layer is always present.
     let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
@@ -108,9 +107,8 @@ fn main() -> Result<()> {
     let file_layer = if let Some(path) = args.log_file.as_deref() {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!("creating log directory {}", parent.display())
-                })?;
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating log directory {}", parent.display()))?;
             }
         }
         let file = std::fs::OpenOptions::new()
@@ -162,11 +160,11 @@ fn main() -> Result<()> {
         .context("deriving component id from wasm filename")?;
     info!(component = %component_id, "component id");
 
-    // Single-threaded runtime + `LocalSet`: lets us host `!Send` session
-    // actors via `spawn_local` while the bridge's `Send`-bound handlers
-    // (required by `agent_client_protocol::Builder`) cross the boundary
-    // through `Send + Sync` channel handles.
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    // Multi-threaded runtime + `LocalSet`: the `LocalSet` pins `!Send`
+    // session actors (spawned via `spawn_local`) to the thread that calls
+    // `block_on`, while the rest of the runtime can drive `Send` work
+    // (the bridge's handlers, channels, I/O) across the worker pool.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
