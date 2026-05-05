@@ -27,93 +27,153 @@ use wasmtime::{Engine, Store};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 use wasmtime_wasi_http::WasiHttpCtx;
 
-use crate::Provider;
-use crate::state::{HostState, OutboundEvent};
+use crate::state::{DownstreamHandle, HostState, OutboundEvent};
 use crate::yoshuawuyts::acp::errors::Error;
 use crate::yoshuawuyts::acp::init::{AuthenticateRequest, InitializeRequest, InitializeResponse};
 use crate::yoshuawuyts::acp::prompts::{PromptRequest, PromptResponse};
 use crate::yoshuawuyts::acp::sessions::{
-    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
+    NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse, SessionId,
     SetSessionModeRequest,
 };
+use crate::{Layer, Provider};
 
 // -----------------------------------------------------------------------------
 // Factory
 // -----------------------------------------------------------------------------
 
-/// Produces fresh wasm instances on demand. Cheap: instantiation from a
-/// pre-loaded `Component` is microseconds.
+/// One stage in the routing chain: a pre-loaded wasm `Component` plus the
+/// component id used to scope its `/data` preopen. The id is also used in
+/// session-mode prefixes for the outermost (provider) stage.
+#[derive(Clone)]
+pub struct Stage {
+    pub component: Component,
+    pub component_id: String,
+}
+
+/// Produces fresh wasm instance *chains* on demand. Cheap: instantiation
+/// from pre-loaded `Component`s is microseconds per stage.
 ///
-/// The factory owns the data *root* and the component id. Per-session data
-/// dirs are constructed at instantiation time as
-/// `<data_root>/<project_id>/<component_id>/`, where `project_id` is a
-/// deterministic hash of the session's working directory. This keeps state
-/// siloed per project so an agent can't accidentally leak data between
-/// codebases.
+/// A chain is built from a single terminal **provider** plus zero or more
+/// **layers** wrapping it. Layers are listed editor-side → provider-side:
+/// `layers[0]` is outermost (the host's head), `layers[last]` sits
+/// directly above the provider. With no layers, behaviour is identical to
+/// the pre-layer host.
+///
+/// The factory owns the data *root*. Per-session data dirs are constructed
+/// at instantiation time as `<data_root>/<project_id>/<component_id>/`,
+/// per stage, where `project_id` is a deterministic hash of the session's
+/// working directory. This keeps state siloed per project *and* per stage
+/// so layers and providers can persist independently.
 ///
 /// Stateless calls (`initialize`, `authenticate`) bypass `/data` entirely
 /// via [`Self::instantiate`]; session-creating calls use
 /// [`Self::instantiate_for_project`].
 pub struct SessionFactory {
     engine: Engine,
-    component: Component,
+    /// Terminal provider stage. Always the bottom of the chain.
+    provider: Stage,
+    /// Layer stages, ordered editor-side → provider-side. Empty means no
+    /// layers (legacy single-component behaviour).
+    layers: Vec<Stage>,
     outbound: mpsc::Sender<OutboundEvent>,
     data_root: PathBuf,
-    component_id: String,
 }
 
 impl SessionFactory {
     pub fn new(
         engine: Engine,
-        component: Component,
+        provider: Stage,
+        layers: Vec<Stage>,
         outbound: mpsc::Sender<OutboundEvent>,
         data_root: PathBuf,
-        component_id: String,
     ) -> Self {
         Self {
             engine,
-            component,
+            provider,
+            layers,
             outbound,
             data_root,
-            component_id,
         }
     }
 
-    /// Build a wasm instance with no `/data` preopen. Used for stateless
-    /// calls like `initialize` and `authenticate` where there is no
-    /// session and therefore no project scope.
+    /// Build a wasm instance chain with no `/data` preopen for any stage.
+    /// Used for stateless calls like `initialize` and `authenticate`.
     pub async fn instantiate(&self) -> Result<WasmAgent> {
-        WasmAgent::new(&self.engine, &self.component, self.outbound.clone(), None).await
+        self.instantiate_chain(None).await
     }
 
-    /// The configured component id (typically the wasm filename stem).
-    /// Used by the bridge to label session modes with a registry-style
-    /// `namespace:name` prefix.
+    /// Component id used by the bridge to label session modes. Reports the
+    /// *provider's* id since that's the terminal authority for modes;
+    /// layers may rewrite the response, but the namespace stays anchored
+    /// to the underlying provider.
     pub fn component_id(&self) -> &str {
-        &self.component_id
+        &self.provider.component_id
     }
 
-    /// Build a wasm instance with `/data` preopened to a project- and
-    /// component-scoped subdirectory of the data root. Creates the
-    /// directory if missing and updates the project's `meta.json` sidecar.
+    /// Build a wasm instance chain with `/data` preopened to a project-
+    /// scoped subdirectory of the data root for *each* stage. Each stage
+    /// gets its own component-scoped subdir
+    /// (`<data_root>/<project_id>/<component_id>/`) and an updated
+    /// `meta.json` sidecar.
     pub async fn instantiate_for_project(&self, cwd: &std::path::Path) -> Result<WasmAgent> {
         let project_id = project_id_from_cwd(cwd);
         let project_dir = self.data_root.join(&project_id);
-        let component_dir = project_dir.join(&self.component_id);
-        std::fs::create_dir_all(&component_dir)
-            .with_context(|| format!("creating project data dir {}", component_dir.display()))?;
-        // The sidecar lives in `<data_root>/<project_id>/meta.json`, one
-        // level above the wasm preopen. Wasm cannot escape upward, so the
-        // sidecar is structurally read-only from the guest's perspective.
         update_project_meta(&project_dir, cwd);
-        WasmAgent::new(
-            &self.engine,
-            &self.component,
-            self.outbound.clone(),
-            Some(&component_dir),
-        )
-        .await
+        self.instantiate_chain(Some(&project_dir)).await
     }
+
+    /// Bottom-up chain build: instantiate the provider first, then wrap it
+    /// with each layer (innermost-first). The returned `WasmAgent` is the
+    /// chain's *head* — the outermost stage that the bridge calls into.
+    async fn instantiate_chain(&self, project_dir: Option<&std::path::Path>) -> Result<WasmAgent> {
+        // Innermost: terminal provider, no downstream.
+        let provider_data = stage_data_dir(project_dir, &self.provider.component_id)?;
+        let provider = WasmAgent::new(
+            &self.engine,
+            &self.provider.component,
+            StageKind::Provider,
+            self.outbound.clone(),
+            provider_data.as_deref(),
+            None,
+        )
+        .await?;
+
+        // Walk layers innermost-first (last → first). Each layer wraps
+        // whatever stage we built so far.
+        let mut current = provider;
+        for stage in self.layers.iter().rev() {
+            let downstream: DownstreamHandle =
+                std::sync::Arc::new(tokio::sync::Mutex::new(current));
+            let data = stage_data_dir(project_dir, &stage.component_id)?;
+            current = WasmAgent::new(
+                &self.engine,
+                &stage.component,
+                StageKind::Layer,
+                self.outbound.clone(),
+                data.as_deref(),
+                Some(downstream),
+            )
+            .await?;
+        }
+        Ok(current)
+    }
+}
+
+/// Compute `<project_dir>/<component_id>/` (creating the directory) when a
+/// project dir is supplied; otherwise return `None` for a sandboxed
+/// no-`/data` instance.
+fn stage_data_dir(
+    project_dir: Option<&std::path::Path>,
+    component_id: &str,
+) -> Result<Option<PathBuf>> {
+    let Some(project_dir) = project_dir else {
+        return Ok(None);
+    };
+    let dir = project_dir.join(component_id);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating project data dir {}", dir.display()))?;
+    Ok(Some(dir))
 }
 
 /// Project sidecar: human-readable metadata so an operator inspecting the
@@ -398,23 +458,50 @@ impl SessionActor {
 // WasmAgent
 // -----------------------------------------------------------------------------
 
-/// Owns the wasmtime store + the instantiated `provider` bindings.
+/// What kind of bindings a stage was instantiated with.
+///
+/// `Provider` is the terminal stage: only the `client` interface is
+/// imported; nothing downstream. `Layer` additionally imports `agent`,
+/// which routes to the next stage via [`HostState::downstream`].
+///
+/// Both variants expose the same `agent` export and therefore the same
+/// `call_*` surface — `WasmAgent` dispatches on the variant. We keep them
+/// distinct (rather than always using the layer bindings) so the type
+/// system, the linker, and the wasmtime instantiation check all agree on
+/// which kind of component each path expects.
+enum Bindings {
+    Provider(Provider),
+    Layer(Layer),
+}
+
+/// Owns the wasmtime store + the instantiated world bindings for a single
+/// stage in the routing chain.
 pub struct WasmAgent {
     store: Store<HostState>,
-    bindings: Provider,
+    bindings: Bindings,
+}
+
+/// Which world to instantiate a stage as. The chain factory picks
+/// `Provider` for the terminal stage and `Layer` for every intermediate
+/// stage so the linker matches what the wasm component actually imports.
+#[derive(Copy, Clone, Debug)]
+pub enum StageKind {
+    Provider,
+    Layer,
 }
 
 impl WasmAgent {
     pub async fn new(
         engine: &Engine,
         component: &Component,
+        kind: StageKind,
         outbound: mpsc::Sender<OutboundEvent>,
         data_dir: Option<&std::path::Path>,
+        downstream: Option<DownstreamHandle>,
     ) -> Result<Self> {
         let mut linker: Linker<HostState> = Linker::new(engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
-        Provider::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |s| s)?;
 
         let mut wasi = WasiCtxBuilder::new();
         wasi.inherit_stderr().inherit_stdout().inherit_network();
@@ -432,9 +519,27 @@ impl WasmAgent {
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
             outbound,
+            downstream,
         };
         let mut store = Store::new(engine, state);
-        let bindings = Provider::instantiate_async(&mut store, component, &linker).await?;
+
+        // Provider linker registers only the `client` host trait; layer
+        // additionally registers the imported-`agent` host trait that
+        // forwards downstream. Picking the right one per stage keeps the
+        // linker minimal and lets wasmtime's instantiation check verify
+        // the component's import set matches.
+        let bindings = match kind {
+            StageKind::Provider => {
+                Provider::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |s| s)?;
+                Bindings::Provider(
+                    Provider::instantiate_async(&mut store, component, &linker).await?,
+                )
+            }
+            StageKind::Layer => {
+                Layer::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |s| s)?;
+                Bindings::Layer(Layer::instantiate_async(&mut store, component, &linker).await?)
+            }
+        };
         Ok(Self { store, bindings })
     }
 
@@ -442,59 +547,316 @@ impl WasmAgent {
         &mut self,
         req: &InitializeRequest,
     ) -> wasmtime::Result<Result<InitializeResponse, Error>> {
-        self.bindings
-            .yoshuawuyts_acp_agent()
-            .call_initialize(&mut self.store, req)
-            .await
+        match &self.bindings {
+            Bindings::Provider(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_initialize(&mut self.store, req)
+                    .await
+            }
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_initialize(&mut self.store, req)
+                    .await
+            }
+        }
     }
 
     pub async fn call_authenticate(
         &mut self,
         req: &AuthenticateRequest,
     ) -> wasmtime::Result<Result<(), Error>> {
-        self.bindings
-            .yoshuawuyts_acp_agent()
-            .call_authenticate(&mut self.store, req)
-            .await
+        match &self.bindings {
+            Bindings::Provider(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_authenticate(&mut self.store, req)
+                    .await
+            }
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_authenticate(&mut self.store, req)
+                    .await
+            }
+        }
     }
 
     pub async fn call_new_session(
         &mut self,
         req: &NewSessionRequest,
     ) -> wasmtime::Result<Result<NewSessionResponse, Error>> {
-        self.bindings
-            .yoshuawuyts_acp_agent()
-            .call_new_session(&mut self.store, req)
-            .await
+        match &self.bindings {
+            Bindings::Provider(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_new_session(&mut self.store, req)
+                    .await
+            }
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_new_session(&mut self.store, req)
+                    .await
+            }
+        }
     }
 
     pub async fn call_load_session(
         &mut self,
         req: &LoadSessionRequest,
     ) -> wasmtime::Result<Result<LoadSessionResponse, Error>> {
-        self.bindings
-            .yoshuawuyts_acp_agent()
-            .call_load_session(&mut self.store, req)
-            .await
+        match &self.bindings {
+            Bindings::Provider(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_load_session(&mut self.store, req)
+                    .await
+            }
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_load_session(&mut self.store, req)
+                    .await
+            }
+        }
     }
 
     pub async fn call_set_session_mode(
         &mut self,
         req: &SetSessionModeRequest,
     ) -> wasmtime::Result<Result<(), Error>> {
-        self.bindings
-            .yoshuawuyts_acp_agent()
-            .call_set_session_mode(&mut self.store, req)
-            .await
+        match &self.bindings {
+            Bindings::Provider(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_set_session_mode(&mut self.store, req)
+                    .await
+            }
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_set_session_mode(&mut self.store, req)
+                    .await
+            }
+        }
     }
 
     pub async fn call_prompt(
         &mut self,
         req: &PromptRequest,
     ) -> wasmtime::Result<Result<PromptResponse, Error>> {
-        self.bindings
-            .yoshuawuyts_acp_agent()
-            .call_prompt(&mut self.store, req)
-            .await
+        match &self.bindings {
+            Bindings::Provider(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_prompt(&mut self.store, req)
+                    .await
+            }
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_prompt(&mut self.store, req)
+                    .await
+            }
+        }
+    }
+
+    pub async fn call_list_sessions(
+        &mut self,
+        req: &ListSessionsRequest,
+    ) -> wasmtime::Result<Result<ListSessionsResponse, Error>> {
+        match &self.bindings {
+            Bindings::Provider(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_list_sessions(&mut self.store, req)
+                    .await
+            }
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_list_sessions(&mut self.store, req)
+                    .await
+            }
+        }
+    }
+
+    pub async fn call_resume_session(
+        &mut self,
+        req: &ResumeSessionRequest,
+    ) -> wasmtime::Result<Result<ResumeSessionResponse, Error>> {
+        match &self.bindings {
+            Bindings::Provider(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_resume_session(&mut self.store, req)
+                    .await
+            }
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_resume_session(&mut self.store, req)
+                    .await
+            }
+        }
+    }
+
+    pub async fn call_close_session(
+        &mut self,
+        session_id: &SessionId,
+    ) -> wasmtime::Result<Result<(), Error>> {
+        match &self.bindings {
+            Bindings::Provider(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_close_session(&mut self.store, session_id)
+                    .await
+            }
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_close_session(&mut self.store, session_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn call_cancel(&mut self, session_id: &SessionId) -> wasmtime::Result<()> {
+        match &self.bindings {
+            Bindings::Provider(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_cancel(&mut self.store, session_id)
+                    .await
+            }
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_agent()
+                    .call_cancel(&mut self.store, session_id)
+                    .await
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// agent::Host impl — forwards a layer's imported `agent` to its downstream
+// -----------------------------------------------------------------------------
+//
+// The `layer` world imports the `agent` interface; bindgen turns that into
+// a `crate::layer_agent::Host` trait. For each method we lock the
+// downstream stage's `WasmAgent` and call its export. Two failure modes
+// are flattened into a single WIT `error` returned to the calling layer:
+// (a) no downstream is configured (misconfiguration; should not happen
+// because only layer wasm components import `agent`, and they are only
+// constructed via the chain factory); (b) the downstream traps. The host
+// trait return types do not carry a wasmtime trap channel, so a trap
+// becomes an `internal-error` from the layer's point of view rather than
+// tearing down the whole chain.
+
+use crate::layer_agent;
+use crate::translate;
+
+fn no_downstream<T>(method: &'static str) -> Result<T, Error> {
+    Err(translate::internal_error(&format!(
+        "layer called `agent.{method}` but no downstream is configured"
+    )))
+}
+
+/// Collapse `wasmtime::Result<Result<T, Error>>` into `Result<T, Error>`
+/// for the host trait return types. A trap becomes a WIT `internal-error`
+/// so the calling layer sees a recoverable error instead of being torn
+/// down with the rest of the chain.
+fn flatten<T>(method: &'static str, res: wasmtime::Result<Result<T, Error>>) -> Result<T, Error> {
+    match res {
+        Ok(inner) => inner,
+        Err(trap) => Err(translate::internal_error(&format!(
+            "downstream `{method}` trapped: {trap:#}"
+        ))),
+    }
+}
+
+impl layer_agent::Host for HostState {
+    async fn initialize(&mut self, req: InitializeRequest) -> Result<InitializeResponse, Error> {
+        let Some(ds) = self.downstream.clone() else {
+            return no_downstream("initialize");
+        };
+        flatten("initialize", ds.lock().await.call_initialize(&req).await)
+    }
+
+    async fn authenticate(&mut self, req: AuthenticateRequest) -> Result<(), Error> {
+        let Some(ds) = self.downstream.clone() else {
+            return no_downstream("authenticate");
+        };
+        flatten(
+            "authenticate",
+            ds.lock().await.call_authenticate(&req).await,
+        )
+    }
+
+    async fn new_session(&mut self, req: NewSessionRequest) -> Result<NewSessionResponse, Error> {
+        let Some(ds) = self.downstream.clone() else {
+            return no_downstream("new-session");
+        };
+        flatten("new-session", ds.lock().await.call_new_session(&req).await)
+    }
+
+    async fn load_session(
+        &mut self,
+        req: LoadSessionRequest,
+    ) -> Result<LoadSessionResponse, Error> {
+        let Some(ds) = self.downstream.clone() else {
+            return no_downstream("load-session");
+        };
+        flatten(
+            "load-session",
+            ds.lock().await.call_load_session(&req).await,
+        )
+    }
+
+    async fn list_sessions(
+        &mut self,
+        req: ListSessionsRequest,
+    ) -> Result<ListSessionsResponse, Error> {
+        let Some(ds) = self.downstream.clone() else {
+            return no_downstream("list-sessions");
+        };
+        flatten(
+            "list-sessions",
+            ds.lock().await.call_list_sessions(&req).await,
+        )
+    }
+
+    async fn resume_session(
+        &mut self,
+        req: ResumeSessionRequest,
+    ) -> Result<ResumeSessionResponse, Error> {
+        let Some(ds) = self.downstream.clone() else {
+            return no_downstream("resume-session");
+        };
+        flatten(
+            "resume-session",
+            ds.lock().await.call_resume_session(&req).await,
+        )
+    }
+
+    async fn close_session(&mut self, session_id: SessionId) -> Result<(), Error> {
+        let Some(ds) = self.downstream.clone() else {
+            return no_downstream("close-session");
+        };
+        flatten(
+            "close-session",
+            ds.lock().await.call_close_session(&session_id).await,
+        )
+    }
+
+    async fn set_session_mode(&mut self, req: SetSessionModeRequest) -> Result<(), Error> {
+        let Some(ds) = self.downstream.clone() else {
+            return no_downstream("set-session-mode");
+        };
+        flatten(
+            "set-session-mode",
+            ds.lock().await.call_set_session_mode(&req).await,
+        )
+    }
+
+    async fn prompt(&mut self, req: PromptRequest) -> Result<PromptResponse, Error> {
+        let Some(ds) = self.downstream.clone() else {
+            return no_downstream("prompt");
+        };
+        flatten("prompt", ds.lock().await.call_prompt(&req).await)
+    }
+
+    async fn cancel(&mut self, session_id: SessionId) {
+        let Some(ds) = self.downstream.clone() else {
+            // `cancel` returns `()`; nothing to report. Log and move on.
+            tracing::warn!("layer called `agent.cancel` but no downstream is configured");
+            return;
+        };
+        if let Err(trap) = ds.lock().await.call_cancel(&session_id).await {
+            tracing::warn!(error = %trap, "downstream `cancel` trapped");
+        }
     }
 }

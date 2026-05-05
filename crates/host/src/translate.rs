@@ -21,13 +21,13 @@ use crate::yoshuawuyts::acp::init::{
     InitializeResponse,
 };
 use crate::yoshuawuyts::acp::prompts::{PromptRequest, PromptResponse, SessionUpdate, StopReason};
-use crate::yoshuawuyts::acp::tools::{
-    ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
-};
 use crate::yoshuawuyts::acp::sessions::{
     EnvVar, HttpHeader, LoadSessionRequest, LoadSessionResponse, McpServer, McpServerHttp,
     McpServerSse, McpServerStdio, NewSessionRequest, NewSessionResponse, SessionId, SessionMode,
     SessionModeId, SessionModeState, SetSessionModeRequest,
+};
+use crate::yoshuawuyts::acp::tools::{
+    ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 
 // -----------------------------------------------------------------------------
@@ -564,8 +564,6 @@ pub fn acp_error_to_wit(e: AcpError) -> Error {
     }
 }
 
-
-
 // -----------------------------------------------------------------------------
 // Tool calls (wasm → editor)
 // -----------------------------------------------------------------------------
@@ -620,10 +618,7 @@ fn tool_call_content_to_json(
     }
 }
 
-fn tool_call_to_schema_update(
-    session_id: &str,
-    call: ToolCall,
-) -> Option<schema::SessionUpdate> {
+fn tool_call_to_schema_update(session_id: &str, call: ToolCall) -> Option<schema::SessionUpdate> {
     let content: Vec<serde_json::Value> = call
         .content
         .into_iter()

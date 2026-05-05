@@ -34,7 +34,26 @@ pub struct HostState {
     /// Outbound channel to the bridge task. Bounded for backpressure: if the
     /// editor falls behind, the wasm side awaits naturally.
     pub outbound: mpsc::Sender<OutboundEvent>,
+    /// Next stage in the layer chain, if any. Populated for layer
+    /// instances; `None` for the terminal provider. The `agent::Host`
+    /// impl on `HostState` forwards each imported-`agent` call to this
+    /// stage's exported `agent`. `Rc<RefCell<_>>` is fine: the actor task
+    /// runs on a `LocalSet` (single-threaded), and downstream calls
+    /// borrow a *different* `WasmAgent` than the one currently executing.
+    pub downstream: Option<DownstreamHandle>,
 }
+
+/// Shared handle to the next stage's wasm instance. Defined here (rather
+/// than in `wasm.rs`) so `HostState` can hold one without a forward
+/// reference cycle in the type definition.
+///
+/// `Arc<tokio::sync::Mutex<_>>` (rather than `Rc<RefCell<_>>`) because
+/// wasmtime's bindgen-generated async traits require `Send` futures, even
+/// though every stage in a chain ultimately runs on the same `LocalSet`
+/// thread. The mutex is uncontended in practice — only the upstream
+/// stage's host trait reaches for the downstream — so the lock is just a
+/// `Send` adapter.
+pub type DownstreamHandle = std::sync::Arc<tokio::sync::Mutex<crate::wasm::WasmAgent>>;
 
 impl WasiView for HostState {
     fn ctx(&mut self) -> WasiCtxView<'_> {

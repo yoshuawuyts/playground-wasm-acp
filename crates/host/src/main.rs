@@ -26,9 +26,21 @@ mod translate;
 mod utils;
 mod wasm;
 
-// Generate wasmtime component bindings for the `provider` world. Bindgen
-// flips imports/exports from the host's perspective: `client` becomes a
-// Host trait we implement; `agent` becomes callable methods.
+// Generate wasmtime component bindings for both ACP worlds.
+//
+// The `layer` world is a superset of `provider`: same exports plus an
+// additional `import agent;` so a layer can forward downstream. We
+// generate them as separate top-level types (`Provider`, `Layer`) so
+// the rest of the host can statically distinguish a terminal stage from
+// an intermediate one. The `with:` clause on the layer makes it reuse
+// the provider's interface types verbatim — every WIT record/variant is
+// defined exactly once under `crate::yoshuawuyts::acp::*`, and a single
+// set of `Host` trait impls on `HostState` satisfies both linkers.
+//
+// Bindgen flips imports/exports from the host's perspective: imported
+// interfaces (`client` for both worlds, plus `agent` for `layer`) become
+// `Host` traits we implement; exported interfaces (`agent`) become
+// callable methods on the wrapper struct.
 wasmtime::component::bindgen!({
     path: "../../vendor/wit",
     world: "provider",
@@ -36,12 +48,59 @@ wasmtime::component::bindgen!({
     exports: { default: async },
 });
 
-use crate::wasm::{SessionFactory, SessionRegistry};
+mod layer_bindings {
+    // The layer bindgen lives in its own module so its generated
+    // `exports` module and `Layer` world wrapper don't collide with
+    // the provider's. Interface types are shared via `with:` so every
+    // WIT record/variant is still defined exactly once at the crate
+    // root, and a single set of `Host` impls on `HostState` satisfies
+    // both linkers.
+    wasmtime::component::bindgen!({
+        path: "../../vendor/wit",
+        world: "layer",
+        imports: { default: async },
+        exports: { default: async },
+        with: {
+            "yoshuawuyts:acp/errors": crate::yoshuawuyts::acp::errors,
+            "yoshuawuyts:acp/content": crate::yoshuawuyts::acp::content,
+            "yoshuawuyts:acp/init": crate::yoshuawuyts::acp::init,
+            "yoshuawuyts:acp/sessions": crate::yoshuawuyts::acp::sessions,
+            "yoshuawuyts:acp/prompts": crate::yoshuawuyts::acp::prompts,
+            "yoshuawuyts:acp/tools": crate::yoshuawuyts::acp::tools,
+            "yoshuawuyts:acp/terminals": crate::yoshuawuyts::acp::terminals,
+            "yoshuawuyts:acp/filesystem": crate::yoshuawuyts::acp::filesystem,
+            "yoshuawuyts:acp/client": crate::yoshuawuyts::acp::client,
+        },
+    });
+}
+
+pub use layer_bindings::Layer;
+/// `Host` trait for the layer's *imported* `agent` interface — implemented
+/// on `HostState` in [`crate::wasm`] to forward downstream.
+pub use layer_bindings::yoshuawuyts::acp::agent as layer_agent;
+
+use crate::wasm::{SessionFactory, SessionRegistry, Stage, StageKind};
 
 #[derive(Parser)]
 struct Args {
-    /// Path to the ACP agent wasm component.
-    wasm_path: PathBuf,
+    /// Path to the terminal ACP **provider** wasm component (the bottom of
+    /// the chain). Required.
+    ///
+    /// Accepts either the legacy positional path (`host my-agent.wasm`)
+    /// or the explicit `--provider` flag. The flag takes precedence.
+    #[arg(long, value_name = "PATH")]
+    provider: Option<PathBuf>,
+
+    /// Legacy positional alias for `--provider`. Retained so existing
+    /// invocations keep working unchanged.
+    wasm_path: Option<PathBuf>,
+
+    /// Path to a **layer** wasm component to wrap the provider. May be
+    /// passed multiple times; layers are applied editor-side → provider-
+    /// side in the order given (the first `--layer` is the outermost
+    /// stage closest to the host).
+    #[arg(long = "layer", value_name = "PATH")]
+    layers: Vec<PathBuf>,
 
     /// Optional path to a file to mirror logs into. The same events that
     /// go to stderr are appended to this file (no ANSI colors). Useful
@@ -91,15 +150,36 @@ fn main() -> Result<()> {
     let mut config = Config::new();
     config.wasm_component_model(true);
     let engine = Engine::new(&config)?;
-    let component = Component::from_file(&engine, &args.wasm_path)
-        .map_err(anyhow::Error::from)
-        .with_context(|| format!("loading {}", args.wasm_path.display()))?;
+
+    // Resolve provider path: `--provider` takes precedence, fall back to
+    // the legacy positional argument.
+    let provider_path = args
+        .provider
+        .clone()
+        .or_else(|| args.wasm_path.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "missing provider wasm component: pass `--provider <path>` or as positional arg"
+            )
+        })?;
+
+    let provider = load_stage(&engine, &provider_path, StageKind::Provider)?;
+    info!(
+        provider = %provider.component_id,
+        layer_count = args.layers.len(),
+        "chain configuration",
+    );
+
+    let layers: Vec<Stage> = args
+        .layers
+        .iter()
+        .map(|p| load_stage(&engine, p, StageKind::Layer))
+        .collect::<Result<_>>()?;
+    for (idx, stage) in layers.iter().enumerate() {
+        info!(idx, layer = %stage.component_id, "loaded layer");
+    }
 
     let data_root = init_data_root()?;
-
-    let component_id = utils::component_id_from_path(&args.wasm_path)
-        .context("deriving component id from wasm filename")?;
-    info!(component = %component_id, "component id");
 
     // Multi-threaded runtime + `LocalSet`: pins `!Send` session actors to
     // the `block_on` thread while `Send` work runs on the worker pool.
@@ -112,18 +192,60 @@ fn main() -> Result<()> {
         let (outbound_tx, outbound_rx) = mpsc::channel(64);
         let factory = Arc::new(SessionFactory::new(
             engine,
-            component,
+            provider,
+            layers,
             outbound_tx,
             data_root,
-            component_id,
         ));
         let registry = Arc::new(SessionRegistry::new());
 
-        info!(path = %args.wasm_path.display(), "loaded wasm component");
+        info!(path = %provider_path.display(), "loaded provider component");
         info!("listening for ACP JSON-RPC on stdio");
 
         bridge::run(factory, registry, outbound_rx).await
     })
+}
+
+/// Load a wasm component from disk and pair it with a stable component
+/// id derived from the filename. Used for both the provider and each
+/// layer stage. Validates the component's import set against the world
+/// it was passed as so a layer-shaped wasm passed via `--provider` (or
+/// vice versa) is rejected at boot rather than failing later at
+/// instantiation with a less obvious error.
+fn load_stage(engine: &Engine, path: &std::path::Path, kind: StageKind) -> Result<Stage> {
+    let component = Component::from_file(engine, path)
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("loading {}", path.display()))?;
+    validate_imports(engine, &component, kind)
+        .with_context(|| format!("validating {}", path.display()))?;
+    let component_id =
+        utils::component_id_from_path(path).context("deriving component id from wasm filename")?;
+    Ok(Stage {
+        component,
+        component_id,
+    })
+}
+
+/// Reject components whose `agent` import status doesn't match the world
+/// they were passed as. Imports are versioned (`yoshuawuyts:acp/agent@…`),
+/// so we match on the unversioned prefix to stay forward-compatible with
+/// minor WIT bumps.
+fn validate_imports(engine: &Engine, component: &Component, kind: StageKind) -> Result<()> {
+    let ty = component.component_type();
+    let imports_agent = ty
+        .imports(engine)
+        .any(|(name, _)| name.starts_with("yoshuawuyts:acp/agent"));
+    match (kind, imports_agent) {
+        (StageKind::Provider, true) => anyhow::bail!(
+            "component imports `yoshuawuyts:acp/agent` (it is a layer); \
+             pass it via `--layer` rather than `--provider`",
+        ),
+        (StageKind::Layer, false) => anyhow::bail!(
+            "component does not import `yoshuawuyts:acp/agent` (it is a provider); \
+             pass it via `--provider` rather than `--layer`",
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// Configure the global `tracing` subscriber. Stderr is always wired up;
@@ -166,10 +288,7 @@ fn timestamped_log_path(path: &std::path::Path) -> std::path::PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("host");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("host");
     let ext = path.extension().and_then(|s| s.to_str());
     let name = match ext {
         Some(ext) => format!("{stem}-{ts}.{ext}"),
