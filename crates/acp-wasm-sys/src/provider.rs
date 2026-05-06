@@ -3981,7 +3981,7 @@ pub mod yoshuawuyts {
                         }
                     }
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@4.0.0")]
                     unsafe extern "C" {
                         #[link_name = "update-session"]
                         fn wit_import177(_: *mut u8);
@@ -4632,7 +4632,7 @@ pub mod yoshuawuyts {
                         .cast::<*mut u8>() = result47;
                     let ptr48 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@4.0.0")]
                     unsafe extern "C" {
                         #[link_name = "request-permission"]
                         fn wit_import49(_: *mut u8, _: *mut u8);
@@ -4771,7 +4771,7 @@ pub mod yoshuawuyts {
                     };
                     let ptr5 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@4.0.0")]
                     unsafe extern "C" {
                         #[link_name = "read-text-file"]
                         fn wit_import6(
@@ -4918,7 +4918,7 @@ pub mod yoshuawuyts {
                     let len3 = vec3.len();
                     let ptr4 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@4.0.0")]
                     unsafe extern "C" {
                         #[link_name = "write-text-file"]
                         fn wit_import5(
@@ -5113,7 +5113,7 @@ pub mod yoshuawuyts {
                     };
                     let ptr12 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@4.0.0")]
                     unsafe extern "C" {
                         #[link_name = "create-terminal"]
                         fn wit_import13(
@@ -5270,7 +5270,7 @@ pub mod yoshuawuyts {
                     let len1 = vec1.len();
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@4.0.0")]
                     unsafe extern "C" {
                         #[link_name = "get-terminal-output"]
                         fn wit_import3(
@@ -5460,7 +5460,7 @@ pub mod yoshuawuyts {
                     let len1 = vec1.len();
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@4.0.0")]
                     unsafe extern "C" {
                         #[link_name = "wait-for-terminal-exit"]
                         fn wit_import3(
@@ -5614,7 +5614,7 @@ pub mod yoshuawuyts {
                     let len1 = vec1.len();
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@4.0.0")]
                     unsafe extern "C" {
                         #[link_name = "kill-terminal"]
                         fn wit_import3(
@@ -5722,7 +5722,7 @@ pub mod yoshuawuyts {
                     let len1 = vec1.len();
                     let ptr2 = ret_area.0.as_mut_ptr().cast::<u8>();
                     #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yoshuawuyts:acp/client@3.0.0")]
+                    #[link(wasm_import_module = "yoshuawuyts:acp/client@4.0.0")]
                     unsafe extern "C" {
                         #[link_name = "release-terminal"]
                         fn wit_import3(
@@ -9629,98 +9629,98 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[macro_export]
-                macro_rules! __export_yoshuawuyts_acp_agent_3_0_0_cabi {
+                macro_rules! __export_yoshuawuyts_acp_agent_4_0_0_cabi {
                     ($ty:ident with_types_in $($path_to_types:tt)*) => {
                         const _ : () = { #[unsafe (export_name =
-                        "yoshuawuyts:acp/agent@3.0.0#initialize")] unsafe extern "C" fn
+                        "yoshuawuyts:acp/agent@4.0.0#initialize")] unsafe extern "C" fn
                         export_initialize(arg0 : i32, arg1 : i32, arg2 : i32, arg3 : i32,
                         arg4 : i32, arg5 : * mut u8, arg6 : usize, arg7 : i32, arg8 : *
                         mut u8, arg9 : usize, arg10 : * mut u8, arg11 : usize,) -> * mut
                         u8 { unsafe { $($path_to_types)*:: _export_initialize_cabi::<$ty
                         > (arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9,
                         arg10, arg11) } } #[unsafe (export_name =
-                        "cabi_post_yoshuawuyts:acp/agent@3.0.0#initialize")] unsafe
+                        "cabi_post_yoshuawuyts:acp/agent@4.0.0#initialize")] unsafe
                         extern "C" fn _post_return_initialize(arg0 : * mut u8,) { unsafe
                         { $($path_to_types)*:: __post_return_initialize::<$ty > (arg0) }
                         } #[unsafe (export_name =
-                        "yoshuawuyts:acp/agent@3.0.0#authenticate")] unsafe extern "C" fn
+                        "yoshuawuyts:acp/agent@4.0.0#authenticate")] unsafe extern "C" fn
                         export_authenticate(arg0 : * mut u8, arg1 : usize,) -> * mut u8 {
                         unsafe { $($path_to_types)*:: _export_authenticate_cabi::<$ty >
                         (arg0, arg1) } } #[unsafe (export_name =
-                        "cabi_post_yoshuawuyts:acp/agent@3.0.0#authenticate")] unsafe
+                        "cabi_post_yoshuawuyts:acp/agent@4.0.0#authenticate")] unsafe
                         extern "C" fn _post_return_authenticate(arg0 : * mut u8,) {
                         unsafe { $($path_to_types)*:: __post_return_authenticate::<$ty >
                         (arg0) } } #[unsafe (export_name =
-                        "yoshuawuyts:acp/agent@3.0.0#new-session")] unsafe extern "C" fn
+                        "yoshuawuyts:acp/agent@4.0.0#new-session")] unsafe extern "C" fn
                         export_new_session(arg0 : * mut u8, arg1 : usize, arg2 : * mut
                         u8, arg3 : usize,) -> * mut u8 { unsafe { $($path_to_types)*::
                         _export_new_session_cabi::<$ty > (arg0, arg1, arg2, arg3) } }
                         #[unsafe (export_name =
-                        "cabi_post_yoshuawuyts:acp/agent@3.0.0#new-session")] unsafe
+                        "cabi_post_yoshuawuyts:acp/agent@4.0.0#new-session")] unsafe
                         extern "C" fn _post_return_new_session(arg0 : * mut u8,) { unsafe
                         { $($path_to_types)*:: __post_return_new_session::<$ty > (arg0) }
                         } #[unsafe (export_name =
-                        "yoshuawuyts:acp/agent@3.0.0#load-session")] unsafe extern "C" fn
+                        "yoshuawuyts:acp/agent@4.0.0#load-session")] unsafe extern "C" fn
                         export_load_session(arg0 : * mut u8, arg1 : usize, arg2 : * mut
                         u8, arg3 : usize, arg4 : * mut u8, arg5 : usize,) -> * mut u8 {
                         unsafe { $($path_to_types)*:: _export_load_session_cabi::<$ty >
                         (arg0, arg1, arg2, arg3, arg4, arg5) } } #[unsafe (export_name =
-                        "cabi_post_yoshuawuyts:acp/agent@3.0.0#load-session")] unsafe
+                        "cabi_post_yoshuawuyts:acp/agent@4.0.0#load-session")] unsafe
                         extern "C" fn _post_return_load_session(arg0 : * mut u8,) {
                         unsafe { $($path_to_types)*:: __post_return_load_session::<$ty >
                         (arg0) } } #[unsafe (export_name =
-                        "yoshuawuyts:acp/agent@3.0.0#list-sessions")] unsafe extern "C"
+                        "yoshuawuyts:acp/agent@4.0.0#list-sessions")] unsafe extern "C"
                         fn export_list_sessions(arg0 : i32, arg1 : * mut u8, arg2 :
                         usize, arg3 : i32, arg4 : * mut u8, arg5 : usize,) -> * mut u8 {
                         unsafe { $($path_to_types)*:: _export_list_sessions_cabi::<$ty >
                         (arg0, arg1, arg2, arg3, arg4, arg5) } } #[unsafe (export_name =
-                        "cabi_post_yoshuawuyts:acp/agent@3.0.0#list-sessions")] unsafe
+                        "cabi_post_yoshuawuyts:acp/agent@4.0.0#list-sessions")] unsafe
                         extern "C" fn _post_return_list_sessions(arg0 : * mut u8,) {
                         unsafe { $($path_to_types)*:: __post_return_list_sessions::<$ty >
                         (arg0) } } #[unsafe (export_name =
-                        "yoshuawuyts:acp/agent@3.0.0#resume-session")] unsafe extern "C"
+                        "yoshuawuyts:acp/agent@4.0.0#resume-session")] unsafe extern "C"
                         fn export_resume_session(arg0 : * mut u8, arg1 : usize, arg2 : *
                         mut u8, arg3 : usize, arg4 : * mut u8, arg5 : usize,) -> * mut u8
                         { unsafe { $($path_to_types)*:: _export_resume_session_cabi::<$ty
                         > (arg0, arg1, arg2, arg3, arg4, arg5) } } #[unsafe (export_name
-                        = "cabi_post_yoshuawuyts:acp/agent@3.0.0#resume-session")] unsafe
+                        = "cabi_post_yoshuawuyts:acp/agent@4.0.0#resume-session")] unsafe
                         extern "C" fn _post_return_resume_session(arg0 : * mut u8,) {
                         unsafe { $($path_to_types)*:: __post_return_resume_session::<$ty
                         > (arg0) } } #[unsafe (export_name =
-                        "yoshuawuyts:acp/agent@3.0.0#close-session")] unsafe extern "C"
+                        "yoshuawuyts:acp/agent@4.0.0#close-session")] unsafe extern "C"
                         fn export_close_session(arg0 : * mut u8, arg1 : usize,) -> * mut
                         u8 { unsafe { $($path_to_types)*::
                         _export_close_session_cabi::<$ty > (arg0, arg1) } } #[unsafe
                         (export_name =
-                        "cabi_post_yoshuawuyts:acp/agent@3.0.0#close-session")] unsafe
+                        "cabi_post_yoshuawuyts:acp/agent@4.0.0#close-session")] unsafe
                         extern "C" fn _post_return_close_session(arg0 : * mut u8,) {
                         unsafe { $($path_to_types)*:: __post_return_close_session::<$ty >
                         (arg0) } } #[unsafe (export_name =
-                        "yoshuawuyts:acp/agent@3.0.0#set-session-mode")] unsafe extern
+                        "yoshuawuyts:acp/agent@4.0.0#set-session-mode")] unsafe extern
                         "C" fn export_set_session_mode(arg0 : * mut u8, arg1 : usize,
                         arg2 : * mut u8, arg3 : usize,) -> * mut u8 { unsafe {
                         $($path_to_types)*:: _export_set_session_mode_cabi::<$ty > (arg0,
                         arg1, arg2, arg3) } } #[unsafe (export_name =
-                        "cabi_post_yoshuawuyts:acp/agent@3.0.0#set-session-mode")] unsafe
+                        "cabi_post_yoshuawuyts:acp/agent@4.0.0#set-session-mode")] unsafe
                         extern "C" fn _post_return_set_session_mode(arg0 : * mut u8,) {
                         unsafe { $($path_to_types)*::
                         __post_return_set_session_mode::<$ty > (arg0) } } #[unsafe
-                        (export_name = "yoshuawuyts:acp/agent@3.0.0#prompt")] unsafe
+                        (export_name = "yoshuawuyts:acp/agent@4.0.0#prompt")] unsafe
                         extern "C" fn export_prompt(arg0 : * mut u8, arg1 : usize, arg2 :
                         * mut u8, arg3 : usize,) -> * mut u8 { unsafe {
                         $($path_to_types)*:: _export_prompt_cabi::<$ty > (arg0, arg1,
                         arg2, arg3) } } #[unsafe (export_name =
-                        "cabi_post_yoshuawuyts:acp/agent@3.0.0#prompt")] unsafe extern
+                        "cabi_post_yoshuawuyts:acp/agent@4.0.0#prompt")] unsafe extern
                         "C" fn _post_return_prompt(arg0 : * mut u8,) { unsafe {
                         $($path_to_types)*:: __post_return_prompt::<$ty > (arg0) } }
-                        #[unsafe (export_name = "yoshuawuyts:acp/agent@3.0.0#cancel")]
+                        #[unsafe (export_name = "yoshuawuyts:acp/agent@4.0.0#cancel")]
                         unsafe extern "C" fn export_cancel(arg0 : * mut u8, arg1 :
                         usize,) { unsafe { $($path_to_types)*:: _export_cancel_cabi::<$ty
                         > (arg0, arg1) } } };
                     };
                 }
                 #[doc(hidden)]
-                pub use __export_yoshuawuyts_acp_agent_3_0_0_cabi;
+                pub use __export_yoshuawuyts_acp_agent_4_0_0_cabi;
                 #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
                 #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
                 struct _RetArea(
@@ -9889,11 +9889,11 @@ macro_rules! __export_provider_impl {
     };
     ($ty:ident with_types_in $($path_to_types_root:tt)*) => {
         $($path_to_types_root)*::
-        exports::yoshuawuyts::acp::agent::__export_yoshuawuyts_acp_agent_3_0_0_cabi!($ty
+        exports::yoshuawuyts::acp::agent::__export_yoshuawuyts_acp_agent_4_0_0_cabi!($ty
         with_types_in $($path_to_types_root)*:: exports::yoshuawuyts::acp::agent); const
         _ : () = { #[rustfmt::skip] #[cfg(target_arch = "wasm32")] #[unsafe (link_section
         =
-        "component-type:wit-bindgen:0.57.1:yoshuawuyts:acp@3.0.0:provider:imports and exports")]
+        "component-type:wit-bindgen:0.57.1:yoshuawuyts:acp@4.0.0:provider:imports and exports")]
         #[doc(hidden)] #[allow(clippy::octal_escapes)] pub static
         __WIT_BINDGEN_COMPONENT_TYPE : [u8; 7252] = *
         b"\
@@ -9901,7 +9901,7 @@ macro_rules! __export_provider_impl {
 B\x04\x01q\x08\x0bparse-error\0\0\x0finvalid-request\0\0\x10method-not-found\0\0\
 \x0einvalid-params\0\0\x0einternal-error\0\0\x0dauth-required\0\0\x12resource-no\
 t-found\0\0\x05other\x01z\0\x04\0\x0aerror-code\x03\0\0\x01r\x02\x04code\x01\x07\
-messages\x04\0\x05error\x03\0\x02\x03\0\x1cyoshuawuyts:acp/errors@3.0.0\x05\0\x01\
+messages\x04\0\x05error\x03\0\x02\x03\0\x1cyoshuawuyts:acp/errors@4.0.0\x05\0\x01\
 B2\x01s\x04\0\x0asession-id\x03\0\0\x01s\x04\0\x0fsession-mode-id\x03\0\x02\x01r\
 \x02\x04names\x05values\x04\0\x07env-var\x03\0\x04\x01r\x02\x04names\x05values\x04\
 \0\x0bhttp-header\x03\0\x06\x01ps\x01p\x05\x01r\x04\x04names\x07commands\x04args\
@@ -9922,7 +9922,7 @@ ns-request\x03\0'\x01p&\x01r\x02\x08sessions)\x0bnext-cursor\x13\x04\0\x16list-s
 essions-response\x03\0*\x01r\x03\x0asession-id\x01\x03cwds\x0bmcp-servers\x1b\x04\
 \0\x16resume-session-request\x03\0,\x01r\x01\x05modes\x1e\x04\0\x17resume-sessio\
 n-response\x03\0.\x01r\x02\x05title\x13\x0aupdated-at\x13\x04\0\x13session-info-\
-update\x03\00\x03\0\x1eyoshuawuyts:acp/sessions@3.0.0\x05\x01\x01B\x14\x01r\x01\x04\
+update\x03\00\x03\0\x1eyoshuawuyts:acp/sessions@4.0.0\x05\x01\x01B\x14\x01r\x01\x04\
 texts\x04\0\x0ctext-content\x03\0\0\x01ks\x01r\x03\x04datas\x09mime-types\x03uri\
 \x02\x04\0\x0dimage-content\x03\0\x03\x01r\x02\x04datas\x09mime-types\x04\0\x0da\
 udio-content\x03\0\x05\x01kw\x01r\x06\x03uris\x04names\x09mime-type\x02\x05title\
@@ -9932,7 +9932,7 @@ uris\x09mime-type\x02\x04texts\x04\0\x16text-resource-contents\x03\0\x0a\x01r\x0
 q\x02\x04text\x01\x0b\0\x04blob\x01\x0d\0\x04\0\x11resource-contents\x03\0\x0e\x01\
 r\x01\x08resource\x0f\x04\0\x11embedded-resource\x03\0\x10\x01q\x05\x04text\x01\x01\
 \0\x05image\x01\x04\0\x05audio\x01\x06\0\x0dresource-link\x01\x09\0\x08resource\x01\
-\x11\0\x04\0\x0dcontent-block\x03\0\x12\x03\0\x1dyoshuawuyts:acp/content@3.0.0\x05\
+\x11\0\x04\0\x0dcontent-block\x03\0\x12\x03\0\x1dyoshuawuyts:acp/content@4.0.0\x05\
 \x02\x02\x03\0\x01\x0asession-id\x02\x03\0\x01\x07env-var\x01B\x14\x02\x03\x02\x01\
 \x03\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x04\x04\0\x07env-var\x03\0\x02\x01\
 s\x04\0\x0bterminal-id\x03\0\x04\x01ps\x01p\x03\x01ks\x01kw\x01r\x06\x0asession-\
@@ -9941,7 +9941,7 @@ id\x01\x07commands\x04args\x06\x03env\x07\x03cwd\x08\x11output-byte-limit\x09\x0
 ate-terminal-response\x03\0\x0c\x01kz\x01r\x02\x09exit-code\x0e\x06signal\x08\x04\
 \0\x14terminal-exit-status\x03\0\x0f\x01k\x10\x01r\x03\x06outputs\x09truncated\x7f\
 \x0bexit-status\x11\x04\0\x0fterminal-output\x03\0\x12\x03\0\x1fyoshuawuyts:acp/\
-terminals@3.0.0\x05\x05\x02\x03\0\x02\x0dcontent-block\x02\x03\0\x03\x0bterminal\
+terminals@4.0.0\x05\x05\x02\x03\0\x02\x0dcontent-block\x02\x03\0\x03\x0bterminal\
 -id\x01B2\x02\x03\x02\x01\x03\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x06\x04\
 \0\x0dcontent-block\x03\0\x02\x02\x03\x02\x01\x07\x04\0\x0bterminal-id\x03\0\x04\
 \x01s\x04\0\x0ctool-call-id\x03\0\x06\x01m\x09\x04read\x04edit\x06delete\x04move\
@@ -9964,7 +9964,7 @@ ames\x04kind(\x04\0\x11permission-option\x03\0)\x01p*\x01r\x03\x0asession-id\x01
 \x09tool-call\x1d\x07options+\x04\0\x1arequest-permission-request\x03\0,\x01q\x02\
 \x09cancelled\0\0\x08selected\x01s\0\x04\0\x12permission-outcome\x03\0.\x01r\x01\
 \x07outcome/\x04\0\x1brequest-permission-response\x03\00\x03\0\x1byoshuawuyts:ac\
-p/tools@3.0.0\x05\x08\x02\x03\0\x01\x0fsession-mode-id\x02\x03\0\x01\x13session-\
+p/tools@4.0.0\x05\x08\x02\x03\0\x01\x0fsession-mode-id\x02\x03\0\x01\x13session-\
 info-update\x02\x03\0\x04\x09tool-call\x02\x03\0\x04\x10tool-call-update\x02\x03\
 \0\x04\x04plan\x01B\x1d\x02\x03\x02\x01\x03\x04\0\x0asession-id\x03\0\0\x02\x03\x02\
 \x01\x09\x04\0\x0fsession-mode-id\x03\0\x02\x02\x03\x02\x01\x0a\x04\0\x13session\
@@ -9980,11 +9980,11 @@ q\x09\x12user-message-chunk\x01\x07\0\x13agent-message-chunk\x01\x07\0\x13agent-
 thought-chunk\x01\x07\0\x09tool-call\x01\x09\0\x10tool-call-update\x01\x0b\0\x04\
 plan\x01\x0d\0\x13current-mode-update\x01\x03\0\x13session-info-update\x01\x05\0\
 \x19available-commands-update\x01\x1a\0\x04\0\x0esession-update\x03\0\x1b\x03\0\x1d\
-yoshuawuyts:acp/prompts@3.0.0\x05\x0e\x01B\x09\x02\x03\x02\x01\x03\x04\0\x0asess\
+yoshuawuyts:acp/prompts@4.0.0\x05\x0e\x01B\x09\x02\x03\x02\x01\x03\x04\0\x0asess\
 ion-id\x03\0\0\x01ky\x01r\x04\x0asession-id\x01\x04paths\x04line\x02\x05limit\x02\
 \x04\0\x16read-text-file-request\x03\0\x03\x01r\x01\x07contents\x04\0\x17read-te\
 xt-file-response\x03\0\x05\x01r\x03\x0asession-id\x01\x04paths\x07contents\x04\0\
-\x17write-text-file-request\x03\0\x07\x03\0\x20yoshuawuyts:acp/filesystem@3.0.0\x05\
+\x17write-text-file-request\x03\0\x07\x03\0\x20yoshuawuyts:acp/filesystem@4.0.0\x05\
 \x0f\x02\x03\0\0\x05error\x02\x03\0\x05\x0esession-update\x02\x03\0\x04\x1areque\
 st-permission-request\x02\x03\0\x04\x1brequest-permission-response\x02\x03\0\x06\
 \x16read-text-file-request\x02\x03\0\x06\x17read-text-file-response\x02\x03\0\x06\
@@ -10008,7 +10008,7 @@ inal-response\x03\0\x14\x02\x03\x02\x01\x19\x04\0\x0fterminal-output\x03\0\x16\x
 id\x03\x0bterminal-id\x11\0#\x04\0\x13get-terminal-output\x01$\x01j\x01\x19\x01\x01\
 \x01@\x02\x0asession-id\x03\x0bterminal-id\x11\0%\x04\0\x16wait-for-terminal-exi\
 t\x01&\x01@\x02\x0asession-id\x03\x0bterminal-id\x11\0\x1f\x04\0\x0dkill-termina\
-l\x01'\x04\0\x10release-terminal\x01'\x03\0\x1cyoshuawuyts:acp/client@3.0.0\x05\x1b\
+l\x01'\x04\0\x10release-terminal\x01'\x03\0\x1cyoshuawuyts:acp/client@4.0.0\x05\x1b\
 \x01B\x19\x01ks\x01r\x03\x04names\x05title\0\x07versions\x04\0\x13implementation\
 -info\x03\0\x01\x01r\x02\x0eread-text-file\x7f\x0fwrite-text-file\x7f\x04\0\x0ff\
 s-capabilities\x03\0\x03\x01r\x02\x02fs\x04\x08terminal\x7f\x04\0\x13client-capa\
@@ -10022,7 +10022,7 @@ lities\x03\0\x0d\x01r\x03\x02ids\x04names\x0bdescription\0\x04\0\x0bauth-method\
 r\x03\x10protocol-versiony\x13client-capabilities\x06\x0bclient-info\x13\x04\0\x12\
 initialize-request\x03\0\x14\x01p\x10\x01r\x04\x10protocol-versiony\x12agent-cap\
 abilities\x0e\x0aagent-info\x13\x0cauth-methods\x16\x04\0\x13initialize-response\
-\x03\0\x17\x03\0\x1ayoshuawuyts:acp/init@3.0.0\x05\x1c\x02\x03\0\x08\x12initiali\
+\x03\0\x17\x03\0\x1ayoshuawuyts:acp/init@4.0.0\x05\x1c\x02\x03\0\x08\x12initiali\
 ze-request\x02\x03\0\x08\x13initialize-response\x02\x03\0\x08\x14authenticate-re\
 quest\x02\x03\0\x01\x13new-session-request\x02\x03\0\x01\x14new-session-response\
 \x02\x03\0\x01\x14load-session-request\x02\x03\0\x01\x15load-session-response\x02\
@@ -10049,7 +10049,7 @@ j\x01\x15\x01\x01\x01@\x01\x03req\x13\0(\x04\0\x0dlist-sessions\x01)\x01j\x01\x1
 -id\x09\0\"\x04\0\x0dclose-session\x01,\x01@\x01\x03req\x1b\0\"\x04\0\x10set-ses\
 sion-mode\x01-\x01j\x01\x1f\x01\x01\x01@\x01\x03req\x1d\0.\x04\0\x06prompt\x01/\x01\
 @\x01\x0asession-id\x09\x01\0\x04\0\x06cancel\x010\x04\0\x1byoshuawuyts:acp/agen\
-t@3.0.0\x05+\x04\0\x1eyoshuawuyts:acp/provider@3.0.0\x04\0\x0b\x0e\x01\0\x08prov\
+t@4.0.0\x05+\x04\0\x1eyoshuawuyts:acp/provider@4.0.0\x04\0\x0b\x0e\x01\0\x08prov\
 ider\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.247.0\
 \x10wit-bindgen-rust\x060.57.1";
         };
@@ -10060,7 +10060,7 @@ pub use __export_provider_impl as export;
 #[rustfmt::skip]
 #[cfg(target_arch = "wasm32")]
 #[unsafe(
-    link_section = "component-type:wit-bindgen:0.57.1:yoshuawuyts:acp@3.0.0:provider-with-all-of-its-exports-removed:encoded world"
+    link_section = "component-type:wit-bindgen:0.57.1:yoshuawuyts:acp@4.0.0:provider-with-all-of-its-exports-removed:encoded world"
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
@@ -10069,7 +10069,7 @@ pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 6146] = *b"\
 B\x04\x01q\x08\x0bparse-error\0\0\x0finvalid-request\0\0\x10method-not-found\0\0\
 \x0einvalid-params\0\0\x0einternal-error\0\0\x0dauth-required\0\0\x12resource-no\
 t-found\0\0\x05other\x01z\0\x04\0\x0aerror-code\x03\0\0\x01r\x02\x04code\x01\x07\
-messages\x04\0\x05error\x03\0\x02\x03\0\x1cyoshuawuyts:acp/errors@3.0.0\x05\0\x01\
+messages\x04\0\x05error\x03\0\x02\x03\0\x1cyoshuawuyts:acp/errors@4.0.0\x05\0\x01\
 B2\x01s\x04\0\x0asession-id\x03\0\0\x01s\x04\0\x0fsession-mode-id\x03\0\x02\x01r\
 \x02\x04names\x05values\x04\0\x07env-var\x03\0\x04\x01r\x02\x04names\x05values\x04\
 \0\x0bhttp-header\x03\0\x06\x01ps\x01p\x05\x01r\x04\x04names\x07commands\x04args\
@@ -10090,7 +10090,7 @@ ns-request\x03\0'\x01p&\x01r\x02\x08sessions)\x0bnext-cursor\x13\x04\0\x16list-s
 essions-response\x03\0*\x01r\x03\x0asession-id\x01\x03cwds\x0bmcp-servers\x1b\x04\
 \0\x16resume-session-request\x03\0,\x01r\x01\x05modes\x1e\x04\0\x17resume-sessio\
 n-response\x03\0.\x01r\x02\x05title\x13\x0aupdated-at\x13\x04\0\x13session-info-\
-update\x03\00\x03\0\x1eyoshuawuyts:acp/sessions@3.0.0\x05\x01\x01B\x14\x01r\x01\x04\
+update\x03\00\x03\0\x1eyoshuawuyts:acp/sessions@4.0.0\x05\x01\x01B\x14\x01r\x01\x04\
 texts\x04\0\x0ctext-content\x03\0\0\x01ks\x01r\x03\x04datas\x09mime-types\x03uri\
 \x02\x04\0\x0dimage-content\x03\0\x03\x01r\x02\x04datas\x09mime-types\x04\0\x0da\
 udio-content\x03\0\x05\x01kw\x01r\x06\x03uris\x04names\x09mime-type\x02\x05title\
@@ -10100,7 +10100,7 @@ uris\x09mime-type\x02\x04texts\x04\0\x16text-resource-contents\x03\0\x0a\x01r\x0
 q\x02\x04text\x01\x0b\0\x04blob\x01\x0d\0\x04\0\x11resource-contents\x03\0\x0e\x01\
 r\x01\x08resource\x0f\x04\0\x11embedded-resource\x03\0\x10\x01q\x05\x04text\x01\x01\
 \0\x05image\x01\x04\0\x05audio\x01\x06\0\x0dresource-link\x01\x09\0\x08resource\x01\
-\x11\0\x04\0\x0dcontent-block\x03\0\x12\x03\0\x1dyoshuawuyts:acp/content@3.0.0\x05\
+\x11\0\x04\0\x0dcontent-block\x03\0\x12\x03\0\x1dyoshuawuyts:acp/content@4.0.0\x05\
 \x02\x02\x03\0\x01\x0asession-id\x02\x03\0\x01\x07env-var\x01B\x14\x02\x03\x02\x01\
 \x03\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x04\x04\0\x07env-var\x03\0\x02\x01\
 s\x04\0\x0bterminal-id\x03\0\x04\x01ps\x01p\x03\x01ks\x01kw\x01r\x06\x0asession-\
@@ -10109,7 +10109,7 @@ id\x01\x07commands\x04args\x06\x03env\x07\x03cwd\x08\x11output-byte-limit\x09\x0
 ate-terminal-response\x03\0\x0c\x01kz\x01r\x02\x09exit-code\x0e\x06signal\x08\x04\
 \0\x14terminal-exit-status\x03\0\x0f\x01k\x10\x01r\x03\x06outputs\x09truncated\x7f\
 \x0bexit-status\x11\x04\0\x0fterminal-output\x03\0\x12\x03\0\x1fyoshuawuyts:acp/\
-terminals@3.0.0\x05\x05\x02\x03\0\x02\x0dcontent-block\x02\x03\0\x03\x0bterminal\
+terminals@4.0.0\x05\x05\x02\x03\0\x02\x0dcontent-block\x02\x03\0\x03\x0bterminal\
 -id\x01B2\x02\x03\x02\x01\x03\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x06\x04\
 \0\x0dcontent-block\x03\0\x02\x02\x03\x02\x01\x07\x04\0\x0bterminal-id\x03\0\x04\
 \x01s\x04\0\x0ctool-call-id\x03\0\x06\x01m\x09\x04read\x04edit\x06delete\x04move\
@@ -10132,7 +10132,7 @@ ames\x04kind(\x04\0\x11permission-option\x03\0)\x01p*\x01r\x03\x0asession-id\x01
 \x09tool-call\x1d\x07options+\x04\0\x1arequest-permission-request\x03\0,\x01q\x02\
 \x09cancelled\0\0\x08selected\x01s\0\x04\0\x12permission-outcome\x03\0.\x01r\x01\
 \x07outcome/\x04\0\x1brequest-permission-response\x03\00\x03\0\x1byoshuawuyts:ac\
-p/tools@3.0.0\x05\x08\x02\x03\0\x01\x0fsession-mode-id\x02\x03\0\x01\x13session-\
+p/tools@4.0.0\x05\x08\x02\x03\0\x01\x0fsession-mode-id\x02\x03\0\x01\x13session-\
 info-update\x02\x03\0\x04\x09tool-call\x02\x03\0\x04\x10tool-call-update\x02\x03\
 \0\x04\x04plan\x01B\x1d\x02\x03\x02\x01\x03\x04\0\x0asession-id\x03\0\0\x02\x03\x02\
 \x01\x09\x04\0\x0fsession-mode-id\x03\0\x02\x02\x03\x02\x01\x0a\x04\0\x13session\
@@ -10148,11 +10148,11 @@ q\x09\x12user-message-chunk\x01\x07\0\x13agent-message-chunk\x01\x07\0\x13agent-
 thought-chunk\x01\x07\0\x09tool-call\x01\x09\0\x10tool-call-update\x01\x0b\0\x04\
 plan\x01\x0d\0\x13current-mode-update\x01\x03\0\x13session-info-update\x01\x05\0\
 \x19available-commands-update\x01\x1a\0\x04\0\x0esession-update\x03\0\x1b\x03\0\x1d\
-yoshuawuyts:acp/prompts@3.0.0\x05\x0e\x01B\x09\x02\x03\x02\x01\x03\x04\0\x0asess\
+yoshuawuyts:acp/prompts@4.0.0\x05\x0e\x01B\x09\x02\x03\x02\x01\x03\x04\0\x0asess\
 ion-id\x03\0\0\x01ky\x01r\x04\x0asession-id\x01\x04paths\x04line\x02\x05limit\x02\
 \x04\0\x16read-text-file-request\x03\0\x03\x01r\x01\x07contents\x04\0\x17read-te\
 xt-file-response\x03\0\x05\x01r\x03\x0asession-id\x01\x04paths\x07contents\x04\0\
-\x17write-text-file-request\x03\0\x07\x03\0\x20yoshuawuyts:acp/filesystem@3.0.0\x05\
+\x17write-text-file-request\x03\0\x07\x03\0\x20yoshuawuyts:acp/filesystem@4.0.0\x05\
 \x0f\x02\x03\0\0\x05error\x02\x03\0\x05\x0esession-update\x02\x03\0\x04\x1areque\
 st-permission-request\x02\x03\0\x04\x1brequest-permission-response\x02\x03\0\x06\
 \x16read-text-file-request\x02\x03\0\x06\x17read-text-file-response\x02\x03\0\x06\
@@ -10176,7 +10176,7 @@ inal-response\x03\0\x14\x02\x03\x02\x01\x19\x04\0\x0fterminal-output\x03\0\x16\x
 id\x03\x0bterminal-id\x11\0#\x04\0\x13get-terminal-output\x01$\x01j\x01\x19\x01\x01\
 \x01@\x02\x0asession-id\x03\x0bterminal-id\x11\0%\x04\0\x16wait-for-terminal-exi\
 t\x01&\x01@\x02\x0asession-id\x03\x0bterminal-id\x11\0\x1f\x04\0\x0dkill-termina\
-l\x01'\x04\0\x10release-terminal\x01'\x03\0\x1cyoshuawuyts:acp/client@3.0.0\x05\x1b\
+l\x01'\x04\0\x10release-terminal\x01'\x03\0\x1cyoshuawuyts:acp/client@4.0.0\x05\x1b\
 \x01B\x19\x01ks\x01r\x03\x04names\x05title\0\x07versions\x04\0\x13implementation\
 -info\x03\0\x01\x01r\x02\x0eread-text-file\x7f\x0fwrite-text-file\x7f\x04\0\x0ff\
 s-capabilities\x03\0\x03\x01r\x02\x02fs\x04\x08terminal\x7f\x04\0\x13client-capa\
@@ -10190,8 +10190,8 @@ lities\x03\0\x0d\x01r\x03\x02ids\x04names\x0bdescription\0\x04\0\x0bauth-method\
 r\x03\x10protocol-versiony\x13client-capabilities\x06\x0bclient-info\x13\x04\0\x12\
 initialize-request\x03\0\x14\x01p\x10\x01r\x04\x10protocol-versiony\x12agent-cap\
 abilities\x0e\x0aagent-info\x13\x0cauth-methods\x16\x04\0\x13initialize-response\
-\x03\0\x17\x03\0\x1ayoshuawuyts:acp/init@3.0.0\x05\x1c\x04\0>yoshuawuyts:acp/pro\
-vider-with-all-of-its-exports-removed@3.0.0\x04\0\x0b.\x01\0(provider-with-all-o\
+\x03\0\x17\x03\0\x1ayoshuawuyts:acp/init@4.0.0\x05\x1c\x04\0>yoshuawuyts:acp/pro\
+vider-with-all-of-its-exports-removed@4.0.0\x04\0\x0b.\x01\0(provider-with-all-o\
 f-its-exports-removed\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-com\
 ponent\x070.247.0\x10wit-bindgen-rust\x060.57.1";
 #[inline(never)]

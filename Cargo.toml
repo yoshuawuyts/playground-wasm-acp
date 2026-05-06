@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/acp-wasm-sys", "crates/host", "crates/ollama-provider"]
+members = [
+    "crates/acp-wasm-sys",
+    "crates/host",
+    "crates/ollama-provider",
+    "crates/uppercase-layer",
+]
 resolver = "2"
 
 [workspace.package]

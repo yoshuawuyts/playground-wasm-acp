@@ -12,9 +12,9 @@
 //! `fs/read_text_file`. Adding more tools is "add another `Tool` to
 //! [`all`]" — no boilerplate beyond the schema.
 
-use acp_wasm_sys::yoshuawuyts::acp::client;
-use acp_wasm_sys::yoshuawuyts::acp::filesystem::ReadTextFileRequest;
-use acp_wasm_sys::yoshuawuyts::acp::tools::ToolKind;
+use acp_wasm_sys::provider::yoshuawuyts::acp::client;
+use acp_wasm_sys::provider::yoshuawuyts::acp::filesystem::ReadTextFileRequest;
+use acp_wasm_sys::provider::yoshuawuyts::acp::tools::ToolKind;
 use serde_json::{Value, json};
 
 use crate::ollama::{OllamaTool, OllamaToolCall};

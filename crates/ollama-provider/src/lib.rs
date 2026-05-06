@@ -8,23 +8,23 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use acp_wasm_sys::exports::yoshuawuyts::acp::agent::Guest;
-use acp_wasm_sys::yoshuawuyts::acp::client;
-use acp_wasm_sys::yoshuawuyts::acp::content::{ContentBlock, TextContent};
-use acp_wasm_sys::yoshuawuyts::acp::errors::{Error, ErrorCode};
-use acp_wasm_sys::yoshuawuyts::acp::init::{
+use acp_wasm_sys::provider::exports::yoshuawuyts::acp::agent::Guest;
+use acp_wasm_sys::provider::yoshuawuyts::acp::client;
+use acp_wasm_sys::provider::yoshuawuyts::acp::content::{ContentBlock, TextContent};
+use acp_wasm_sys::provider::yoshuawuyts::acp::errors::{Error, ErrorCode};
+use acp_wasm_sys::provider::yoshuawuyts::acp::init::{
     AgentCapabilities, AuthenticateRequest, ImplementationInfo, InitializeRequest,
     InitializeResponse, McpCapabilities, PromptCapabilities, SessionCapabilities,
 };
-use acp_wasm_sys::yoshuawuyts::acp::prompts::{
+use acp_wasm_sys::provider::yoshuawuyts::acp::prompts::{
     PromptRequest, PromptResponse, SessionUpdate, StopReason,
 };
-use acp_wasm_sys::yoshuawuyts::acp::tools::ToolKind;
-use acp_wasm_sys::yoshuawuyts::acp::sessions::{
+use acp_wasm_sys::provider::yoshuawuyts::acp::sessions::{
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
     NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse, SessionId,
     SessionMode, SessionModeState, SetSessionModeRequest,
 };
+use acp_wasm_sys::provider::yoshuawuyts::acp::tools::ToolKind;
 
 use crate::ollama::Message;
 use crate::storage::Session;
@@ -421,9 +421,9 @@ impl Guest for Agent {
             // tool, send a `tool_call_update` (status: completed/failed
             // with content), and feed the result back as a `role: "tool"`
             // message for the next iteration.
-            use acp_wasm_sys::yoshuawuyts::acp::content::ContentBlock as Cb;
-            use acp_wasm_sys::yoshuawuyts::acp::content::TextContent as Tc;
-            use acp_wasm_sys::yoshuawuyts::acp::tools::{
+            use acp_wasm_sys::provider::yoshuawuyts::acp::content::ContentBlock as Cb;
+            use acp_wasm_sys::provider::yoshuawuyts::acp::content::TextContent as Tc;
+            use acp_wasm_sys::provider::yoshuawuyts::acp::tools::{
                 ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
             };
             for call in &turn.tool_calls {
@@ -449,16 +449,15 @@ impl Guest for Agent {
 
                 let outcome = match tool {
                     Some(tool) => (tool.run)(&session_id, &call.function.arguments),
-                    None => tools::ToolOutcome::fail(format!(
-                        "unknown tool `{}`",
-                        call.function.name
-                    )),
+                    None => {
+                        tools::ToolOutcome::fail(format!("unknown tool `{}`", call.function.name))
+                    }
                 };
 
                 let locations = if outcome.locations.is_empty() {
                     None
                 } else {
-                    use acp_wasm_sys::yoshuawuyts::acp::tools::ToolCallLocation;
+                    use acp_wasm_sys::provider::yoshuawuyts::acp::tools::ToolCallLocation;
                     Some(
                         outcome
                             .locations
@@ -536,4 +535,4 @@ impl Guest for Agent {
     }
 }
 
-acp_wasm_sys::export!(Agent with_types_in acp_wasm_sys);
+acp_wasm_sys::provider::export!(Agent with_types_in acp_wasm_sys::provider);

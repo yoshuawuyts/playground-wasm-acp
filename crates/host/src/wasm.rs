@@ -27,7 +27,7 @@ use wasmtime::{Engine, Store};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 use wasmtime_wasi_http::WasiHttpCtx;
 
-use crate::state::{DownstreamHandle, HostState, OutboundEvent};
+use crate::state::{ClientSink, DownstreamHandle, HostState, OutboundEvent, UpstreamHandle};
 use crate::yoshuawuyts::acp::errors::Error;
 use crate::yoshuawuyts::acp::init::{AuthenticateRequest, InitializeRequest, InitializeResponse};
 use crate::yoshuawuyts::acp::prompts::{PromptRequest, PromptResponse};
@@ -103,6 +103,10 @@ impl SessionFactory {
         self.instantiate_chain(None).await
     }
 
+    fn outbound_sink(&self) -> ClientSink {
+        ClientSink::Outbound(self.outbound.clone())
+    }
+
     /// Component id used by the bridge to label session modes. Reports the
     /// *provider's* id since that's the terminal authority for modes;
     /// layers may rewrite the response, but the namespace stays anchored
@@ -125,37 +129,110 @@ impl SessionFactory {
 
     /// Bottom-up chain build: instantiate the provider first, then wrap it
     /// with each layer (innermost-first). The returned `WasmAgent` is the
-    /// chain's *head* — the outermost stage that the bridge calls into.
+    /// chain's *head* `agent_inst` — the outermost stage that the bridge
+    /// calls into.
+    ///
+    /// Each layer stage is materialised as **two** wasm instances backed
+    /// by *separate* stores:
+    ///
+    /// * `agent_inst` — handles the agent direction (`prompt`, `new-session`,
+    ///   …). Its `agent` import is wired to the next stage downstream.
+    /// * `client_inst` — handles the client direction (`update-session`,
+    ///   `read-text-file`, …). Its `client` import is wired upstream.
+    ///
+    /// The split exists because wasmtime stores are non-reentrant: while a
+    /// layer's exported `agent.prompt` is in flight, a downstream stage
+    /// will synchronously call `client.update-session` upward through the
+    /// chain. Routing those calls into the layer's exported `client` on
+    /// the *same* store as the active `agent.prompt` would deadlock.
+    /// Putting them on a separate store side-steps the problem entirely.
+    /// Layers are expected to be approximately stateless across the two
+    /// directions; if a layer needs shared state it should persist via
+    /// `/data` rather than rely on in-memory globals.
+    ///
+    /// The provider stage stays as a single instance — its world has no
+    /// `client` export so there's no client-direction code to run.
     async fn instantiate_chain(&self, project_dir: Option<&std::path::Path>) -> Result<WasmAgent> {
-        // Innermost: terminal provider, no downstream.
+        // Innermost: terminal provider, no downstream. Its `client_sink`
+        // starts as `Outbound` (used directly when there are zero
+        // layers); if any layers are configured we overwrite it below to
+        // point at the innermost layer's `client_inst`.
         let provider_data = stage_data_dir(project_dir, &self.provider.component_id)?;
         let provider = WasmAgent::new(
             &self.engine,
             &self.provider.component,
             StageKind::Provider,
-            self.outbound.clone(),
+            self.outbound_sink(),
             provider_data.as_deref(),
             None,
         )
         .await?;
 
-        // Walk layers innermost-first (last → first). Each layer wraps
-        // whatever stage we built so far.
+        // `current` is the previous stage's `agent_inst`. It will become
+        // the next layer's downstream once we wrap it.
+        //
+        // `prev_client_inst` is the previous *layer's* `client_inst`.
+        // When we build the next layer, that layer's `client_inst`
+        // becomes the upstream sink for both the previous agent_inst
+        // *and* the previous client_inst. (For the first iteration
+        // there's no previous layer, so this is `None`.)
         let mut current = provider;
+        let mut prev_client_inst: Option<UpstreamHandle> = None;
         for stage in self.layers.iter().rev() {
-            let downstream: DownstreamHandle =
-                std::sync::Arc::new(tokio::sync::Mutex::new(current));
             let data = stage_data_dir(project_dir, &stage.component_id)?;
-            current = WasmAgent::new(
+
+            // Build this layer's client-direction instance first so its
+            // handle is ready to install as the previous stage's
+            // upstream sink.
+            let client_inst = WasmAgent::new(
                 &self.engine,
                 &stage.component,
                 StageKind::Layer,
-                self.outbound.clone(),
+                self.outbound_sink(),
+                data.as_deref(),
+                None,
+            )
+            .await?;
+            let client_handle: UpstreamHandle =
+                std::sync::Arc::new(tokio::sync::Mutex::new(client_inst));
+
+            // Re-point the previous stage's `client_sink` upward into
+            // this new layer's client_inst. Both the previous stage's
+            // agent_inst (`current`) and its client_inst (if any) need
+            // updating: each can independently emit client calls.
+            current.set_client_sink(ClientSink::Upstream(client_handle.clone()));
+            if let Some(prev_ci) = prev_client_inst.as_ref() {
+                prev_ci
+                    .lock()
+                    .await
+                    .set_client_sink(ClientSink::Upstream(client_handle.clone()));
+            }
+
+            // Wrap the previous stage's agent_inst as this layer's
+            // downstream, then build this layer's agent_inst.
+            let downstream: DownstreamHandle =
+                std::sync::Arc::new(tokio::sync::Mutex::new(current));
+            let agent_inst = WasmAgent::new(
+                &self.engine,
+                &stage.component,
+                StageKind::Layer,
+                // Placeholder; overwritten on the next iteration if
+                // another layer wraps us. Stays `Outbound` for the
+                // topmost layer.
+                self.outbound_sink(),
                 data.as_deref(),
                 Some(downstream),
             )
             .await?;
+
+            current = agent_inst;
+            prev_client_inst = Some(client_handle);
         }
+
+        // `current` is the topmost agent_inst (its `client_sink` stayed
+        // `Outbound`). The topmost `client_inst` (if any) is held alive
+        // through the chain's HostState references.
+        let _ = prev_client_inst;
         Ok(current)
     }
 }
@@ -495,7 +572,7 @@ impl WasmAgent {
         engine: &Engine,
         component: &Component,
         kind: StageKind,
-        outbound: mpsc::Sender<OutboundEvent>,
+        client_sink: ClientSink,
         data_dir: Option<&std::path::Path>,
         downstream: Option<DownstreamHandle>,
     ) -> Result<Self> {
@@ -518,7 +595,7 @@ impl WasmAgent {
             wasi: wasi.build(),
             http: WasiHttpCtx::new(),
             table: ResourceTable::new(),
-            outbound,
+            client_sink,
             downstream,
         };
         let mut store = Store::new(engine, state);
@@ -715,6 +792,178 @@ impl WasmAgent {
             Bindings::Layer(b) => {
                 b.yoshuawuyts_acp_agent()
                     .call_cancel(&mut self.store, session_id)
+                    .await
+            }
+        }
+    }
+
+    /// Replace this stage's [`ClientSink`]. Called by the chain factory
+    /// after wrapping a previously-built stage with a new layer: the
+    /// previous stage's sink shifts from `Outbound` to `Upstream` so its
+    /// outbound client calls flow into the new layer's `client_inst`.
+    pub fn set_client_sink(&mut self, sink: ClientSink) {
+        self.store.data_mut().client_sink = sink;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Layer client-direction calls
+// -----------------------------------------------------------------------------
+//
+// The methods below invoke a layer's *exported* `client` interface. They
+// are only meaningful on `Bindings::Layer` (the provider's world has no
+// such export). The `Provider` arm of each match returns an
+// `internal-error`: hitting it means the chain factory wired a
+// `ClientSink::Upstream` to a provider instance, which is a host bug.
+//
+// All `client` exports are async on the wasmtime side. Bindgen generates
+// `b.yoshuawuyts_acp_client()` as the export accessor, mirroring
+// `yoshuawuyts_acp_agent()` for the agent direction.
+
+use crate::yoshuawuyts::acp::filesystem::{
+    ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest,
+};
+use crate::yoshuawuyts::acp::prompts::SessionUpdate;
+use crate::yoshuawuyts::acp::terminals::{
+    CreateTerminalRequest, CreateTerminalResponse, TerminalExitStatus, TerminalId, TerminalOutput,
+};
+use crate::yoshuawuyts::acp::tools::{RequestPermissionRequest, RequestPermissionResponse};
+
+fn provider_has_no_client_export<T>(method: &'static str) -> wasmtime::Result<Result<T, Error>> {
+    Ok(Err(translate::internal_error(&format!(
+        "host bug: routed `client.{method}` to a provider stage (no `client` export)"
+    ))))
+}
+
+impl WasmAgent {
+    pub async fn call_client_update_session(
+        &mut self,
+        session_id: &SessionId,
+        update: &SessionUpdate,
+    ) -> wasmtime::Result<()> {
+        match &self.bindings {
+            Bindings::Provider(_) => Err(wasmtime::Error::msg(
+                "host bug: routed `client.update-session` to a provider stage",
+            )),
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_client()
+                    .call_update_session(&mut self.store, session_id, update)
+                    .await
+            }
+        }
+    }
+
+    pub async fn call_client_request_permission(
+        &mut self,
+        req: &RequestPermissionRequest,
+    ) -> wasmtime::Result<Result<RequestPermissionResponse, Error>> {
+        match &self.bindings {
+            Bindings::Provider(_) => provider_has_no_client_export("request-permission"),
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_client()
+                    .call_request_permission(&mut self.store, req)
+                    .await
+            }
+        }
+    }
+
+    pub async fn call_client_read_text_file(
+        &mut self,
+        req: &ReadTextFileRequest,
+    ) -> wasmtime::Result<Result<ReadTextFileResponse, Error>> {
+        match &self.bindings {
+            Bindings::Provider(_) => provider_has_no_client_export("read-text-file"),
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_client()
+                    .call_read_text_file(&mut self.store, req)
+                    .await
+            }
+        }
+    }
+
+    pub async fn call_client_write_text_file(
+        &mut self,
+        req: &WriteTextFileRequest,
+    ) -> wasmtime::Result<Result<(), Error>> {
+        match &self.bindings {
+            Bindings::Provider(_) => provider_has_no_client_export("write-text-file"),
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_client()
+                    .call_write_text_file(&mut self.store, req)
+                    .await
+            }
+        }
+    }
+
+    pub async fn call_client_create_terminal(
+        &mut self,
+        req: &CreateTerminalRequest,
+    ) -> wasmtime::Result<Result<CreateTerminalResponse, Error>> {
+        match &self.bindings {
+            Bindings::Provider(_) => provider_has_no_client_export("create-terminal"),
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_client()
+                    .call_create_terminal(&mut self.store, req)
+                    .await
+            }
+        }
+    }
+
+    pub async fn call_client_get_terminal_output(
+        &mut self,
+        session_id: &SessionId,
+        terminal_id: &TerminalId,
+    ) -> wasmtime::Result<Result<TerminalOutput, Error>> {
+        match &self.bindings {
+            Bindings::Provider(_) => provider_has_no_client_export("get-terminal-output"),
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_client()
+                    .call_get_terminal_output(&mut self.store, session_id, terminal_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn call_client_wait_for_terminal_exit(
+        &mut self,
+        session_id: &SessionId,
+        terminal_id: &TerminalId,
+    ) -> wasmtime::Result<Result<TerminalExitStatus, Error>> {
+        match &self.bindings {
+            Bindings::Provider(_) => provider_has_no_client_export("wait-for-terminal-exit"),
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_client()
+                    .call_wait_for_terminal_exit(&mut self.store, session_id, terminal_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn call_client_kill_terminal(
+        &mut self,
+        session_id: &SessionId,
+        terminal_id: &TerminalId,
+    ) -> wasmtime::Result<Result<(), Error>> {
+        match &self.bindings {
+            Bindings::Provider(_) => provider_has_no_client_export("kill-terminal"),
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_client()
+                    .call_kill_terminal(&mut self.store, session_id, terminal_id)
+                    .await
+            }
+        }
+    }
+
+    pub async fn call_client_release_terminal(
+        &mut self,
+        session_id: &SessionId,
+        terminal_id: &TerminalId,
+    ) -> wasmtime::Result<Result<(), Error>> {
+        match &self.bindings {
+            Bindings::Provider(_) => provider_has_no_client_export("release-terminal"),
+            Bindings::Layer(b) => {
+                b.yoshuawuyts_acp_client()
+                    .call_release_terminal(&mut self.store, session_id, terminal_id)
                     .await
             }
         }
