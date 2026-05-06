@@ -11,6 +11,8 @@
 
 #![allow(clippy::too_many_arguments)]
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use acp_wasm_sys::layer::exports::yosh::acp::agent::Guest as AgentGuest;
 use acp_wasm_sys::layer::exports::yosh::acp::client::Guest as ClientGuest;
 use acp_wasm_sys::layer::yosh::acp::content::{ContentBlock, TextContent};
@@ -22,7 +24,7 @@ use acp_wasm_sys::layer::yosh::acp::init::{
     AuthenticateRequest, InitializeRequest, InitializeResponse,
 };
 use acp_wasm_sys::layer::yosh::acp::prompts::{
-    PromptRequest, PromptResponse, SessionUpdate,
+    AvailableCommand, PromptRequest, PromptResponse, SessionUpdate, StopReason,
 };
 use acp_wasm_sys::layer::yosh::acp::sessions::{
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
@@ -32,12 +34,27 @@ use acp_wasm_sys::layer::yosh::acp::sessions::{
 use acp_wasm_sys::layer::yosh::acp::terminals::{
     CreateTerminalRequest, CreateTerminalResponse, TerminalExitStatus, TerminalId, TerminalOutput,
 };
-use acp_wasm_sys::layer::yosh::acp::tools::{
-    RequestPermissionRequest, RequestPermissionResponse,
-};
+use acp_wasm_sys::layer::yosh::acp::tools::{RequestPermissionRequest, RequestPermissionResponse};
 use acp_wasm_sys::layer::yosh::acp::{agent, client};
 
 struct Layer;
+
+/// Whether agent-emitted text should be shouted (uppercased). Toggled
+/// in-process via the `/shout` slash command; not persisted across
+/// component restarts.
+static SHOUT_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Push the layer's `available-commands-update` upstream so the editor
+/// learns about `/shout`. Sent after each session lifecycle method.
+fn advertise_commands(session_id: &SessionId) {
+    let cmds = vec![AvailableCommand {
+        name: "shout".to_string(),
+        description: "Toggle uppercase rewriting of agent output for this session."
+            .to_string(),
+        input: None,
+    }];
+    client::update_session(session_id, &SessionUpdate::AvailableCommandsUpdate(cmds));
+}
 
 /// Uppercase the `text` field of any `ContentBlock::Text`. Other content
 /// variants (image, audio, resource) pass through unchanged — they don't
@@ -63,6 +80,19 @@ fn uppercase_update(update: SessionUpdate) -> SessionUpdate {
     }
 }
 
+/// Returns true when the prompt's text content (concatenated across
+/// any text blocks, ignoring non-text blocks) is exactly `/shout`.
+fn is_shout_command(blocks: &[ContentBlock]) -> bool {
+    let mut text = String::new();
+    for block in blocks {
+        match block {
+            ContentBlock::Text(TextContent { text: t }) => text.push_str(t),
+            _ => return false,
+        }
+    }
+    text.trim() == "/shout"
+}
+
 // -----------------------------------------------------------------------------
 // agent direction: forward downstream verbatim
 // -----------------------------------------------------------------------------
@@ -77,11 +107,16 @@ impl AgentGuest for Layer {
     }
 
     fn new_session(req: NewSessionRequest) -> Result<NewSessionResponse, Error> {
-        agent::new_session(&req)
+        let resp = agent::new_session(&req)?;
+        advertise_commands(&resp.session_id);
+        Ok(resp)
     }
 
     fn load_session(req: LoadSessionRequest) -> Result<LoadSessionResponse, Error> {
-        agent::load_session(&req)
+        let sid = req.session_id.clone();
+        let resp = agent::load_session(&req)?;
+        advertise_commands(&sid);
+        Ok(resp)
     }
 
     fn list_sessions(req: ListSessionsRequest) -> Result<ListSessionsResponse, Error> {
@@ -89,7 +124,10 @@ impl AgentGuest for Layer {
     }
 
     fn resume_session(req: ResumeSessionRequest) -> Result<ResumeSessionResponse, Error> {
-        agent::resume_session(&req)
+        let sid = req.session_id.clone();
+        let resp = agent::resume_session(&req)?;
+        advertise_commands(&sid);
+        Ok(resp)
     }
 
     fn close_session(session_id: SessionId) -> Result<(), Error> {
@@ -101,6 +139,27 @@ impl AgentGuest for Layer {
     }
 
     fn prompt(req: PromptRequest) -> Result<PromptResponse, Error> {
+        // Intercept `/shout` to toggle uppercase rewriting for the
+        // remainder of this session. We only treat it as a command
+        // when it's the sole text content of the prompt; otherwise we
+        // forward downstream untouched.
+        if is_shout_command(&req.prompt) {
+            let now_on = !SHOUT_ENABLED.fetch_xor(true, Ordering::Relaxed);
+            let msg = if now_on {
+                "I AM VERY CALM RIGHT NOW!"
+            } else {
+                "ok, I've calmed down"
+            };
+            client::update_session(
+                &req.session_id,
+                &SessionUpdate::AgentMessageChunk(ContentBlock::Text(TextContent {
+                    text: msg.to_string(),
+                })),
+            );
+            return Ok(PromptResponse {
+                stop_reason: StopReason::EndTurn,
+            });
+        }
         agent::prompt(&req)
     }
 
@@ -115,7 +174,11 @@ impl AgentGuest for Layer {
 
 impl ClientGuest for Layer {
     fn update_session(session_id: SessionId, update: SessionUpdate) {
-        let rewritten = uppercase_update(update);
+        let rewritten = if SHOUT_ENABLED.load(Ordering::Relaxed) {
+            uppercase_update(update)
+        } else {
+            update
+        };
         client::update_session(&session_id, &rewritten);
     }
 

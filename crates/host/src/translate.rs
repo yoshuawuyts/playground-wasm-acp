@@ -390,9 +390,29 @@ pub fn session_update_wit_to_schema(
             debug!(session = %session_id, "dropped session update: session-info-update (not yet wired)");
             None
         }
-        SessionUpdate::AvailableCommandsUpdate(_) => {
-            debug!(session = %session_id, "dropped session update: available-commands-update (not yet wired)");
-            None
+        SessionUpdate::AvailableCommandsUpdate(cmds) => {
+            let cmds_json: Vec<serde_json::Value> = cmds
+                .into_iter()
+                .map(|c| {
+                    let mut v = serde_json::json!({
+                        "name": c.name,
+                        "description": c.description,
+                    });
+                    if let Some(input) = c.input {
+                        v["input"] = serde_json::json!({ "hint": input.hint });
+                    }
+                    v
+                })
+                .collect();
+            let upd: schema::SessionUpdate = serde_json::from_value(serde_json::json!({
+                "sessionUpdate": "available_commands_update",
+                "availableCommands": cmds_json,
+            }))
+            .ok()?;
+            return Some(schema::SessionNotification::new(
+                schema::SessionId::from(session_id),
+                upd,
+            ));
         }
     }?;
     let (kind, b) = block;
