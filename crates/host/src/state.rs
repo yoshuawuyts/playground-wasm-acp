@@ -107,11 +107,11 @@ impl WasiHttpView for HostState {
     }
 }
 
-impl crate::yoshuawuyts::acp::errors::Host for HostState {}
-impl crate::yoshuawuyts::acp::sessions::Host for HostState {}
-impl crate::yoshuawuyts::acp::content::Host for HostState {}
-impl crate::yoshuawuyts::acp::terminals::Host for HostState {}
-impl crate::yoshuawuyts::acp::tools::Host for HostState {}
-impl crate::yoshuawuyts::acp::prompts::Host for HostState {}
-impl crate::yoshuawuyts::acp::filesystem::Host for HostState {}
-impl crate::yoshuawuyts::acp::init::Host for HostState {}
+impl crate::yosh::acp::errors::Host for HostState {}
+impl crate::yosh::acp::sessions::Host for HostState {}
+impl crate::yosh::acp::content::Host for HostState {}
+impl crate::yosh::acp::terminals::Host for HostState {}
+impl crate::yosh::acp::tools::Host for HostState {}
+impl crate::yosh::acp::prompts::Host for HostState {}
+impl crate::yosh::acp::filesystem::Host for HostState {}
+impl crate::yosh::acp::init::Host for HostState {}

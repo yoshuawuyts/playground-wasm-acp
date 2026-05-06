@@ -11,31 +11,31 @@
 
 #![allow(clippy::too_many_arguments)]
 
-use acp_wasm_sys::layer::exports::yoshuawuyts::acp::agent::Guest as AgentGuest;
-use acp_wasm_sys::layer::exports::yoshuawuyts::acp::client::Guest as ClientGuest;
-use acp_wasm_sys::layer::yoshuawuyts::acp::content::{ContentBlock, TextContent};
-use acp_wasm_sys::layer::yoshuawuyts::acp::errors::Error;
-use acp_wasm_sys::layer::yoshuawuyts::acp::filesystem::{
+use acp_wasm_sys::layer::exports::yosh::acp::agent::Guest as AgentGuest;
+use acp_wasm_sys::layer::exports::yosh::acp::client::Guest as ClientGuest;
+use acp_wasm_sys::layer::yosh::acp::content::{ContentBlock, TextContent};
+use acp_wasm_sys::layer::yosh::acp::errors::Error;
+use acp_wasm_sys::layer::yosh::acp::filesystem::{
     ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest,
 };
-use acp_wasm_sys::layer::yoshuawuyts::acp::init::{
+use acp_wasm_sys::layer::yosh::acp::init::{
     AuthenticateRequest, InitializeRequest, InitializeResponse,
 };
-use acp_wasm_sys::layer::yoshuawuyts::acp::prompts::{
+use acp_wasm_sys::layer::yosh::acp::prompts::{
     PromptRequest, PromptResponse, SessionUpdate,
 };
-use acp_wasm_sys::layer::yoshuawuyts::acp::sessions::{
+use acp_wasm_sys::layer::yosh::acp::sessions::{
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
     NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse, SessionId,
     SetSessionModeRequest,
 };
-use acp_wasm_sys::layer::yoshuawuyts::acp::terminals::{
+use acp_wasm_sys::layer::yosh::acp::terminals::{
     CreateTerminalRequest, CreateTerminalResponse, TerminalExitStatus, TerminalId, TerminalOutput,
 };
-use acp_wasm_sys::layer::yoshuawuyts::acp::tools::{
+use acp_wasm_sys::layer::yosh::acp::tools::{
     RequestPermissionRequest, RequestPermissionResponse,
 };
-use acp_wasm_sys::layer::yoshuawuyts::acp::{agent, client};
+use acp_wasm_sys::layer::yosh::acp::{agent, client};
 
 struct Layer;
 

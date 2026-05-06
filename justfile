@@ -56,4 +56,4 @@ bindgen-layer:
         --out-dir crates/acp-wasm-sys/src \
         --format
     rm -rf crates/acp-wasm-sys/wit
-    sed -i '' 's|__export_yoshuawuyts_acp_agent_4_0_0_cabi|__export_yoshuawuyts_acp_agent_4_0_0_cabi_layer|g' crates/acp-wasm-sys/src/layer.rs
+    sed -i '' 's|__export_yosh_acp_agent_5_0_0_cabi|__export_yosh_acp_agent_5_0_0_cabi_layer|g' crates/acp-wasm-sys/src/layer.rs

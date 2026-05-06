@@ -34,7 +34,7 @@ mod wasm;
 // the rest of the host can statically distinguish a terminal stage from
 // an intermediate one. The `with:` clause on the layer makes it reuse
 // the provider's interface types verbatim — every WIT record/variant is
-// defined exactly once under `crate::yoshuawuyts::acp::*`, and a single
+// defined exactly once under `crate::yosh::acp::*`, and a single
 // set of `Host` trait impls on `HostState` satisfies both linkers.
 //
 // Bindgen flips imports/exports from the host's perspective: imported
@@ -61,15 +61,15 @@ mod layer_bindings {
         imports: { default: async },
         exports: { default: async },
         with: {
-            "yoshuawuyts:acp/errors": crate::yoshuawuyts::acp::errors,
-            "yoshuawuyts:acp/content": crate::yoshuawuyts::acp::content,
-            "yoshuawuyts:acp/init": crate::yoshuawuyts::acp::init,
-            "yoshuawuyts:acp/sessions": crate::yoshuawuyts::acp::sessions,
-            "yoshuawuyts:acp/prompts": crate::yoshuawuyts::acp::prompts,
-            "yoshuawuyts:acp/tools": crate::yoshuawuyts::acp::tools,
-            "yoshuawuyts:acp/terminals": crate::yoshuawuyts::acp::terminals,
-            "yoshuawuyts:acp/filesystem": crate::yoshuawuyts::acp::filesystem,
-            "yoshuawuyts:acp/client": crate::yoshuawuyts::acp::client,
+            "yosh:acp/errors": crate::yosh::acp::errors,
+            "yosh:acp/content": crate::yosh::acp::content,
+            "yosh:acp/init": crate::yosh::acp::init,
+            "yosh:acp/sessions": crate::yosh::acp::sessions,
+            "yosh:acp/prompts": crate::yosh::acp::prompts,
+            "yosh:acp/tools": crate::yosh::acp::tools,
+            "yosh:acp/terminals": crate::yosh::acp::terminals,
+            "yosh:acp/filesystem": crate::yosh::acp::filesystem,
+            "yosh:acp/client": crate::yosh::acp::client,
         },
     });
 }
@@ -77,7 +77,7 @@ mod layer_bindings {
 pub use layer_bindings::Layer;
 /// `Host` trait for the layer's *imported* `agent` interface — implemented
 /// on `HostState` in [`crate::wasm`] to forward downstream.
-pub use layer_bindings::yoshuawuyts::acp::agent as layer_agent;
+pub use layer_bindings::yosh::acp::agent as layer_agent;
 
 use crate::wasm::{SessionFactory, SessionRegistry, Stage, StageKind};
 
@@ -227,21 +227,21 @@ fn load_stage(engine: &Engine, path: &std::path::Path, kind: StageKind) -> Resul
 }
 
 /// Reject components whose `agent` import status doesn't match the world
-/// they were passed as. Imports are versioned (`yoshuawuyts:acp/agent@…`),
+/// they were passed as. Imports are versioned (`yosh:acp/agent@…`),
 /// so we match on the unversioned prefix to stay forward-compatible with
 /// minor WIT bumps.
 fn validate_imports(engine: &Engine, component: &Component, kind: StageKind) -> Result<()> {
     let ty = component.component_type();
     let imports_agent = ty
         .imports(engine)
-        .any(|(name, _)| name.starts_with("yoshuawuyts:acp/agent"));
+        .any(|(name, _)| name.starts_with("yosh:acp/agent"));
     match (kind, imports_agent) {
         (StageKind::Provider, true) => anyhow::bail!(
-            "component imports `yoshuawuyts:acp/agent` (it is a layer); \
+            "component imports `yosh:acp/agent` (it is a layer); \
              pass it via `--layer` rather than `--provider`",
         ),
         (StageKind::Layer, false) => anyhow::bail!(
-            "component does not import `yoshuawuyts:acp/agent` (it is a provider); \
+            "component does not import `yosh:acp/agent` (it is a provider); \
              pass it via `--provider` rather than `--layer`",
         ),
         _ => Ok(()),

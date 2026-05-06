@@ -17,17 +17,17 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::state::{ClientSink, HostState, OutboundEvent};
 use crate::translate;
-use crate::yoshuawuyts::acp::client;
-use crate::yoshuawuyts::acp::errors::Error;
-use crate::yoshuawuyts::acp::filesystem::{
+use crate::yosh::acp::client;
+use crate::yosh::acp::errors::Error;
+use crate::yosh::acp::filesystem::{
     ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest,
 };
-use crate::yoshuawuyts::acp::prompts::SessionUpdate;
-use crate::yoshuawuyts::acp::sessions::SessionId;
-use crate::yoshuawuyts::acp::terminals::{
+use crate::yosh::acp::prompts::SessionUpdate;
+use crate::yosh::acp::sessions::SessionId;
+use crate::yosh::acp::terminals::{
     CreateTerminalRequest, CreateTerminalResponse, TerminalExitStatus, TerminalId, TerminalOutput,
 };
-use crate::yoshuawuyts::acp::tools::{RequestPermissionRequest, RequestPermissionResponse};
+use crate::yosh::acp::tools::{RequestPermissionRequest, RequestPermissionResponse};
 
 /// Hard ceiling on how long we wait for the editor to reply to an outbound
 /// request. The ACP protocol has no built-in timeout; without this, a buggy

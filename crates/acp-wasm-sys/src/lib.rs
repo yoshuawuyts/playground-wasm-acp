@@ -1,4 +1,4 @@
-//! Auto-generated WIT bindings for the `yoshuawuyts:acp` worlds.
+//! Auto-generated WIT bindings for the `yosh:acp` worlds.
 //!
 //! Two worlds, two submodules:
 //!

@@ -8,7 +8,7 @@
 //! The `LocalSet` is our reachable, structured task pool: every actor's
 //! `run` future has a logical parent (the LocalSet, awaited from `main`),
 //! so actors can be supervised and shut down explicitly. See
-//! <https://blog.yoshuawuyts.com/replacing-tasks-with-actors> for context.
+//! <https://blog.yosh.com/replacing-tasks-with-actors> for context.
 //!
 //! Stateless calls (`initialize`, `authenticate`) bypass the actor system:
 //! the bridge spins up a throwaway instance via [`SessionFactory`], uses it
@@ -28,10 +28,10 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 use wasmtime_wasi_http::WasiHttpCtx;
 
 use crate::state::{ClientSink, DownstreamHandle, HostState, OutboundEvent, UpstreamHandle};
-use crate::yoshuawuyts::acp::errors::Error;
-use crate::yoshuawuyts::acp::init::{AuthenticateRequest, InitializeRequest, InitializeResponse};
-use crate::yoshuawuyts::acp::prompts::{PromptRequest, PromptResponse};
-use crate::yoshuawuyts::acp::sessions::{
+use crate::yosh::acp::errors::Error;
+use crate::yosh::acp::init::{AuthenticateRequest, InitializeRequest, InitializeResponse};
+use crate::yosh::acp::prompts::{PromptRequest, PromptResponse};
+use crate::yosh::acp::sessions::{
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
     NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse, SessionId,
     SetSessionModeRequest,
@@ -626,12 +626,12 @@ impl WasmAgent {
     ) -> wasmtime::Result<Result<InitializeResponse, Error>> {
         match &self.bindings {
             Bindings::Provider(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_initialize(&mut self.store, req)
                     .await
             }
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_initialize(&mut self.store, req)
                     .await
             }
@@ -644,12 +644,12 @@ impl WasmAgent {
     ) -> wasmtime::Result<Result<(), Error>> {
         match &self.bindings {
             Bindings::Provider(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_authenticate(&mut self.store, req)
                     .await
             }
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_authenticate(&mut self.store, req)
                     .await
             }
@@ -662,12 +662,12 @@ impl WasmAgent {
     ) -> wasmtime::Result<Result<NewSessionResponse, Error>> {
         match &self.bindings {
             Bindings::Provider(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_new_session(&mut self.store, req)
                     .await
             }
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_new_session(&mut self.store, req)
                     .await
             }
@@ -680,12 +680,12 @@ impl WasmAgent {
     ) -> wasmtime::Result<Result<LoadSessionResponse, Error>> {
         match &self.bindings {
             Bindings::Provider(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_load_session(&mut self.store, req)
                     .await
             }
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_load_session(&mut self.store, req)
                     .await
             }
@@ -698,12 +698,12 @@ impl WasmAgent {
     ) -> wasmtime::Result<Result<(), Error>> {
         match &self.bindings {
             Bindings::Provider(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_set_session_mode(&mut self.store, req)
                     .await
             }
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_set_session_mode(&mut self.store, req)
                     .await
             }
@@ -716,12 +716,12 @@ impl WasmAgent {
     ) -> wasmtime::Result<Result<PromptResponse, Error>> {
         match &self.bindings {
             Bindings::Provider(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_prompt(&mut self.store, req)
                     .await
             }
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_prompt(&mut self.store, req)
                     .await
             }
@@ -734,12 +734,12 @@ impl WasmAgent {
     ) -> wasmtime::Result<Result<ListSessionsResponse, Error>> {
         match &self.bindings {
             Bindings::Provider(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_list_sessions(&mut self.store, req)
                     .await
             }
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_list_sessions(&mut self.store, req)
                     .await
             }
@@ -752,12 +752,12 @@ impl WasmAgent {
     ) -> wasmtime::Result<Result<ResumeSessionResponse, Error>> {
         match &self.bindings {
             Bindings::Provider(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_resume_session(&mut self.store, req)
                     .await
             }
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_resume_session(&mut self.store, req)
                     .await
             }
@@ -770,12 +770,12 @@ impl WasmAgent {
     ) -> wasmtime::Result<Result<(), Error>> {
         match &self.bindings {
             Bindings::Provider(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_close_session(&mut self.store, session_id)
                     .await
             }
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_close_session(&mut self.store, session_id)
                     .await
             }
@@ -785,12 +785,12 @@ impl WasmAgent {
     pub async fn call_cancel(&mut self, session_id: &SessionId) -> wasmtime::Result<()> {
         match &self.bindings {
             Bindings::Provider(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_cancel(&mut self.store, session_id)
                     .await
             }
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_agent()
+                b.yosh_acp_agent()
                     .call_cancel(&mut self.store, session_id)
                     .await
             }
@@ -817,17 +817,17 @@ impl WasmAgent {
 // `ClientSink::Upstream` to a provider instance, which is a host bug.
 //
 // All `client` exports are async on the wasmtime side. Bindgen generates
-// `b.yoshuawuyts_acp_client()` as the export accessor, mirroring
-// `yoshuawuyts_acp_agent()` for the agent direction.
+// `b.yosh_acp_client()` as the export accessor, mirroring
+// `yosh_acp_agent()` for the agent direction.
 
-use crate::yoshuawuyts::acp::filesystem::{
+use crate::yosh::acp::filesystem::{
     ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest,
 };
-use crate::yoshuawuyts::acp::prompts::SessionUpdate;
-use crate::yoshuawuyts::acp::terminals::{
+use crate::yosh::acp::prompts::SessionUpdate;
+use crate::yosh::acp::terminals::{
     CreateTerminalRequest, CreateTerminalResponse, TerminalExitStatus, TerminalId, TerminalOutput,
 };
-use crate::yoshuawuyts::acp::tools::{RequestPermissionRequest, RequestPermissionResponse};
+use crate::yosh::acp::tools::{RequestPermissionRequest, RequestPermissionResponse};
 
 fn provider_has_no_client_export<T>(method: &'static str) -> wasmtime::Result<Result<T, Error>> {
     Ok(Err(translate::internal_error(&format!(
@@ -846,7 +846,7 @@ impl WasmAgent {
                 "host bug: routed `client.update-session` to a provider stage",
             )),
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_client()
+                b.yosh_acp_client()
                     .call_update_session(&mut self.store, session_id, update)
                     .await
             }
@@ -860,7 +860,7 @@ impl WasmAgent {
         match &self.bindings {
             Bindings::Provider(_) => provider_has_no_client_export("request-permission"),
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_client()
+                b.yosh_acp_client()
                     .call_request_permission(&mut self.store, req)
                     .await
             }
@@ -874,7 +874,7 @@ impl WasmAgent {
         match &self.bindings {
             Bindings::Provider(_) => provider_has_no_client_export("read-text-file"),
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_client()
+                b.yosh_acp_client()
                     .call_read_text_file(&mut self.store, req)
                     .await
             }
@@ -888,7 +888,7 @@ impl WasmAgent {
         match &self.bindings {
             Bindings::Provider(_) => provider_has_no_client_export("write-text-file"),
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_client()
+                b.yosh_acp_client()
                     .call_write_text_file(&mut self.store, req)
                     .await
             }
@@ -902,7 +902,7 @@ impl WasmAgent {
         match &self.bindings {
             Bindings::Provider(_) => provider_has_no_client_export("create-terminal"),
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_client()
+                b.yosh_acp_client()
                     .call_create_terminal(&mut self.store, req)
                     .await
             }
@@ -917,7 +917,7 @@ impl WasmAgent {
         match &self.bindings {
             Bindings::Provider(_) => provider_has_no_client_export("get-terminal-output"),
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_client()
+                b.yosh_acp_client()
                     .call_get_terminal_output(&mut self.store, session_id, terminal_id)
                     .await
             }
@@ -932,7 +932,7 @@ impl WasmAgent {
         match &self.bindings {
             Bindings::Provider(_) => provider_has_no_client_export("wait-for-terminal-exit"),
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_client()
+                b.yosh_acp_client()
                     .call_wait_for_terminal_exit(&mut self.store, session_id, terminal_id)
                     .await
             }
@@ -947,7 +947,7 @@ impl WasmAgent {
         match &self.bindings {
             Bindings::Provider(_) => provider_has_no_client_export("kill-terminal"),
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_client()
+                b.yosh_acp_client()
                     .call_kill_terminal(&mut self.store, session_id, terminal_id)
                     .await
             }
@@ -962,7 +962,7 @@ impl WasmAgent {
         match &self.bindings {
             Bindings::Provider(_) => provider_has_no_client_export("release-terminal"),
             Bindings::Layer(b) => {
-                b.yoshuawuyts_acp_client()
+                b.yosh_acp_client()
                     .call_release_terminal(&mut self.store, session_id, terminal_id)
                     .await
             }

@@ -1,5 +1,5 @@
 //! Type translation between the wasmtime-generated WIT types
-//! (`yoshuawuyts::acp` interfaces) and the `agent_client_protocol::schema` types.
+//! (`yosh::acp` interfaces) and the `agent_client_protocol::schema` types.
 //!
 //! Only covers the variants the MVP exercises (text content, end-turn,
 //! agent-message-chunk, etc.). Anything we can't translate yields an error
@@ -11,22 +11,22 @@ use agent_client_protocol::schema;
 use agent_client_protocol::{Error as AcpError, ErrorCode as AcpErrorCode};
 use tracing::debug;
 
-use crate::yoshuawuyts::acp::content::{ContentBlock, TextContent};
-use crate::yoshuawuyts::acp::errors::{Error, ErrorCode};
-use crate::yoshuawuyts::acp::filesystem::{
+use crate::yosh::acp::content::{ContentBlock, TextContent};
+use crate::yosh::acp::errors::{Error, ErrorCode};
+use crate::yosh::acp::filesystem::{
     ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest,
 };
-use crate::yoshuawuyts::acp::init::{
+use crate::yosh::acp::init::{
     AuthenticateRequest, ClientCapabilities, FsCapabilities, ImplementationInfo, InitializeRequest,
     InitializeResponse,
 };
-use crate::yoshuawuyts::acp::prompts::{PromptRequest, PromptResponse, SessionUpdate, StopReason};
-use crate::yoshuawuyts::acp::sessions::{
+use crate::yosh::acp::prompts::{PromptRequest, PromptResponse, SessionUpdate, StopReason};
+use crate::yosh::acp::sessions::{
     EnvVar, HttpHeader, LoadSessionRequest, LoadSessionResponse, McpServer, McpServerHttp,
     McpServerSse, McpServerStdio, NewSessionRequest, NewSessionResponse, SessionId, SessionMode,
     SessionModeId, SessionModeState, SetSessionModeRequest,
 };
-use crate::yoshuawuyts::acp::tools::{
+use crate::yosh::acp::tools::{
     ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 
@@ -689,8 +689,8 @@ fn tool_call_update_to_schema_update(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::yoshuawuyts::acp::content::ImageContent;
-    use crate::yoshuawuyts::acp::init::{
+    use crate::yosh::acp::content::ImageContent;
+    use crate::yosh::acp::init::{
         AgentCapabilities, McpCapabilities, PromptCapabilities, SessionCapabilities,
     };
 
