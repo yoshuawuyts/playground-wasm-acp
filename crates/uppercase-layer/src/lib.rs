@@ -80,14 +80,14 @@ fn uppercase_update(update: SessionUpdate) -> SessionUpdate {
     }
 }
 
-/// Returns true when the prompt's text content (concatenated across
-/// any text blocks, ignoring non-text blocks) is exactly `/shout`.
+/// Returns true when the prompt's concatenated text content (across
+/// any text blocks, ignoring non-text blocks like resource links) is
+/// exactly `/shout`.
 fn is_shout_command(blocks: &[ContentBlock]) -> bool {
     let mut text = String::new();
     for block in blocks {
-        match block {
-            ContentBlock::Text(TextContent { text: t }) => text.push_str(t),
-            _ => return false,
+        if let ContentBlock::Text(TextContent { text: t }) = block {
+            text.push_str(t);
         }
     }
     text.trim() == "/shout"

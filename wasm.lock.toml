@@ -5,6 +5,6 @@ lockfile_version = 3
 
 [[interfaces]]
 name = "yoshuawuyts:acp"
-version = "4.0.0"
+version = "5.0.0"
 registry = "ghcr.io/yoshuawuyts/components/acp"
-digest = "sha256:15907708b4038d62cd84c1a386a154ba3b109fbc74ebc78620fc149554143a23"
+digest = "sha256:1133001fc3fd34cef3543cc383fa29929690497e44682f38113c692914b9e76f"
