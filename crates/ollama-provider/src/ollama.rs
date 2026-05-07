@@ -211,15 +211,14 @@ pub struct ChatTurn {
 /// `&[]` for plain chat. Models that don't support tools simply ignore
 /// the field — but you can probe with [`supports_tools`] to skip sending
 /// the array entirely.
-pub async fn chat<F, Fut>(
+pub async fn chat<F>(
     model: &str,
     history: &[Message],
     tools: &[OllamaTool],
     mut on_chunk: F,
 ) -> Result<ChatTurn, String>
 where
-    F: FnMut(String) -> Fut,
-    Fut: core::future::Future<Output = ()>,
+    F: FnMut(&str),
 {
     let url = endpoint();
     let body = Body::from_json(&ChatRequestOwned {
@@ -270,7 +269,7 @@ where
                 serde_json::from_slice(line).map_err(|e| format!("decode chunk: {e}"))?;
             if let Some(msg) = chunk.message {
                 if !msg.content.is_empty() {
-                    on_chunk(msg.content.clone()).await;
+                    on_chunk(&msg.content);
                     content.push_str(&msg.content);
                 }
                 if !msg.tool_calls.is_empty() {
@@ -287,7 +286,7 @@ where
         if let Ok(chunk) = serde_json::from_slice::<StreamChunk>(&buf) {
             if let Some(msg) = chunk.message {
                 if !msg.content.is_empty() {
-                    on_chunk(msg.content.clone()).await;
+                    on_chunk(&msg.content);
                     content.push_str(&msg.content);
                 }
                 if !msg.tool_calls.is_empty() {

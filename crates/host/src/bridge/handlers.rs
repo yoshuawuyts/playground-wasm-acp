@@ -26,7 +26,7 @@ pub(super) async fn handle_initialize(
     responder: Responder<schema::InitializeResponse>,
 ) -> Result<(), AcpError> {
     // Throwaway instance: `initialize` carries no session state.
-    let mut agent = factory
+    let agent = factory
         .instantiate()
         .await
         .map_err(|e| translate::anyhow_to_acp("initialize: instantiate", e))?;
@@ -38,6 +38,8 @@ pub(super) async fn handle_initialize(
     );
     let wit_req = translate::init_request_schema_to_wit(req);
     let result = agent
+        .lock()
+        .await
         .call_initialize(wit_req)
         .await
         .map_err(|e| translate::trap_to_acp("initialize", e))?;
@@ -52,12 +54,14 @@ pub(super) async fn handle_authenticate(
 ) -> Result<(), AcpError> {
     // Throwaway instance: `authenticate` is stateless; the host doesn't
     // carry credentials between calls.
-    let mut agent = factory
+    let agent = factory
         .instantiate()
         .await
         .map_err(|e| translate::anyhow_to_acp("authenticate: instantiate", e))?;
     let wit_req = translate::authenticate_request_schema_to_wit(req);
     let result = agent
+        .lock()
+        .await
         .call_authenticate(wit_req)
         .await
         .map_err(|e| translate::trap_to_acp("authenticate", e))?;
@@ -79,12 +83,14 @@ pub(super) async fn handle_new_session(
     // Outbound `update-session` events emitted *during* `new-session` carry
     // the guest-minted id and route through the shared outbound channel,
     // so they reach the editor even before the registry has the entry.
-    let mut agent = factory
+    let agent = factory
         .instantiate_for_project(&req.cwd)
         .await
         .map_err(|e| translate::anyhow_to_acp("new-session: instantiate", e))?;
     let wit_req = translate::new_session_request_schema_to_wit(req);
     let result = agent
+        .lock()
+        .await
         .call_new_session(wit_req)
         .await
         .map_err(|e| translate::trap_to_acp("new-session", e))?;
@@ -108,12 +114,14 @@ pub(super) async fn handle_load_session(
 ) -> Result<(), AcpError> {
     let session_key = req.session_id.0.to_string();
     debug!(session = %session_key, "session/load");
-    let mut agent = factory
+    let agent = factory
         .instantiate_for_project(&req.cwd)
         .await
         .map_err(|e| translate::anyhow_to_acp("load-session: instantiate", e))?;
     let wit_req = translate::load_session_request_schema_to_wit(req);
     let result = agent
+        .lock()
+        .await
         .call_load_session(wit_req)
         .await
         .map_err(|e| translate::trap_to_acp("load-session", e))?;

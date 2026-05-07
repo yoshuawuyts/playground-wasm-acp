@@ -99,7 +99,7 @@ impl SessionFactory {
 
     /// Build a wasm instance chain with no `/data` preopen for any stage.
     /// Used for stateless calls like `initialize` and `authenticate`.
-    pub async fn instantiate(&self) -> Result<WasmAgent> {
+    pub async fn instantiate(&self) -> Result<Arc<tokio::sync::Mutex<WasmAgent>>> {
         self.instantiate_chain(None).await
     }
 
@@ -120,7 +120,10 @@ impl SessionFactory {
     /// gets its own component-scoped subdir
     /// (`<data_root>/<project_id>/<component_id>/`) and an updated
     /// `meta.json` sidecar.
-    pub async fn instantiate_for_project(&self, cwd: &std::path::Path) -> Result<WasmAgent> {
+    pub async fn instantiate_for_project(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<Arc<tokio::sync::Mutex<WasmAgent>>> {
         let project_id = project_id_from_cwd(cwd);
         let project_dir = self.data_root.join(&project_id);
         update_project_meta(&project_dir, cwd);
@@ -152,7 +155,10 @@ impl SessionFactory {
     ///
     /// The provider stays as a single instance — its world has no
     /// `client` export so there's no client-direction code to run.
-    async fn instantiate_chain(&self, project_dir: Option<&std::path::Path>) -> Result<WasmAgent> {
+    async fn instantiate_chain(
+        &self,
+        project_dir: Option<&std::path::Path>,
+    ) -> Result<Arc<tokio::sync::Mutex<WasmAgent>>> {
         // Innermost: terminal provider, no downstream. Its `client_sink`
         // starts as `Outbound` (used directly when there are zero
         // layers); if any layers are configured we overwrite it below to
@@ -170,13 +176,17 @@ impl SessionFactory {
 
         // With wasmtime concurrent imports, a single store per layer can
         // service both its exported `agent` (downstream-facing) and its
-        // exported `client` (upstream-facing) without re-entrancy. So
-        // each layer is a single `WasmAgent` shared by both directions.
-        let mut current = provider;
+        // exported `client` (upstream-facing) without re-entrancy. Each
+        // stage is held as `Arc<Mutex<WasmAgent>>` throughout: the chain
+        // head's strong ref keeps the entire chain alive, and downstream
+        // stages reach back upward via `Weak` references. If we collapsed
+        // intermediate stages back to owned `WasmAgent`s, those `Weak`s
+        // would immediately go dead.
+        let mut current: Arc<tokio::sync::Mutex<WasmAgent>> =
+            Arc::new(tokio::sync::Mutex::new(provider));
         for stage in self.layers.iter().rev() {
             let data = stage_data_dir(project_dir, &stage.component_id)?;
-            let downstream: DownstreamHandle =
-                std::sync::Arc::new(tokio::sync::Mutex::new(current));
+            let downstream: DownstreamHandle = current.clone();
             let layer_inst = WasmAgent::new(
                 &self.engine,
                 &stage.component,
@@ -190,28 +200,20 @@ impl SessionFactory {
             )
             .await?;
 
+            let layer_strong: Arc<tokio::sync::Mutex<WasmAgent>> =
+                Arc::new(tokio::sync::Mutex::new(layer_inst));
             // Point the wrapped (downstream) stage's `client_sink`
             // upward into this new layer so its outbound client calls
             // route into the layer's exported `client` interface. We
-            // hand the downstream a *weak* reference to the upstream
-            // layer to avoid a strong cycle (the chain head holds each
-            // stage strongly via `downstream`).
-            let layer_strong: std::sync::Arc<tokio::sync::Mutex<WasmAgent>> =
-                std::sync::Arc::new(tokio::sync::Mutex::new(layer_inst));
+            // hand the downstream a *weak* reference to avoid a strong
+            // cycle: each stage's downstream pointer is the strong
+            // reference, the upstream sink is the back edge.
             downstream
                 .lock()
                 .await
-                .set_client_sink(ClientSink::Upstream(std::sync::Arc::downgrade(
-                    &layer_strong,
-                )));
+                .set_client_sink(ClientSink::Upstream(Arc::downgrade(&layer_strong)));
 
-            // Unwrap the layer back into a single owned `WasmAgent` so
-            // the next iteration can take it as its downstream. The
-            // upstream reference held by the wrapped stage is a `Weak`,
-            // so this is the only strong reference to `layer_strong`.
-            current = std::sync::Arc::try_unwrap(layer_strong)
-                .map_err(|_| anyhow::anyhow!("layer handle had unexpected extra clones"))?
-                .into_inner();
+            current = layer_strong;
         }
 
         Ok(current)
@@ -431,7 +433,15 @@ impl SessionHandle {
 pub struct SessionActor {
     rx: mpsc::Receiver<Message>,
     cancel: watch::Receiver<bool>,
-    agent: WasmAgent,
+    /// Head of the chain, held as `Arc<Mutex<_>>` for two reasons:
+    /// (1) every stage in the chain is held that way, so the head must
+    /// be too (otherwise the chain would have to mix `Arc` and owned
+    /// representations);
+    /// (2) more importantly, downstream stages reach back upward via
+    /// `ClientSink::Upstream(Weak<...>)`. The Weak only stays valid
+    /// while *some* strong reference exists — this field is that
+    /// strong reference for the head stage.
+    agent: Arc<tokio::sync::Mutex<WasmAgent>>,
     /// Phone book for talking to other sessions. Currently unused inside
     /// the actor body — kept here so future inter-session features can
     /// reach the registry without a refactor.
@@ -444,7 +454,7 @@ impl SessionActor {
     /// the caller must drive [`Self::run`] (typically via `spawn_local`
     /// onto the top-level `LocalSet`).
     pub fn new(
-        agent: WasmAgent,
+        agent: Arc<tokio::sync::Mutex<WasmAgent>>,
         capacity: usize,
         peers: Arc<SessionRegistry>,
     ) -> (Self, SessionHandle) {
@@ -482,7 +492,8 @@ impl SessionActor {
                     // arm wins, so each arm yields a fully-formed
                     // `PromptOutcome`.
                     let prompt_arm = async {
-                        match self.agent.call_prompt(req).await {
+                        let mut guard = self.agent.lock().await;
+                        match guard.call_prompt(req).await {
                             Err(e) => PromptOutcome::Trap(e),
                             Ok(Err(e)) => PromptOutcome::Wit(e),
                             Ok(Ok(resp)) => PromptOutcome::Done(resp),
@@ -498,7 +509,8 @@ impl SessionActor {
                     }
                 }
                 Message::SetMode { req, reply } => {
-                    let outcome = match self.agent.call_set_session_mode(req).await {
+                    let mut guard = self.agent.lock().await;
+                    let outcome = match guard.call_set_session_mode(req).await {
                         Err(e) => SetModeOutcome::Trap(e),
                         Ok(Err(e)) => SetModeOutcome::Wit(e),
                         Ok(Ok(())) => SetModeOutcome::Done,
