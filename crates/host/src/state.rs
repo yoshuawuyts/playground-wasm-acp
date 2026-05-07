@@ -42,38 +42,24 @@ pub struct HostState {
     /// Next stage in the layer chain, if any. Populated for layer
     /// instances; `None` for the terminal provider. The `agent::Host`
     /// impl on `HostState` forwards each imported-`agent` call to this
-    /// stage's exported `agent`. `Rc<RefCell<_>>` is fine: the actor task
-    /// runs on a `LocalSet` (single-threaded), and downstream calls
-    /// borrow a *different* `WasmAgent` than the one currently executing.
+    /// stage's exported `agent`. `Arc<tokio::sync::Mutex<_>>` because
+    /// wasmtime's bindgen-generated async traits require `Send` futures.
     pub downstream: Option<DownstreamHandle>,
 }
 
 /// Where the `client::Host` impl forwards outbound client calls.
-///
-/// Two variants because each layer stage actually owns *two* wasm
-/// instances (see [`crate::wasm`] docs): one for the agent direction and
-/// one for the client direction. Wasmtime stores are non-reentrant, so
-/// we cannot invoke a layer's exported `client` interface while its
-/// exported `agent` is still executing on the same store. Splitting them
-/// across two stores side-steps the reentrancy entirely.
 #[derive(Clone)]
 pub enum ClientSink {
     /// Top of the chain: client calls go straight to the bridge task as
     /// `OutboundEvent`s. Bounded send for backpressure.
     Outbound(mpsc::Sender<OutboundEvent>),
-    /// Forward into the upstream layer's `client_inst` (its dedicated
-    /// client-direction wasm instance). The handle points at a
-    /// *different* store from whichever one the calling stage is
-    /// running on, so this call doesn't reenter.
+    /// Forward into the upstream layer's exported `client` interface.
+    /// Held as a `Weak` to avoid a strong-ref cycle with the downstream
+    /// pointer (the chain owns each stage strongly via `downstream`; the
+    /// upstream sink is a back edge).
     Upstream(UpstreamHandle),
 }
 
-/// Shared handle to an upstream layer's client-direction wasm instance.
-///
-/// `Arc<tokio::sync::Mutex<_>>` mirrors [`DownstreamHandle`]: bindgen's
-/// async traits require `Send` futures even though the actor and all
-/// stages live on a single-threaded `LocalSet`, and the lock is
-/// uncontended in practice.
 /// Shared handle to an upstream layer's wasm instance. `Weak` to avoid a
 /// strong-cycle with the downstream pointer (the chain owns each stage
 /// strongly via `downstream`; the upstream pointer is logically a back

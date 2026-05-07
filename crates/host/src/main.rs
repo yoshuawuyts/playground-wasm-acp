@@ -150,6 +150,11 @@ fn main() -> Result<()> {
     let mut config = Config::new();
     config.wasm_component_model(true);
     config.wasm_component_model_async(true);
+    config.wasm_component_model_async_builtins(true);
+    config.wasm_component_model_async_stackful(true);
+    config.wasm_features(wasmtime::WasmFeatures::CM_ASYNC, true);
+    config.wasm_features(wasmtime::WasmFeatures::CM_ASYNC_BUILTINS, true);
+    config.wasm_features(wasmtime::WasmFeatures::CM_ASYNC_STACKFUL, true);
     let engine = Engine::new(&config)?;
 
     // Resolve provider path: `--provider` takes precedence, fall back to
@@ -231,18 +236,23 @@ fn load_stage(engine: &Engine, path: &std::path::Path, kind: StageKind) -> Resul
 /// they were passed as. Imports are versioned (`yosh:acp/agent@…`),
 /// so we match on the unversioned prefix to stay forward-compatible with
 /// minor WIT bumps.
+/// Distinguish a `provider` from a `layer` by what they *export*: only
+/// layers export `client`. Both export `agent`. Imports are unreliable
+/// for this — the component-model async ABI synthesises `[export]…`
+/// import names and may also surface the world's exported interface
+/// types as imports, which would confuse a naive check.
 fn validate_imports(engine: &Engine, component: &Component, kind: StageKind) -> Result<()> {
     let ty = component.component_type();
-    let imports_agent = ty
-        .imports(engine)
-        .any(|(name, _)| name.starts_with("yosh:acp/agent"));
-    match (kind, imports_agent) {
+    let exports_client = ty
+        .exports(engine)
+        .any(|(name, _)| name.starts_with("yosh:acp/client"));
+    match (kind, exports_client) {
         (StageKind::Provider, true) => anyhow::bail!(
-            "component imports `yosh:acp/agent` (it is a layer); \
+            "component exports `yosh:acp/client` (it is a layer); \
              pass it via `--layer` rather than `--provider`",
         ),
         (StageKind::Layer, false) => anyhow::bail!(
-            "component does not import `yosh:acp/agent` (it is a provider); \
+            "component does not export `yosh:acp/client` (it is a provider); \
              pass it via `--provider` rather than `--layer`",
         ),
         _ => Ok(()),

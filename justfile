@@ -33,7 +33,7 @@ bindgen-provider:
     cp -r vendor/wit crates/acp-wasm-sys/wit
     wit-bindgen rust crates/acp-wasm-sys/wit \
         --world provider \
-        --runtime-path wit_bindgen_rt \
+        --runtime-path wit_bindgen::rt \
         --pub-export-macro \
         --out-dir crates/acp-wasm-sys/src \
         --format
@@ -51,7 +51,7 @@ bindgen-layer:
     cp -r vendor/wit crates/acp-wasm-sys/wit
     wit-bindgen rust crates/acp-wasm-sys/wit \
         --world layer \
-        --runtime-path wit_bindgen_rt \
+        --runtime-path wit_bindgen::rt \
         --pub-export-macro \
         --out-dir crates/acp-wasm-sys/src \
         --format

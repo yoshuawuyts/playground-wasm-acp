@@ -1,2 +1,8 @@
 [alias]
 xtask = "run --package xtask --"
+
+# Override the rust toolchain's bundled wasm-component-ld (older) with the
+# cargo-installed one. wit-bindgen 0.57's custom sections require the
+# newer wit-component encoding shipped in 0.5.22+.
+[target.wasm32-wasip2]
+linker = "/Users/yosh/.cargo/bin/wasm-component-ld"

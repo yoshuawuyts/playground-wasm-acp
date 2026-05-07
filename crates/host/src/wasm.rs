@@ -129,28 +129,28 @@ impl SessionFactory {
 
     /// Bottom-up chain build: instantiate the provider first, then wrap it
     /// with each layer (innermost-first). The returned `WasmAgent` is the
-    /// chain's *head* `agent_inst` — the outermost stage that the bridge
-    /// calls into.
+    /// chain's outermost stage — the one the bridge calls into.
     ///
-    /// Each layer stage is materialised as **two** wasm instances backed
-    /// by *separate* stores:
+    /// Each layer is materialised as a **single** wasm instance (one
+    /// store) that services both directions:
     ///
-    /// * `agent_inst` — handles the agent direction (`prompt`, `new-session`,
-    ///   …). Its `agent` import is wired to the next stage downstream.
-    /// * `client_inst` — handles the client direction (`update-session`,
-    ///   `read-text-file`, …). Its `client` import is wired upstream.
+    /// * exported `agent` — `prompt`, `new-session`, etc., called by
+    ///   the upstream stage.
+    /// * exported `client` — `update-session`, `read-text-file`, etc.,
+    ///   called by the downstream stage.
     ///
-    /// The split exists because wasmtime stores are non-reentrant: while a
-    /// layer's exported `agent.prompt` is in flight, a downstream stage
-    /// will synchronously call `client.update-session` upward through the
-    /// chain. Routing those calls into the layer's exported `client` on
-    /// the *same* store as the active `agent.prompt` would deadlock.
-    /// Putting them on a separate store side-steps the problem entirely.
-    /// Layers are expected to be approximately stateless across the two
-    /// directions; if a layer needs shared state it should persist via
-    /// `/data` rather than rely on in-memory globals.
+    /// This works because the WIT now uses async functions and we
+    /// instantiate with `wasm_component_model_async`, which lets a
+    /// single store have multiple in-flight tasks. While a layer's
+    /// `agent.prompt` is awaiting downstream, the same store can
+    /// service inbound `client.update-session` calls re-entering from
+    /// below without deadlock.
     ///
-    /// The provider stage stays as a single instance — its world has no
+    /// Sharing one store across both directions also means in-memory
+    /// layer state (e.g. a session-scoped flag) set during `prompt`
+    /// is visible to `update-session` on the same prompt turn.
+    ///
+    /// The provider stays as a single instance — its world has no
     /// `client` export so there's no client-direction code to run.
     async fn instantiate_chain(&self, project_dir: Option<&std::path::Path>) -> Result<WasmAgent> {
         // Innermost: terminal provider, no downstream. Its `client_sink`
@@ -740,8 +740,8 @@ impl WasmAgent {
 
     /// Replace this stage's [`ClientSink`]. Called by the chain factory
     /// after wrapping a previously-built stage with a new layer: the
-    /// previous stage's sink shifts from `Outbound` to `Upstream` so its
-    /// outbound client calls flow into the new layer's `client_inst`.
+    /// wrapped stage's sink shifts from `Outbound` to `Upstream` so its
+    /// outbound client calls flow into the new layer's exported `client`.
     pub fn set_client_sink(&mut self, sink: ClientSink) {
         self.store.data_mut().client_sink = sink;
     }
