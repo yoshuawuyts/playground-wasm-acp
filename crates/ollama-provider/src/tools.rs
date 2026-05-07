@@ -62,11 +62,6 @@ pub struct Tool {
     pub description: &'static str,
     /// JSON-schema for the function arguments.
     pub parameters: fn() -> Value,
-    /// Runner. Receives the session id (for any nested ACP calls that
-    /// need it) and the model-supplied arguments. Failure is reported
-    /// via [`ToolOutcome::fail`], not via `Result::Err` — the tool-call
-    /// loop wants to feed *something* back to the model in either case.
-    pub run: fn(session_id: &str, args: &Value) -> ToolOutcome,
 }
 
 impl Tool {
@@ -95,7 +90,6 @@ pub fn all() -> &'static [Tool] {
                       (e.g. `src/main.rs`, `Cargo.toml`). It MUST NOT be \
                       a directory, `/`, or empty.",
         parameters: read_file_schema,
-        run: read_file_run,
     }];
     TOOLS
 }
@@ -119,7 +113,16 @@ fn read_file_schema() -> Value {
     })
 }
 
-fn read_file_run(session_id: &str, args: &Value) -> ToolOutcome {
+/// Dispatch a tool by name. Unknown names produce a `ToolOutcome::fail`
+/// the caller can feed back to the model.
+pub async fn dispatch(name: &str, session_id: &str, args: &Value) -> ToolOutcome {
+    match name {
+        "read_file" => read_file_run(session_id, args).await,
+        _ => ToolOutcome::fail(format!("unknown tool `{name}`")),
+    }
+}
+
+async fn read_file_run(session_id: &str, args: &Value) -> ToolOutcome {
     // Models inconsistently send arguments as a JSON object or as a
     // JSON-encoded string. Accept both.
     let args = match args {
@@ -179,7 +182,7 @@ fn read_file_run(session_id: &str, args: &Value) -> ToolOutcome {
         limit: None,
     };
     let absolute_for_loc = absolute.clone();
-    match client::read_text_file(&req) {
+    match client::read_text_file(req).await {
         Ok(resp) => ToolOutcome::ok(resp.content).with_location(absolute_for_loc),
         Err(e) => {
             ToolOutcome::fail(format!("read_text_file({absolute}): {}", e.message))

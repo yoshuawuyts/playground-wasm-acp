@@ -211,12 +211,16 @@ pub struct ChatTurn {
 /// `&[]` for plain chat. Models that don't support tools simply ignore
 /// the field — but you can probe with [`supports_tools`] to skip sending
 /// the array entirely.
-pub async fn chat<F: FnMut(&str)>(
+pub async fn chat<F, Fut>(
     model: &str,
     history: &[Message],
     tools: &[OllamaTool],
-    on_chunk: F,
-) -> Result<ChatTurn, String> {
+    mut on_chunk: F,
+) -> Result<ChatTurn, String>
+where
+    F: FnMut(String) -> Fut,
+    Fut: core::future::Future<Output = ()>,
+{
     let url = endpoint();
     let body = Body::from_json(&ChatRequestOwned {
         model,
@@ -252,19 +256,6 @@ pub async fn chat<F: FnMut(&str)>(
     let mut buf: Vec<u8> = Vec::new();
     let mut content = String::new();
     let mut tool_calls: Vec<OllamaToolCall> = Vec::new();
-    let mut on_chunk = on_chunk;
-    let mut absorb = |chunk: StreamChunk| -> bool {
-        if let Some(msg) = chunk.message {
-            if !msg.content.is_empty() {
-                on_chunk(&msg.content);
-                content.push_str(&msg.content);
-            }
-            if !msg.tool_calls.is_empty() {
-                tool_calls.extend(msg.tool_calls);
-            }
-        }
-        chunk.done
-    };
     let mut done = false;
     'outer: while let Some(frame) = stream.next().await {
         let bytes = frame.map_err(|e| format!("read body: {e}"))?;
@@ -277,7 +268,16 @@ pub async fn chat<F: FnMut(&str)>(
             }
             let chunk: StreamChunk =
                 serde_json::from_slice(line).map_err(|e| format!("decode chunk: {e}"))?;
-            if absorb(chunk) {
+            if let Some(msg) = chunk.message {
+                if !msg.content.is_empty() {
+                    on_chunk(msg.content.clone()).await;
+                    content.push_str(&msg.content);
+                }
+                if !msg.tool_calls.is_empty() {
+                    tool_calls.extend(msg.tool_calls);
+                }
+            }
+            if chunk.done {
                 done = true;
                 break 'outer;
             }
@@ -285,7 +285,15 @@ pub async fn chat<F: FnMut(&str)>(
     }
     if !done && !buf.is_empty() {
         if let Ok(chunk) = serde_json::from_slice::<StreamChunk>(&buf) {
-            absorb(chunk);
+            if let Some(msg) = chunk.message {
+                if !msg.content.is_empty() {
+                    on_chunk(msg.content.clone()).await;
+                    content.push_str(&msg.content);
+                }
+                if !msg.tool_calls.is_empty() {
+                    tool_calls.extend(msg.tool_calls);
+                }
+            }
         }
     }
     Ok(ChatTurn { content, tool_calls })

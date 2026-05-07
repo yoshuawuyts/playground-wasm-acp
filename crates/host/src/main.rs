@@ -149,6 +149,7 @@ fn main() -> Result<()> {
 
     let mut config = Config::new();
     config.wasm_component_model(true);
+    config.wasm_component_model_async(true);
     let engine = Engine::new(&config)?;
 
     // Resolve provider path: `--provider` takes precedence, fall back to

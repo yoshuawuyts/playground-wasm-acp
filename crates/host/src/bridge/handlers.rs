@@ -38,7 +38,7 @@ pub(super) async fn handle_initialize(
     );
     let wit_req = translate::init_request_schema_to_wit(req);
     let result = agent
-        .call_initialize(&wit_req)
+        .call_initialize(wit_req)
         .await
         .map_err(|e| translate::trap_to_acp("initialize", e))?;
     let resp = result.map_err(translate::wit_error_to_acp)?;
@@ -58,7 +58,7 @@ pub(super) async fn handle_authenticate(
         .map_err(|e| translate::anyhow_to_acp("authenticate: instantiate", e))?;
     let wit_req = translate::authenticate_request_schema_to_wit(req);
     let result = agent
-        .call_authenticate(&wit_req)
+        .call_authenticate(wit_req)
         .await
         .map_err(|e| translate::trap_to_acp("authenticate", e))?;
     result.map_err(translate::wit_error_to_acp)?;
@@ -85,7 +85,7 @@ pub(super) async fn handle_new_session(
         .map_err(|e| translate::anyhow_to_acp("new-session: instantiate", e))?;
     let wit_req = translate::new_session_request_schema_to_wit(req);
     let result = agent
-        .call_new_session(&wit_req)
+        .call_new_session(wit_req)
         .await
         .map_err(|e| translate::trap_to_acp("new-session", e))?;
     let resp = result.map_err(translate::wit_error_to_acp)?;
@@ -114,7 +114,7 @@ pub(super) async fn handle_load_session(
         .map_err(|e| translate::anyhow_to_acp("load-session: instantiate", e))?;
     let wit_req = translate::load_session_request_schema_to_wit(req);
     let result = agent
-        .call_load_session(&wit_req)
+        .call_load_session(wit_req)
         .await
         .map_err(|e| translate::trap_to_acp("load-session", e))?;
     let resp = result.map_err(translate::wit_error_to_acp)?;

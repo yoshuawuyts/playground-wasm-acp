@@ -14,7 +14,7 @@ tokio-util = { workspace = true }
 tokio-stream = { workspace = true }
 futures = { workspace = true }
 futures-concurrency = { workspace = true }
-wasmtime = { workspace = true, features = ["component-model"] }
+wasmtime = { workspace = true, features = ["component-model", "async", "component-model-async"] }
 wasmtime-wasi = { workspace = true }
 wasmtime-wasi-http = { workspace = true }
 agent-client-protocol = { workspace = true }

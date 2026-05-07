@@ -27,7 +27,7 @@ use wasmtime::{Engine, Store};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 use wasmtime_wasi_http::WasiHttpCtx;
 
-use crate::state::{ClientSink, DownstreamHandle, HostState, OutboundEvent, UpstreamHandle};
+use crate::state::{ClientSink, DownstreamHandle, HostState, OutboundEvent};
 use crate::yosh::acp::errors::Error;
 use crate::yosh::acp::init::{AuthenticateRequest, InitializeRequest, InitializeResponse};
 use crate::yosh::acp::prompts::{PromptRequest, PromptResponse};
@@ -156,7 +156,7 @@ impl SessionFactory {
         // Innermost: terminal provider, no downstream. Its `client_sink`
         // starts as `Outbound` (used directly when there are zero
         // layers); if any layers are configured we overwrite it below to
-        // point at the innermost layer's `client_inst`.
+        // point at the next layer up.
         let provider_data = stage_data_dir(project_dir, &self.provider.component_id)?;
         let provider = WasmAgent::new(
             &self.engine,
@@ -168,71 +168,52 @@ impl SessionFactory {
         )
         .await?;
 
-        // `current` is the previous stage's `agent_inst`. It will become
-        // the next layer's downstream once we wrap it.
-        //
-        // `prev_client_inst` is the previous *layer's* `client_inst`.
-        // When we build the next layer, that layer's `client_inst`
-        // becomes the upstream sink for both the previous agent_inst
-        // *and* the previous client_inst. (For the first iteration
-        // there's no previous layer, so this is `None`.)
+        // With wasmtime concurrent imports, a single store per layer can
+        // service both its exported `agent` (downstream-facing) and its
+        // exported `client` (upstream-facing) without re-entrancy. So
+        // each layer is a single `WasmAgent` shared by both directions.
         let mut current = provider;
-        let mut prev_client_inst: Option<UpstreamHandle> = None;
         for stage in self.layers.iter().rev() {
             let data = stage_data_dir(project_dir, &stage.component_id)?;
-
-            // Build this layer's client-direction instance first so its
-            // handle is ready to install as the previous stage's
-            // upstream sink.
-            let client_inst = WasmAgent::new(
-                &self.engine,
-                &stage.component,
-                StageKind::Layer,
-                self.outbound_sink(),
-                data.as_deref(),
-                None,
-            )
-            .await?;
-            let client_handle: UpstreamHandle =
-                std::sync::Arc::new(tokio::sync::Mutex::new(client_inst));
-
-            // Re-point the previous stage's `client_sink` upward into
-            // this new layer's client_inst. Both the previous stage's
-            // agent_inst (`current`) and its client_inst (if any) need
-            // updating: each can independently emit client calls.
-            current.set_client_sink(ClientSink::Upstream(client_handle.clone()));
-            if let Some(prev_ci) = prev_client_inst.as_ref() {
-                prev_ci
-                    .lock()
-                    .await
-                    .set_client_sink(ClientSink::Upstream(client_handle.clone()));
-            }
-
-            // Wrap the previous stage's agent_inst as this layer's
-            // downstream, then build this layer's agent_inst.
             let downstream: DownstreamHandle =
                 std::sync::Arc::new(tokio::sync::Mutex::new(current));
-            let agent_inst = WasmAgent::new(
+            let layer_inst = WasmAgent::new(
                 &self.engine,
                 &stage.component,
                 StageKind::Layer,
-                // Placeholder; overwritten on the next iteration if
+                // Placeholder; overwritten by the next iteration if
                 // another layer wraps us. Stays `Outbound` for the
                 // topmost layer.
                 self.outbound_sink(),
                 data.as_deref(),
-                Some(downstream),
+                Some(downstream.clone()),
             )
             .await?;
 
-            current = agent_inst;
-            prev_client_inst = Some(client_handle);
+            // Point the wrapped (downstream) stage's `client_sink`
+            // upward into this new layer so its outbound client calls
+            // route into the layer's exported `client` interface. We
+            // hand the downstream a *weak* reference to the upstream
+            // layer to avoid a strong cycle (the chain head holds each
+            // stage strongly via `downstream`).
+            let layer_strong: std::sync::Arc<tokio::sync::Mutex<WasmAgent>> =
+                std::sync::Arc::new(tokio::sync::Mutex::new(layer_inst));
+            downstream
+                .lock()
+                .await
+                .set_client_sink(ClientSink::Upstream(std::sync::Arc::downgrade(
+                    &layer_strong,
+                )));
+
+            // Unwrap the layer back into a single owned `WasmAgent` so
+            // the next iteration can take it as its downstream. The
+            // upstream reference held by the wrapped stage is a `Weak`,
+            // so this is the only strong reference to `layer_strong`.
+            current = std::sync::Arc::try_unwrap(layer_strong)
+                .map_err(|_| anyhow::anyhow!("layer handle had unexpected extra clones"))?
+                .into_inner();
         }
 
-        // `current` is the topmost agent_inst (its `client_sink` stayed
-        // `Outbound`). The topmost `client_inst` (if any) is held alive
-        // through the chain's HostState references.
-        let _ = prev_client_inst;
         Ok(current)
     }
 }
@@ -501,7 +482,7 @@ impl SessionActor {
                     // arm wins, so each arm yields a fully-formed
                     // `PromptOutcome`.
                     let prompt_arm = async {
-                        match self.agent.call_prompt(&req).await {
+                        match self.agent.call_prompt(req).await {
                             Err(e) => PromptOutcome::Trap(e),
                             Ok(Err(e)) => PromptOutcome::Wit(e),
                             Ok(Ok(resp)) => PromptOutcome::Done(resp),
@@ -517,7 +498,7 @@ impl SessionActor {
                     }
                 }
                 Message::SetMode { req, reply } => {
-                    let outcome = match self.agent.call_set_session_mode(&req).await {
+                    let outcome = match self.agent.call_set_session_mode(req).await {
                         Err(e) => SetModeOutcome::Trap(e),
                         Ok(Err(e)) => SetModeOutcome::Wit(e),
                         Ok(Ok(())) => SetModeOutcome::Done,
@@ -546,7 +527,7 @@ impl SessionActor {
 /// distinct (rather than always using the layer bindings) so the type
 /// system, the linker, and the wasmtime instantiation check all agree on
 /// which kind of component each path expects.
-enum Bindings {
+pub enum Bindings {
     Provider(Provider),
     Layer(Layer),
 }
@@ -554,8 +535,8 @@ enum Bindings {
 /// Owns the wasmtime store + the instantiated world bindings for a single
 /// stage in the routing chain.
 pub struct WasmAgent {
-    store: Store<HostState>,
-    bindings: Bindings,
+    pub store: Store<HostState>,
+    pub bindings: Bindings,
 }
 
 /// Which world to instantiate a stage as. The chain factory picks
@@ -622,179 +603,139 @@ impl WasmAgent {
 
     pub async fn call_initialize(
         &mut self,
-        req: &InitializeRequest,
+        req: InitializeRequest,
     ) -> wasmtime::Result<Result<InitializeResponse, Error>> {
-        match &self.bindings {
-            Bindings::Provider(b) => {
-                b.yosh_acp_agent()
-                    .call_initialize(&mut self.store, req)
-                    .await
-            }
-            Bindings::Layer(b) => {
-                b.yosh_acp_agent()
-                    .call_initialize(&mut self.store, req)
-                    .await
-            }
-        }
+        let WasmAgent { store, bindings } = self;
+        let bindings_ref: &Bindings = bindings;
+        store
+            .run_concurrent(async move |a| match bindings_ref {
+                Bindings::Provider(b) => b.yosh_acp_agent().call_initialize(a, req).await,
+                Bindings::Layer(b) => b.yosh_acp_agent().call_initialize(a, req).await,
+            })
+            .await?
     }
 
     pub async fn call_authenticate(
         &mut self,
-        req: &AuthenticateRequest,
+        req: AuthenticateRequest,
     ) -> wasmtime::Result<Result<(), Error>> {
-        match &self.bindings {
-            Bindings::Provider(b) => {
-                b.yosh_acp_agent()
-                    .call_authenticate(&mut self.store, req)
-                    .await
-            }
-            Bindings::Layer(b) => {
-                b.yosh_acp_agent()
-                    .call_authenticate(&mut self.store, req)
-                    .await
-            }
-        }
+        let WasmAgent { store, bindings } = self;
+        let bindings_ref: &Bindings = bindings;
+        store
+            .run_concurrent(async move |a| match bindings_ref {
+                Bindings::Provider(b) => b.yosh_acp_agent().call_authenticate(a, req).await,
+                Bindings::Layer(b) => b.yosh_acp_agent().call_authenticate(a, req).await,
+            })
+            .await?
     }
 
     pub async fn call_new_session(
         &mut self,
-        req: &NewSessionRequest,
+        req: NewSessionRequest,
     ) -> wasmtime::Result<Result<NewSessionResponse, Error>> {
-        match &self.bindings {
-            Bindings::Provider(b) => {
-                b.yosh_acp_agent()
-                    .call_new_session(&mut self.store, req)
-                    .await
-            }
-            Bindings::Layer(b) => {
-                b.yosh_acp_agent()
-                    .call_new_session(&mut self.store, req)
-                    .await
-            }
-        }
+        let WasmAgent { store, bindings } = self;
+        let bindings_ref: &Bindings = bindings;
+        store
+            .run_concurrent(async move |a| match bindings_ref {
+                Bindings::Provider(b) => b.yosh_acp_agent().call_new_session(a, req).await,
+                Bindings::Layer(b) => b.yosh_acp_agent().call_new_session(a, req).await,
+            })
+            .await?
     }
 
     pub async fn call_load_session(
         &mut self,
-        req: &LoadSessionRequest,
+        req: LoadSessionRequest,
     ) -> wasmtime::Result<Result<LoadSessionResponse, Error>> {
-        match &self.bindings {
-            Bindings::Provider(b) => {
-                b.yosh_acp_agent()
-                    .call_load_session(&mut self.store, req)
-                    .await
-            }
-            Bindings::Layer(b) => {
-                b.yosh_acp_agent()
-                    .call_load_session(&mut self.store, req)
-                    .await
-            }
-        }
+        let WasmAgent { store, bindings } = self;
+        let bindings_ref: &Bindings = bindings;
+        store
+            .run_concurrent(async move |a| match bindings_ref {
+                Bindings::Provider(b) => b.yosh_acp_agent().call_load_session(a, req).await,
+                Bindings::Layer(b) => b.yosh_acp_agent().call_load_session(a, req).await,
+            })
+            .await?
     }
 
     pub async fn call_set_session_mode(
         &mut self,
-        req: &SetSessionModeRequest,
+        req: SetSessionModeRequest,
     ) -> wasmtime::Result<Result<(), Error>> {
-        match &self.bindings {
-            Bindings::Provider(b) => {
-                b.yosh_acp_agent()
-                    .call_set_session_mode(&mut self.store, req)
-                    .await
-            }
-            Bindings::Layer(b) => {
-                b.yosh_acp_agent()
-                    .call_set_session_mode(&mut self.store, req)
-                    .await
-            }
-        }
+        let WasmAgent { store, bindings } = self;
+        let bindings_ref: &Bindings = bindings;
+        store
+            .run_concurrent(async move |a| match bindings_ref {
+                Bindings::Provider(b) => b.yosh_acp_agent().call_set_session_mode(a, req).await,
+                Bindings::Layer(b) => b.yosh_acp_agent().call_set_session_mode(a, req).await,
+            })
+            .await?
     }
 
     pub async fn call_prompt(
         &mut self,
-        req: &PromptRequest,
+        req: PromptRequest,
     ) -> wasmtime::Result<Result<PromptResponse, Error>> {
-        match &self.bindings {
-            Bindings::Provider(b) => {
-                b.yosh_acp_agent()
-                    .call_prompt(&mut self.store, req)
-                    .await
-            }
-            Bindings::Layer(b) => {
-                b.yosh_acp_agent()
-                    .call_prompt(&mut self.store, req)
-                    .await
-            }
-        }
+        let WasmAgent { store, bindings } = self;
+        let bindings_ref: &Bindings = bindings;
+        store
+            .run_concurrent(async move |a| match bindings_ref {
+                Bindings::Provider(b) => b.yosh_acp_agent().call_prompt(a, req).await,
+                Bindings::Layer(b) => b.yosh_acp_agent().call_prompt(a, req).await,
+            })
+            .await?
     }
 
     pub async fn call_list_sessions(
         &mut self,
-        req: &ListSessionsRequest,
+        req: ListSessionsRequest,
     ) -> wasmtime::Result<Result<ListSessionsResponse, Error>> {
-        match &self.bindings {
-            Bindings::Provider(b) => {
-                b.yosh_acp_agent()
-                    .call_list_sessions(&mut self.store, req)
-                    .await
-            }
-            Bindings::Layer(b) => {
-                b.yosh_acp_agent()
-                    .call_list_sessions(&mut self.store, req)
-                    .await
-            }
-        }
+        let WasmAgent { store, bindings } = self;
+        let bindings_ref: &Bindings = bindings;
+        store
+            .run_concurrent(async move |a| match bindings_ref {
+                Bindings::Provider(b) => b.yosh_acp_agent().call_list_sessions(a, req).await,
+                Bindings::Layer(b) => b.yosh_acp_agent().call_list_sessions(a, req).await,
+            })
+            .await?
     }
 
     pub async fn call_resume_session(
         &mut self,
-        req: &ResumeSessionRequest,
+        req: ResumeSessionRequest,
     ) -> wasmtime::Result<Result<ResumeSessionResponse, Error>> {
-        match &self.bindings {
-            Bindings::Provider(b) => {
-                b.yosh_acp_agent()
-                    .call_resume_session(&mut self.store, req)
-                    .await
-            }
-            Bindings::Layer(b) => {
-                b.yosh_acp_agent()
-                    .call_resume_session(&mut self.store, req)
-                    .await
-            }
-        }
+        let WasmAgent { store, bindings } = self;
+        let bindings_ref: &Bindings = bindings;
+        store
+            .run_concurrent(async move |a| match bindings_ref {
+                Bindings::Provider(b) => b.yosh_acp_agent().call_resume_session(a, req).await,
+                Bindings::Layer(b) => b.yosh_acp_agent().call_resume_session(a, req).await,
+            })
+            .await?
     }
 
     pub async fn call_close_session(
         &mut self,
-        session_id: &SessionId,
+        session_id: SessionId,
     ) -> wasmtime::Result<Result<(), Error>> {
-        match &self.bindings {
-            Bindings::Provider(b) => {
-                b.yosh_acp_agent()
-                    .call_close_session(&mut self.store, session_id)
-                    .await
-            }
-            Bindings::Layer(b) => {
-                b.yosh_acp_agent()
-                    .call_close_session(&mut self.store, session_id)
-                    .await
-            }
-        }
+        let WasmAgent { store, bindings } = self;
+        let bindings_ref: &Bindings = bindings;
+        store
+            .run_concurrent(async move |a| match bindings_ref {
+                Bindings::Provider(b) => b.yosh_acp_agent().call_close_session(a, session_id).await,
+                Bindings::Layer(b) => b.yosh_acp_agent().call_close_session(a, session_id).await,
+            })
+            .await?
     }
 
-    pub async fn call_cancel(&mut self, session_id: &SessionId) -> wasmtime::Result<()> {
-        match &self.bindings {
-            Bindings::Provider(b) => {
-                b.yosh_acp_agent()
-                    .call_cancel(&mut self.store, session_id)
-                    .await
-            }
-            Bindings::Layer(b) => {
-                b.yosh_acp_agent()
-                    .call_cancel(&mut self.store, session_id)
-                    .await
-            }
-        }
+    pub async fn call_cancel(&mut self, session_id: SessionId) -> wasmtime::Result<()> {
+        let WasmAgent { store, bindings } = self;
+        let bindings_ref: &Bindings = bindings;
+        store
+            .run_concurrent(async move |a| match bindings_ref {
+                Bindings::Provider(b) => b.yosh_acp_agent().call_cancel(a, session_id).await,
+                Bindings::Layer(b) => b.yosh_acp_agent().call_cancel(a, session_id).await,
+            })
+            .await?
     }
 
     /// Replace this stage's [`ClientSink`]. Called by the chain factory
@@ -806,169 +747,6 @@ impl WasmAgent {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Layer client-direction calls
-// -----------------------------------------------------------------------------
-//
-// The methods below invoke a layer's *exported* `client` interface. They
-// are only meaningful on `Bindings::Layer` (the provider's world has no
-// such export). The `Provider` arm of each match returns an
-// `internal-error`: hitting it means the chain factory wired a
-// `ClientSink::Upstream` to a provider instance, which is a host bug.
-//
-// All `client` exports are async on the wasmtime side. Bindgen generates
-// `b.yosh_acp_client()` as the export accessor, mirroring
-// `yosh_acp_agent()` for the agent direction.
-
-use crate::yosh::acp::filesystem::{
-    ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest,
-};
-use crate::yosh::acp::prompts::SessionUpdate;
-use crate::yosh::acp::terminals::{
-    CreateTerminalRequest, CreateTerminalResponse, TerminalExitStatus, TerminalId, TerminalOutput,
-};
-use crate::yosh::acp::tools::{RequestPermissionRequest, RequestPermissionResponse};
-
-fn provider_has_no_client_export<T>(method: &'static str) -> wasmtime::Result<Result<T, Error>> {
-    Ok(Err(translate::internal_error(&format!(
-        "host bug: routed `client.{method}` to a provider stage (no `client` export)"
-    ))))
-}
-
-impl WasmAgent {
-    pub async fn call_client_update_session(
-        &mut self,
-        session_id: &SessionId,
-        update: &SessionUpdate,
-    ) -> wasmtime::Result<()> {
-        match &self.bindings {
-            Bindings::Provider(_) => Err(wasmtime::Error::msg(
-                "host bug: routed `client.update-session` to a provider stage",
-            )),
-            Bindings::Layer(b) => {
-                b.yosh_acp_client()
-                    .call_update_session(&mut self.store, session_id, update)
-                    .await
-            }
-        }
-    }
-
-    pub async fn call_client_request_permission(
-        &mut self,
-        req: &RequestPermissionRequest,
-    ) -> wasmtime::Result<Result<RequestPermissionResponse, Error>> {
-        match &self.bindings {
-            Bindings::Provider(_) => provider_has_no_client_export("request-permission"),
-            Bindings::Layer(b) => {
-                b.yosh_acp_client()
-                    .call_request_permission(&mut self.store, req)
-                    .await
-            }
-        }
-    }
-
-    pub async fn call_client_read_text_file(
-        &mut self,
-        req: &ReadTextFileRequest,
-    ) -> wasmtime::Result<Result<ReadTextFileResponse, Error>> {
-        match &self.bindings {
-            Bindings::Provider(_) => provider_has_no_client_export("read-text-file"),
-            Bindings::Layer(b) => {
-                b.yosh_acp_client()
-                    .call_read_text_file(&mut self.store, req)
-                    .await
-            }
-        }
-    }
-
-    pub async fn call_client_write_text_file(
-        &mut self,
-        req: &WriteTextFileRequest,
-    ) -> wasmtime::Result<Result<(), Error>> {
-        match &self.bindings {
-            Bindings::Provider(_) => provider_has_no_client_export("write-text-file"),
-            Bindings::Layer(b) => {
-                b.yosh_acp_client()
-                    .call_write_text_file(&mut self.store, req)
-                    .await
-            }
-        }
-    }
-
-    pub async fn call_client_create_terminal(
-        &mut self,
-        req: &CreateTerminalRequest,
-    ) -> wasmtime::Result<Result<CreateTerminalResponse, Error>> {
-        match &self.bindings {
-            Bindings::Provider(_) => provider_has_no_client_export("create-terminal"),
-            Bindings::Layer(b) => {
-                b.yosh_acp_client()
-                    .call_create_terminal(&mut self.store, req)
-                    .await
-            }
-        }
-    }
-
-    pub async fn call_client_get_terminal_output(
-        &mut self,
-        session_id: &SessionId,
-        terminal_id: &TerminalId,
-    ) -> wasmtime::Result<Result<TerminalOutput, Error>> {
-        match &self.bindings {
-            Bindings::Provider(_) => provider_has_no_client_export("get-terminal-output"),
-            Bindings::Layer(b) => {
-                b.yosh_acp_client()
-                    .call_get_terminal_output(&mut self.store, session_id, terminal_id)
-                    .await
-            }
-        }
-    }
-
-    pub async fn call_client_wait_for_terminal_exit(
-        &mut self,
-        session_id: &SessionId,
-        terminal_id: &TerminalId,
-    ) -> wasmtime::Result<Result<TerminalExitStatus, Error>> {
-        match &self.bindings {
-            Bindings::Provider(_) => provider_has_no_client_export("wait-for-terminal-exit"),
-            Bindings::Layer(b) => {
-                b.yosh_acp_client()
-                    .call_wait_for_terminal_exit(&mut self.store, session_id, terminal_id)
-                    .await
-            }
-        }
-    }
-
-    pub async fn call_client_kill_terminal(
-        &mut self,
-        session_id: &SessionId,
-        terminal_id: &TerminalId,
-    ) -> wasmtime::Result<Result<(), Error>> {
-        match &self.bindings {
-            Bindings::Provider(_) => provider_has_no_client_export("kill-terminal"),
-            Bindings::Layer(b) => {
-                b.yosh_acp_client()
-                    .call_kill_terminal(&mut self.store, session_id, terminal_id)
-                    .await
-            }
-        }
-    }
-
-    pub async fn call_client_release_terminal(
-        &mut self,
-        session_id: &SessionId,
-        terminal_id: &TerminalId,
-    ) -> wasmtime::Result<Result<(), Error>> {
-        match &self.bindings {
-            Bindings::Provider(_) => provider_has_no_client_export("release-terminal"),
-            Bindings::Layer(b) => {
-                b.yosh_acp_client()
-                    .call_release_terminal(&mut self.store, session_id, terminal_id)
-                    .await
-            }
-        }
-    }
-}
 
 // -----------------------------------------------------------------------------
 // agent::Host impl — forwards a layer's imported `agent` to its downstream
@@ -985,6 +763,11 @@ impl WasmAgent {
 // becomes an `internal-error` from the layer's point of view rather than
 // tearing down the whole chain.
 
+
+// -----------------------------------------------------------------------------
+// agent::Host impl — forwards a layer's imported `agent` to its downstream
+// -----------------------------------------------------------------------------
+
 use crate::layer_agent;
 use crate::translate;
 
@@ -994,118 +777,263 @@ fn no_downstream<T>(method: &'static str) -> Result<T, Error> {
     )))
 }
 
-/// Collapse `wasmtime::Result<Result<T, Error>>` into `Result<T, Error>`
-/// for the host trait return types. A trap becomes a WIT `internal-error`
-/// so the calling layer sees a recoverable error instead of being torn
-/// down with the rest of the chain.
-fn flatten<T>(method: &'static str, res: wasmtime::Result<Result<T, Error>>) -> Result<T, Error> {
+fn flatten_downstream<T>(
+    method: &'static str,
+    res: wasmtime::Result<wasmtime::Result<Result<T, Error>>>,
+) -> Result<T, Error> {
     match res {
-        Ok(inner) => inner,
-        Err(trap) => Err(translate::internal_error(&format!(
+        Ok(Ok(inner)) => inner,
+        Ok(Err(trap)) | Err(trap) => Err(translate::internal_error(&format!(
             "downstream `{method}` trapped: {trap:#}"
         ))),
     }
 }
 
-impl layer_agent::Host for HostState {
-    async fn initialize(&mut self, req: InitializeRequest) -> Result<InitializeResponse, Error> {
-        let Some(ds) = self.downstream.clone() else {
-            return no_downstream("initialize");
-        };
-        flatten("initialize", ds.lock().await.call_initialize(&req).await)
+impl layer_agent::Host for HostState {}
+
+impl layer_agent::HostWithStore for wasmtime::component::HasSelf<HostState> {
+    fn initialize<T: Send>(
+        accessor: &wasmtime::component::Accessor<T, Self>,
+        req: InitializeRequest,
+    ) -> impl ::core::future::Future<Output = Result<InitializeResponse, Error>> + Send {
+        let ds = accessor.with(|mut a| a.get().downstream.clone());
+        async move {
+            let Some(ds) = ds else {
+                return no_downstream("initialize");
+            };
+            let mut guard = ds.lock().await;
+            let WasmAgent { store, bindings } = &mut *guard;
+            let bindings_ref: &Bindings = bindings;
+            flatten_downstream(
+                "initialize",
+                store
+                    .run_concurrent(async move |a| match bindings_ref {
+                        Bindings::Provider(b) => b.yosh_acp_agent().call_initialize(a, req).await,
+                        Bindings::Layer(b) => b.yosh_acp_agent().call_initialize(a, req).await,
+                    })
+                    .await,
+            )
+        }
     }
 
-    async fn authenticate(&mut self, req: AuthenticateRequest) -> Result<(), Error> {
-        let Some(ds) = self.downstream.clone() else {
-            return no_downstream("authenticate");
-        };
-        flatten(
-            "authenticate",
-            ds.lock().await.call_authenticate(&req).await,
-        )
+    fn authenticate<T: Send>(
+        accessor: &wasmtime::component::Accessor<T, Self>,
+        req: AuthenticateRequest,
+    ) -> impl ::core::future::Future<Output = Result<(), Error>> + Send {
+        let ds = accessor.with(|mut a| a.get().downstream.clone());
+        async move {
+            let Some(ds) = ds else {
+                return no_downstream("authenticate");
+            };
+            let mut guard = ds.lock().await;
+            let WasmAgent { store, bindings } = &mut *guard;
+            let bindings_ref: &Bindings = bindings;
+            flatten_downstream(
+                "authenticate",
+                store
+                    .run_concurrent(async move |a| match bindings_ref {
+                        Bindings::Provider(b) => b.yosh_acp_agent().call_authenticate(a, req).await,
+                        Bindings::Layer(b) => b.yosh_acp_agent().call_authenticate(a, req).await,
+                    })
+                    .await,
+            )
+        }
     }
 
-    async fn new_session(&mut self, req: NewSessionRequest) -> Result<NewSessionResponse, Error> {
-        let Some(ds) = self.downstream.clone() else {
-            return no_downstream("new-session");
-        };
-        flatten("new-session", ds.lock().await.call_new_session(&req).await)
+    fn new_session<T: Send>(
+        accessor: &wasmtime::component::Accessor<T, Self>,
+        req: NewSessionRequest,
+    ) -> impl ::core::future::Future<Output = Result<NewSessionResponse, Error>> + Send {
+        let ds = accessor.with(|mut a| a.get().downstream.clone());
+        async move {
+            let Some(ds) = ds else {
+                return no_downstream("new-session");
+            };
+            let mut guard = ds.lock().await;
+            let WasmAgent { store, bindings } = &mut *guard;
+            let bindings_ref: &Bindings = bindings;
+            flatten_downstream(
+                "new-session",
+                store
+                    .run_concurrent(async move |a| match bindings_ref {
+                        Bindings::Provider(b) => b.yosh_acp_agent().call_new_session(a, req).await,
+                        Bindings::Layer(b) => b.yosh_acp_agent().call_new_session(a, req).await,
+                    })
+                    .await,
+            )
+        }
     }
 
-    async fn load_session(
-        &mut self,
+    fn load_session<T: Send>(
+        accessor: &wasmtime::component::Accessor<T, Self>,
         req: LoadSessionRequest,
-    ) -> Result<LoadSessionResponse, Error> {
-        let Some(ds) = self.downstream.clone() else {
-            return no_downstream("load-session");
-        };
-        flatten(
-            "load-session",
-            ds.lock().await.call_load_session(&req).await,
-        )
+    ) -> impl ::core::future::Future<Output = Result<LoadSessionResponse, Error>> + Send {
+        let ds = accessor.with(|mut a| a.get().downstream.clone());
+        async move {
+            let Some(ds) = ds else {
+                return no_downstream("load-session");
+            };
+            let mut guard = ds.lock().await;
+            let WasmAgent { store, bindings } = &mut *guard;
+            let bindings_ref: &Bindings = bindings;
+            flatten_downstream(
+                "load-session",
+                store
+                    .run_concurrent(async move |a| match bindings_ref {
+                        Bindings::Provider(b) => b.yosh_acp_agent().call_load_session(a, req).await,
+                        Bindings::Layer(b) => b.yosh_acp_agent().call_load_session(a, req).await,
+                    })
+                    .await,
+            )
+        }
     }
 
-    async fn list_sessions(
-        &mut self,
+    fn list_sessions<T: Send>(
+        accessor: &wasmtime::component::Accessor<T, Self>,
         req: ListSessionsRequest,
-    ) -> Result<ListSessionsResponse, Error> {
-        let Some(ds) = self.downstream.clone() else {
-            return no_downstream("list-sessions");
-        };
-        flatten(
-            "list-sessions",
-            ds.lock().await.call_list_sessions(&req).await,
-        )
+    ) -> impl ::core::future::Future<Output = Result<ListSessionsResponse, Error>> + Send {
+        let ds = accessor.with(|mut a| a.get().downstream.clone());
+        async move {
+            let Some(ds) = ds else {
+                return no_downstream("list-sessions");
+            };
+            let mut guard = ds.lock().await;
+            let WasmAgent { store, bindings } = &mut *guard;
+            let bindings_ref: &Bindings = bindings;
+            flatten_downstream(
+                "list-sessions",
+                store
+                    .run_concurrent(async move |a| match bindings_ref {
+                        Bindings::Provider(b) => b.yosh_acp_agent().call_list_sessions(a, req).await,
+                        Bindings::Layer(b) => b.yosh_acp_agent().call_list_sessions(a, req).await,
+                    })
+                    .await,
+            )
+        }
     }
 
-    async fn resume_session(
-        &mut self,
+    fn resume_session<T: Send>(
+        accessor: &wasmtime::component::Accessor<T, Self>,
         req: ResumeSessionRequest,
-    ) -> Result<ResumeSessionResponse, Error> {
-        let Some(ds) = self.downstream.clone() else {
-            return no_downstream("resume-session");
-        };
-        flatten(
-            "resume-session",
-            ds.lock().await.call_resume_session(&req).await,
-        )
+    ) -> impl ::core::future::Future<Output = Result<ResumeSessionResponse, Error>> + Send {
+        let ds = accessor.with(|mut a| a.get().downstream.clone());
+        async move {
+            let Some(ds) = ds else {
+                return no_downstream("resume-session");
+            };
+            let mut guard = ds.lock().await;
+            let WasmAgent { store, bindings } = &mut *guard;
+            let bindings_ref: &Bindings = bindings;
+            flatten_downstream(
+                "resume-session",
+                store
+                    .run_concurrent(async move |a| match bindings_ref {
+                        Bindings::Provider(b) => b.yosh_acp_agent().call_resume_session(a, req).await,
+                        Bindings::Layer(b) => b.yosh_acp_agent().call_resume_session(a, req).await,
+                    })
+                    .await,
+            )
+        }
     }
 
-    async fn close_session(&mut self, session_id: SessionId) -> Result<(), Error> {
-        let Some(ds) = self.downstream.clone() else {
-            return no_downstream("close-session");
-        };
-        flatten(
-            "close-session",
-            ds.lock().await.call_close_session(&session_id).await,
-        )
+    fn close_session<T: Send>(
+        accessor: &wasmtime::component::Accessor<T, Self>,
+        session_id: SessionId,
+    ) -> impl ::core::future::Future<Output = Result<(), Error>> + Send {
+        let ds = accessor.with(|mut a| a.get().downstream.clone());
+        async move {
+            let Some(ds) = ds else {
+                return no_downstream("close-session");
+            };
+            let mut guard = ds.lock().await;
+            let WasmAgent { store, bindings } = &mut *guard;
+            let bindings_ref: &Bindings = bindings;
+            flatten_downstream(
+                "close-session",
+                store
+                    .run_concurrent(async move |a| match bindings_ref {
+                        Bindings::Provider(b) => {
+                            b.yosh_acp_agent().call_close_session(a, session_id).await
+                        }
+                        Bindings::Layer(b) => {
+                            b.yosh_acp_agent().call_close_session(a, session_id).await
+                        }
+                    })
+                    .await,
+            )
+        }
     }
 
-    async fn set_session_mode(&mut self, req: SetSessionModeRequest) -> Result<(), Error> {
-        let Some(ds) = self.downstream.clone() else {
-            return no_downstream("set-session-mode");
-        };
-        flatten(
-            "set-session-mode",
-            ds.lock().await.call_set_session_mode(&req).await,
-        )
+    fn set_session_mode<T: Send>(
+        accessor: &wasmtime::component::Accessor<T, Self>,
+        req: SetSessionModeRequest,
+    ) -> impl ::core::future::Future<Output = Result<(), Error>> + Send {
+        let ds = accessor.with(|mut a| a.get().downstream.clone());
+        async move {
+            let Some(ds) = ds else {
+                return no_downstream("set-session-mode");
+            };
+            let mut guard = ds.lock().await;
+            let WasmAgent { store, bindings } = &mut *guard;
+            let bindings_ref: &Bindings = bindings;
+            flatten_downstream(
+                "set-session-mode",
+                store
+                    .run_concurrent(async move |a| match bindings_ref {
+                        Bindings::Provider(b) => b.yosh_acp_agent().call_set_session_mode(a, req).await,
+                        Bindings::Layer(b) => b.yosh_acp_agent().call_set_session_mode(a, req).await,
+                    })
+                    .await,
+            )
+        }
     }
 
-    async fn prompt(&mut self, req: PromptRequest) -> Result<PromptResponse, Error> {
-        let Some(ds) = self.downstream.clone() else {
-            return no_downstream("prompt");
-        };
-        flatten("prompt", ds.lock().await.call_prompt(&req).await)
+    fn prompt<T: Send>(
+        accessor: &wasmtime::component::Accessor<T, Self>,
+        req: PromptRequest,
+    ) -> impl ::core::future::Future<Output = Result<PromptResponse, Error>> + Send {
+        let ds = accessor.with(|mut a| a.get().downstream.clone());
+        async move {
+            let Some(ds) = ds else {
+                return no_downstream("prompt");
+            };
+            let mut guard = ds.lock().await;
+            let WasmAgent { store, bindings } = &mut *guard;
+            let bindings_ref: &Bindings = bindings;
+            flatten_downstream(
+                "prompt",
+                store
+                    .run_concurrent(async move |a| match bindings_ref {
+                        Bindings::Provider(b) => b.yosh_acp_agent().call_prompt(a, req).await,
+                        Bindings::Layer(b) => b.yosh_acp_agent().call_prompt(a, req).await,
+                    })
+                    .await,
+            )
+        }
     }
 
-    async fn cancel(&mut self, session_id: SessionId) {
-        let Some(ds) = self.downstream.clone() else {
-            // `cancel` returns `()`; nothing to report. Log and move on.
-            tracing::warn!("layer called `agent.cancel` but no downstream is configured");
-            return;
-        };
-        if let Err(trap) = ds.lock().await.call_cancel(&session_id).await {
-            tracing::warn!(error = %trap, "downstream `cancel` trapped");
+    fn cancel<T: Send>(
+        accessor: &wasmtime::component::Accessor<T, Self>,
+        session_id: SessionId,
+    ) -> impl ::core::future::Future<Output = ()> + Send {
+        let ds = accessor.with(|mut a| a.get().downstream.clone());
+        async move {
+            let Some(ds) = ds else {
+                tracing::warn!("layer called `agent.cancel` but no downstream is configured");
+                return;
+            };
+            let mut guard = ds.lock().await;
+            let WasmAgent { store, bindings } = &mut *guard;
+            let bindings_ref: &Bindings = bindings;
+            let res = store
+                .run_concurrent(async move |a| match bindings_ref {
+                    Bindings::Provider(b) => b.yosh_acp_agent().call_cancel(a, session_id).await,
+                    Bindings::Layer(b) => b.yosh_acp_agent().call_cancel(a, session_id).await,
+                })
+                .await;
+            if let Err(trap) = res.and_then(|x| x) {
+                tracing::warn!(error = %trap, "downstream `cancel` trapped");
+            }
         }
     }
 }

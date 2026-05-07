@@ -58,19 +58,11 @@ const SYSTEM_PROMPT: &str = "You are a coding assistant connected to the user's 
 /// If Ollama is unreachable or returns no models, falls back to a single
 /// mode for `default_model()` so session creation still succeeds; the
 /// failure is logged to stderr.
-fn build_modes_state(preferred_model: Option<&str>) -> (SessionModeState, String) {
+fn build_modes_state_from_listed(
+    listed: Vec<String>,
+    preferred_model: Option<&str>,
+) -> (SessionModeState, String) {
     let default = ollama::default_model();
-    let listed = match wstd::runtime::block_on(ollama::list_models()) {
-        Ok(models) if !models.is_empty() => models,
-        Ok(_) => {
-            eprintln!("ollama returned no models; using default");
-            vec![default.clone()]
-        }
-        Err(e) => {
-            eprintln!("failed to list ollama models ({e}); using default");
-            vec![default.clone()]
-        }
-    };
 
     // Pick the current mode: prefer the caller's hint, then OLLAMA_MODEL,
     // then the first available.
@@ -103,6 +95,22 @@ fn build_modes_state(preferred_model: Option<&str>) -> (SessionModeState, String
         },
         current,
     )
+}
+
+async fn build_modes_state(preferred_model: Option<&str>) -> (SessionModeState, String) {
+    let default = ollama::default_model();
+    let listed = match ollama::list_models().await {
+        Ok(models) if !models.is_empty() => models,
+        Ok(_) => {
+            eprintln!("ollama returned no models; using default");
+            vec![default.clone()]
+        }
+        Err(e) => {
+            eprintln!("failed to list ollama models ({e}); using default");
+            vec![default.clone()]
+        }
+    };
+    build_modes_state_from_listed(listed, preferred_model)
 }
 
 fn next_session_id() -> String {
@@ -153,7 +161,7 @@ fn extract_user_text(prompt: &[ContentBlock]) -> String {
 }
 
 impl Guest for Agent {
-    fn initialize(_req: InitializeRequest) -> Result<InitializeResponse, Error> {
+    async fn initialize(_req: InitializeRequest) -> Result<InitializeResponse, Error> {
         Ok(InitializeResponse {
             protocol_version: 1,
             agent_capabilities: AgentCapabilities {
@@ -182,16 +190,16 @@ impl Guest for Agent {
         })
     }
 
-    fn authenticate(_req: AuthenticateRequest) -> Result<(), Error> {
+    async fn authenticate(_req: AuthenticateRequest) -> Result<(), Error> {
         Err(err(
             ErrorCode::MethodNotFound,
             "authentication not required",
         ))
     }
 
-    fn new_session(req: NewSessionRequest) -> Result<NewSessionResponse, Error> {
+    async fn new_session(req: NewSessionRequest) -> Result<NewSessionResponse, Error> {
         let id = next_session_id();
-        let (modes, current_model) = build_modes_state(None);
+        let (modes, current_model) = build_modes_state(None).await;
         SESSIONS.with(|s| {
             s.borrow_mut().insert(
                 id.clone(),
@@ -208,7 +216,7 @@ impl Guest for Agent {
         })
     }
 
-    fn load_session(req: LoadSessionRequest) -> Result<LoadSessionResponse, Error> {
+    async fn load_session(req: LoadSessionRequest) -> Result<LoadSessionResponse, Error> {
         // Load the persisted session if present, then replay history to
         // the client as `update-session` notifications (per the ACP spec
         // for `session/load`). Missing file = fresh session.
@@ -222,7 +230,7 @@ impl Guest for Agent {
             .map(|s| s.history.clone())
             .unwrap_or_default();
         let preferred = stored.as_ref().map(|s| s.model.clone());
-        let (modes, current_model) = build_modes_state(preferred.as_deref());
+        let (modes, current_model) = build_modes_state(preferred.as_deref()).await;
         for msg in &history {
             let block = ContentBlock::Text(TextContent {
                 text: msg.content.clone(),
@@ -232,7 +240,7 @@ impl Guest for Agent {
                 "assistant" => SessionUpdate::AgentMessageChunk(block),
                 _ => continue,
             };
-            client::update_session(&req.session_id, &update);
+            client::update_session(req.session_id.clone(), update).await;
         }
         SESSIONS.with(|s| {
             s.borrow_mut().insert(
@@ -247,14 +255,14 @@ impl Guest for Agent {
         Ok(LoadSessionResponse { modes: Some(modes) })
     }
 
-    fn list_sessions(_req: ListSessionsRequest) -> Result<ListSessionsResponse, Error> {
+    async fn list_sessions(_req: ListSessionsRequest) -> Result<ListSessionsResponse, Error> {
         Err(err(
             ErrorCode::MethodNotFound,
             "list-sessions not supported",
         ))
     }
 
-    fn resume_session(req: ResumeSessionRequest) -> Result<ResumeSessionResponse, Error> {
+    async fn resume_session(req: ResumeSessionRequest) -> Result<ResumeSessionResponse, Error> {
         // Like `load_session`, but the spec forbids replaying history
         // via `update-session`. Just rehydrate the in-memory map.
         let default = ollama::default_model();
@@ -267,7 +275,7 @@ impl Guest for Agent {
             .map(|s| s.history.clone())
             .unwrap_or_default();
         let preferred = stored.as_ref().map(|s| s.model.clone());
-        let (modes, current_model) = build_modes_state(preferred.as_deref());
+        let (modes, current_model) = build_modes_state(preferred.as_deref()).await;
         SESSIONS.with(|s| {
             s.borrow_mut().insert(
                 req.session_id,
@@ -281,14 +289,14 @@ impl Guest for Agent {
         Ok(ResumeSessionResponse { modes: Some(modes) })
     }
 
-    fn close_session(_session_id: SessionId) -> Result<(), Error> {
+    async fn close_session(_session_id: SessionId) -> Result<(), Error> {
         Err(err(
             ErrorCode::MethodNotFound,
             "close-session not supported",
         ))
     }
 
-    fn set_session_mode(req: SetSessionModeRequest) -> Result<(), Error> {
+    async fn set_session_mode(req: SetSessionModeRequest) -> Result<(), Error> {
         let SetSessionModeRequest {
             session_id,
             mode_id,
@@ -307,11 +315,11 @@ impl Guest for Agent {
         // Notify the client that the active mode changed. Per the ACP
         // spec, the agent SHOULD emit `current-mode-update` so the editor
         // can reflect the new selection in its picker.
-        client::update_session(&session_id, &SessionUpdate::CurrentModeUpdate(mode_id));
+        client::update_session(session_id, SessionUpdate::CurrentModeUpdate(mode_id)).await;
         Ok(())
     }
 
-    fn prompt(req: PromptRequest) -> Result<PromptResponse, Error> {
+    async fn prompt(req: PromptRequest) -> Result<PromptResponse, Error> {
         let user_text = extract_user_text(&req.prompt);
         if user_text.is_empty() {
             return Err(err(
@@ -356,17 +364,17 @@ impl Guest for Agent {
         // one-time thought chunk so users understand why their model
         // isn't using tools.
         let session_id = req.session_id.clone();
-        let tools_supported =
-            wstd::runtime::block_on(ollama::supports_tools(&model)).unwrap_or(false);
+        let tools_supported = ollama::supports_tools(&model).await.unwrap_or(false);
         if !tools_supported {
             client::update_session(
-                &session_id,
-                &SessionUpdate::AgentThoughtChunk(ContentBlock::Text(TextContent {
+                session_id.clone(),
+                SessionUpdate::AgentThoughtChunk(ContentBlock::Text(TextContent {
                     text: format!(
                         "(model `{model}` does not advertise tool support; running in chat-only mode)"
                     ),
                 })),
-            );
+            )
+            .await;
         }
         let advertised_tools = if tools_supported {
             tools::ollama_tools()
@@ -390,19 +398,19 @@ impl Guest for Agent {
             turns_remaining -= 1;
 
             let session_id_chunk = session_id.clone();
-            let turn = wstd::runtime::block_on(ollama::chat(
-                &model,
-                &history,
-                &advertised_tools,
-                |chunk| {
+            let turn = ollama::chat(&model, &history, &advertised_tools, |chunk| {
+                let sid = session_id_chunk.clone();
+                async move {
                     client::update_session(
-                        &session_id_chunk,
-                        &SessionUpdate::AgentMessageChunk(ContentBlock::Text(TextContent {
-                            text: chunk.to_string(),
+                        sid,
+                        SessionUpdate::AgentMessageChunk(ContentBlock::Text(TextContent {
+                            text: chunk,
                         })),
-                    );
-                },
-            ))
+                    )
+                    .await;
+                }
+            })
+            .await
             .map_err(|e| err(ErrorCode::InternalError, &format!("ollama: {e}")))?;
 
             // Persist the assistant turn (text + any tool-call requests)
@@ -434,8 +442,8 @@ impl Guest for Agent {
                 let raw_input = serde_json::to_string(&call.function.arguments).ok();
 
                 client::update_session(
-                    &session_id,
-                    &SessionUpdate::ToolCall(ToolCall {
+                    session_id.clone(),
+                    SessionUpdate::ToolCall(ToolCall {
                         id: tc_id.clone(),
                         title: title.clone(),
                         kind: tool.map(|t| t.kind).unwrap_or(ToolKind::Other),
@@ -445,14 +453,12 @@ impl Guest for Agent {
                         raw_input: raw_input.clone(),
                         raw_output: None,
                     }),
-                );
+                )
+                .await;
 
-                let outcome = match tool {
-                    Some(tool) => (tool.run)(&session_id, &call.function.arguments),
-                    None => {
-                        tools::ToolOutcome::fail(format!("unknown tool `{}`", call.function.name))
-                    }
-                };
+                let outcome =
+                    tools::dispatch(&call.function.name, &session_id, &call.function.arguments)
+                        .await;
 
                 let locations = if outcome.locations.is_empty() {
                     None
@@ -470,8 +476,8 @@ impl Guest for Agent {
                     )
                 };
                 client::update_session(
-                    &session_id,
-                    &SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+                    session_id.clone(),
+                    SessionUpdate::ToolCallUpdate(ToolCallUpdate {
                         id: tc_id.clone(),
                         title: None,
                         kind: None,
@@ -487,7 +493,8 @@ impl Guest for Agent {
                         raw_input: None,
                         raw_output: Some(outcome.content.clone()),
                     }),
-                );
+                )
+                .await;
 
                 // Feed the result back to the model as a `role: "tool"`
                 // message. For failures, prefix with a clear marker so
@@ -516,18 +523,19 @@ impl Guest for Agent {
                 // the prompt turn (the user already saw the reply). Log
                 // via a thought chunk so it's visible.
                 client::update_session(
-                    &req.session_id,
-                    &SessionUpdate::AgentThoughtChunk(ContentBlock::Text(TextContent {
+                    req.session_id.clone(),
+                    SessionUpdate::AgentThoughtChunk(ContentBlock::Text(TextContent {
                         text: format!("(failed to persist session: {e})"),
                     })),
-                );
+                )
+                .await;
             }
         }
 
         Ok(PromptResponse { stop_reason: stop })
     }
 
-    fn cancel(_session_id: SessionId) {
+    async fn cancel(_session_id: SessionId) {
         // TODO: real cancellation. The host serializes all wasm calls behind
         // a single mutex, so `cancel` cannot run while `prompt` is in
         // flight. Implementing proper cancellation requires moving the

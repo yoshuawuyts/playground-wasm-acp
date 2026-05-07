@@ -46,14 +46,18 @@ static SHOUT_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Push the layer's `available-commands-update` upstream so the editor
 /// learns about `/shout`. Sent after each session lifecycle method.
-fn advertise_commands(session_id: &SessionId) {
+async fn advertise_commands(session_id: &SessionId) {
     let cmds = vec![AvailableCommand {
         name: "shout".to_string(),
         description: "Toggle uppercase rewriting of agent output for this session."
             .to_string(),
         input: None,
     }];
-    client::update_session(session_id, &SessionUpdate::AvailableCommandsUpdate(cmds));
+    client::update_session(
+        session_id.clone(),
+        SessionUpdate::AvailableCommandsUpdate(cmds),
+    )
+    .await;
 }
 
 /// Uppercase the `text` field of any `ContentBlock::Text`. Other content
@@ -98,51 +102,49 @@ fn is_shout_command(blocks: &[ContentBlock]) -> bool {
 // -----------------------------------------------------------------------------
 
 impl AgentGuest for Layer {
-    fn initialize(req: InitializeRequest) -> Result<InitializeResponse, Error> {
-        agent::initialize(&req)
+    async fn initialize(req: InitializeRequest) -> Result<InitializeResponse, Error> {
+        agent::initialize(req).await
     }
 
-    fn authenticate(req: AuthenticateRequest) -> Result<(), Error> {
-        agent::authenticate(&req)
+    async fn authenticate(req: AuthenticateRequest) -> Result<(), Error> {
+        agent::authenticate(req).await
     }
 
-    fn new_session(req: NewSessionRequest) -> Result<NewSessionResponse, Error> {
-        let resp = agent::new_session(&req)?;
-        advertise_commands(&resp.session_id);
+    async fn new_session(req: NewSessionRequest) -> Result<NewSessionResponse, Error> {
+        let resp = agent::new_session(req).await?;
+        advertise_commands(&resp.session_id).await;
         Ok(resp)
     }
 
-    fn load_session(req: LoadSessionRequest) -> Result<LoadSessionResponse, Error> {
+    async fn load_session(req: LoadSessionRequest) -> Result<LoadSessionResponse, Error> {
         let sid = req.session_id.clone();
-        let resp = agent::load_session(&req)?;
-        advertise_commands(&sid);
+        let resp = agent::load_session(req).await?;
+        advertise_commands(&sid).await;
         Ok(resp)
     }
 
-    fn list_sessions(req: ListSessionsRequest) -> Result<ListSessionsResponse, Error> {
-        agent::list_sessions(&req)
+    async fn list_sessions(req: ListSessionsRequest) -> Result<ListSessionsResponse, Error> {
+        agent::list_sessions(req).await
     }
 
-    fn resume_session(req: ResumeSessionRequest) -> Result<ResumeSessionResponse, Error> {
+    async fn resume_session(req: ResumeSessionRequest) -> Result<ResumeSessionResponse, Error> {
         let sid = req.session_id.clone();
-        let resp = agent::resume_session(&req)?;
-        advertise_commands(&sid);
+        let resp = agent::resume_session(req).await?;
+        advertise_commands(&sid).await;
         Ok(resp)
     }
 
-    fn close_session(session_id: SessionId) -> Result<(), Error> {
-        agent::close_session(&session_id)
+    async fn close_session(session_id: SessionId) -> Result<(), Error> {
+        agent::close_session(session_id).await
     }
 
-    fn set_session_mode(req: SetSessionModeRequest) -> Result<(), Error> {
-        agent::set_session_mode(&req)
+    async fn set_session_mode(req: SetSessionModeRequest) -> Result<(), Error> {
+        agent::set_session_mode(req).await
     }
 
-    fn prompt(req: PromptRequest) -> Result<PromptResponse, Error> {
+    async fn prompt(req: PromptRequest) -> Result<PromptResponse, Error> {
         // Intercept `/shout` to toggle uppercase rewriting for the
-        // remainder of this session. We only treat it as a command
-        // when it's the sole text content of the prompt; otherwise we
-        // forward downstream untouched.
+        // remainder of this session.
         if is_shout_command(&req.prompt) {
             let now_on = !SHOUT_ENABLED.fetch_xor(true, Ordering::Relaxed);
             let msg = if now_on {
@@ -151,20 +153,21 @@ impl AgentGuest for Layer {
                 "ok, I've calmed down"
             };
             client::update_session(
-                &req.session_id,
-                &SessionUpdate::AgentMessageChunk(ContentBlock::Text(TextContent {
+                req.session_id.clone(),
+                SessionUpdate::AgentMessageChunk(ContentBlock::Text(TextContent {
                     text: msg.to_string(),
                 })),
-            );
+            )
+            .await;
             return Ok(PromptResponse {
                 stop_reason: StopReason::EndTurn,
             });
         }
-        agent::prompt(&req)
+        agent::prompt(req).await
     }
 
-    fn cancel(session_id: SessionId) {
-        agent::cancel(&session_id);
+    async fn cancel(session_id: SessionId) {
+        agent::cancel(session_id).await;
     }
 }
 
@@ -173,53 +176,56 @@ impl AgentGuest for Layer {
 // -----------------------------------------------------------------------------
 
 impl ClientGuest for Layer {
-    fn update_session(session_id: SessionId, update: SessionUpdate) {
+    async fn update_session(session_id: SessionId, update: SessionUpdate) {
         let rewritten = if SHOUT_ENABLED.load(Ordering::Relaxed) {
             uppercase_update(update)
         } else {
             update
         };
-        client::update_session(&session_id, &rewritten);
+        client::update_session(session_id, rewritten).await;
     }
 
-    fn request_permission(
+    async fn request_permission(
         req: RequestPermissionRequest,
     ) -> Result<RequestPermissionResponse, Error> {
-        client::request_permission(&req)
+        client::request_permission(req).await
     }
 
-    fn read_text_file(req: ReadTextFileRequest) -> Result<ReadTextFileResponse, Error> {
-        client::read_text_file(&req)
+    async fn read_text_file(req: ReadTextFileRequest) -> Result<ReadTextFileResponse, Error> {
+        client::read_text_file(req).await
     }
 
-    fn write_text_file(req: WriteTextFileRequest) -> Result<(), Error> {
-        client::write_text_file(&req)
+    async fn write_text_file(req: WriteTextFileRequest) -> Result<(), Error> {
+        client::write_text_file(req).await
     }
 
-    fn create_terminal(req: CreateTerminalRequest) -> Result<CreateTerminalResponse, Error> {
-        client::create_terminal(&req)
+    async fn create_terminal(req: CreateTerminalRequest) -> Result<CreateTerminalResponse, Error> {
+        client::create_terminal(req).await
     }
 
-    fn get_terminal_output(
+    async fn get_terminal_output(
         session_id: SessionId,
         terminal_id: TerminalId,
     ) -> Result<TerminalOutput, Error> {
-        client::get_terminal_output(&session_id, &terminal_id)
+        client::get_terminal_output(session_id, terminal_id).await
     }
 
-    fn wait_for_terminal_exit(
+    async fn wait_for_terminal_exit(
         session_id: SessionId,
         terminal_id: TerminalId,
     ) -> Result<TerminalExitStatus, Error> {
-        client::wait_for_terminal_exit(&session_id, &terminal_id)
+        client::wait_for_terminal_exit(session_id, terminal_id).await
     }
 
-    fn kill_terminal(session_id: SessionId, terminal_id: TerminalId) -> Result<(), Error> {
-        client::kill_terminal(&session_id, &terminal_id)
+    async fn kill_terminal(session_id: SessionId, terminal_id: TerminalId) -> Result<(), Error> {
+        client::kill_terminal(session_id, terminal_id).await
     }
 
-    fn release_terminal(session_id: SessionId, terminal_id: TerminalId) -> Result<(), Error> {
-        client::release_terminal(&session_id, &terminal_id)
+    async fn release_terminal(
+        session_id: SessionId,
+        terminal_id: TerminalId,
+    ) -> Result<(), Error> {
+        client::release_terminal(session_id, terminal_id).await
     }
 }
 

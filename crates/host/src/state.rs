@@ -74,7 +74,12 @@ pub enum ClientSink {
 /// async traits require `Send` futures even though the actor and all
 /// stages live on a single-threaded `LocalSet`, and the lock is
 /// uncontended in practice.
-pub type UpstreamHandle = std::sync::Arc<tokio::sync::Mutex<crate::wasm::WasmAgent>>;
+/// Shared handle to an upstream layer's wasm instance. `Weak` to avoid a
+/// strong-cycle with the downstream pointer (the chain owns each stage
+/// strongly via `downstream`; the upstream pointer is logically a back
+/// edge, so a weak reference is correct and prevents leaks at chain
+/// teardown).
+pub type UpstreamHandle = std::sync::Weak<tokio::sync::Mutex<crate::wasm::WasmAgent>>;
 
 /// Shared handle to the next stage's wasm instance. Defined here (rather
 /// than in `wasm.rs`) so `HostState` can hold one without a forward
