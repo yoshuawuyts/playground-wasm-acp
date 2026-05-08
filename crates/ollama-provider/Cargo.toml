@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wit-bindgen = { workspace = true, features = ["bitflags"] }
-wstd = { workspace = true, default-features = false, features = ["json", "wasip3"] }
+wstd = { workspace = true, default-features = false, features = ["json", "wasip2"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 futures = { workspace = true }

@@ -26,7 +26,7 @@ pub(super) async fn handle_initialize(
     responder: Responder<schema::InitializeResponse>,
 ) -> Result<(), AcpError> {
     // Throwaway instance: `initialize` carries no session state.
-    let agent = factory
+    let chain = factory
         .instantiate()
         .await
         .map_err(|e| translate::anyhow_to_acp("initialize: instantiate", e))?;
@@ -37,9 +37,8 @@ pub(super) async fn handle_initialize(
         "editor capabilities"
     );
     let wit_req = translate::init_request_schema_to_wit(req);
-    let result = agent
-        .lock()
-        .await
+    let result = chain
+        .head
         .call_initialize(wit_req)
         .await
         .map_err(|e| translate::trap_to_acp("initialize", e))?;
@@ -54,14 +53,13 @@ pub(super) async fn handle_authenticate(
 ) -> Result<(), AcpError> {
     // Throwaway instance: `authenticate` is stateless; the host doesn't
     // carry credentials between calls.
-    let agent = factory
+    let chain = factory
         .instantiate()
         .await
         .map_err(|e| translate::anyhow_to_acp("authenticate: instantiate", e))?;
     let wit_req = translate::authenticate_request_schema_to_wit(req);
-    let result = agent
-        .lock()
-        .await
+    let result = chain
+        .head
         .call_authenticate(wit_req)
         .await
         .map_err(|e| translate::trap_to_acp("authenticate", e))?;
@@ -83,21 +81,20 @@ pub(super) async fn handle_new_session(
     // Outbound `update-session` events emitted *during* `new-session` carry
     // the guest-minted id and route through the shared outbound channel,
     // so they reach the editor even before the registry has the entry.
-    let agent = factory
+    let chain = factory
         .instantiate_for_project(&req.cwd)
         .await
         .map_err(|e| translate::anyhow_to_acp("new-session: instantiate", e))?;
     let wit_req = translate::new_session_request_schema_to_wit(req);
-    let result = agent
-        .lock()
-        .await
+    let result = chain
+        .head
         .call_new_session(wit_req)
         .await
         .map_err(|e| translate::trap_to_acp("new-session", e))?;
     let resp = result.map_err(translate::wit_error_to_acp)?;
     debug!(session = %resp.session_id, "session/new");
     let session_id = resp.session_id.clone();
-    let (actor, handle) = SessionActor::new(agent, 8, registry.clone());
+    let (actor, handle) = SessionActor::new(chain, 8, registry.clone());
     tokio::task::spawn_local(actor.run());
     registry.insert(session_id, handle);
     responder.respond(translate::new_session_response_wit_to_schema(
@@ -114,19 +111,18 @@ pub(super) async fn handle_load_session(
 ) -> Result<(), AcpError> {
     let session_key = req.session_id.0.to_string();
     debug!(session = %session_key, "session/load");
-    let agent = factory
+    let chain = factory
         .instantiate_for_project(&req.cwd)
         .await
         .map_err(|e| translate::anyhow_to_acp("load-session: instantiate", e))?;
     let wit_req = translate::load_session_request_schema_to_wit(req);
-    let result = agent
-        .lock()
-        .await
+    let result = chain
+        .head
         .call_load_session(wit_req)
         .await
         .map_err(|e| translate::trap_to_acp("load-session", e))?;
     let resp = result.map_err(translate::wit_error_to_acp)?;
-    let (actor, handle) = SessionActor::new(agent, 8, registry.clone());
+    let (actor, handle) = SessionActor::new(chain, 8, registry.clone());
     tokio::task::spawn_local(actor.run());
     registry.insert(session_key, handle);
     responder.respond(translate::load_session_response_wit_to_schema(

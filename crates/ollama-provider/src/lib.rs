@@ -366,9 +366,7 @@ impl Guest for Agent {
         // isn't using tools.
         let session_id = req.session_id.clone();
         let model_clone = model.clone();
-        eprintln!("prompt: about to call supports_tools");
         let tools_supported = ollama::supports_tools(&model_clone).await.unwrap_or(false);
-        eprintln!("prompt: supports_tools={}", tools_supported);
         if !tools_supported {
             client::update_session(
                 session_id.clone(),

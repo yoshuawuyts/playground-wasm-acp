@@ -143,6 +143,7 @@ impl AgentGuest for Layer {
     }
 
     async fn prompt(req: PromptRequest) -> Result<PromptResponse, Error> {
+        eprintln!("uppercase-layer: prompt enter session={}", req.session_id);
         // Intercept `/shout` to toggle uppercase rewriting for the
         // remainder of this session.
         if is_shout_command(&req.prompt) {
@@ -163,7 +164,10 @@ impl AgentGuest for Layer {
                 stop_reason: StopReason::EndTurn,
             });
         }
-        agent::prompt(req).await
+        eprintln!("uppercase-layer: prompt forwarding downstream");
+        let r = agent::prompt(req).await;
+        eprintln!("uppercase-layer: prompt downstream returned ok={}", r.is_ok());
+        r
     }
 
     async fn cancel(session_id: SessionId) {
@@ -177,12 +181,14 @@ impl AgentGuest for Layer {
 
 impl ClientGuest for Layer {
     async fn update_session(session_id: SessionId, update: SessionUpdate) {
+        eprintln!("uppercase-layer: update_session enter");
         let rewritten = if SHOUT_ENABLED.load(Ordering::Relaxed) {
             uppercase_update(update)
         } else {
             update
         };
         client::update_session(session_id, rewritten).await;
+        eprintln!("uppercase-layer: update_session exit");
     }
 
     async fn request_permission(

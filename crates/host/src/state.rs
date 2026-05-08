@@ -41,9 +41,8 @@ pub struct HostState {
     pub client_sink: ClientSink,
     /// Next stage in the layer chain, if any. Populated for layer
     /// instances; `None` for the terminal provider. The `agent::Host`
-    /// impl on `HostState` forwards each imported-`agent` call to this
-    /// stage's exported `agent`. `Arc<tokio::sync::Mutex<_>>` because
-    /// wasmtime's bindgen-generated async traits require `Send` futures.
+    /// impl on `HostState` forwards each imported-`agent` call by sending
+    /// a message on this actor's channel.
     pub downstream: Option<DownstreamHandle>,
 }
 
@@ -60,24 +59,15 @@ pub enum ClientSink {
     Upstream(UpstreamHandle),
 }
 
-/// Shared handle to an upstream layer's wasm instance. `Weak` to avoid a
-/// strong-cycle with the downstream pointer (the chain owns each stage
-/// strongly via `downstream`; the upstream pointer is logically a back
-/// edge, so a weak reference is correct and prevents leaks at chain
-/// teardown).
-pub type UpstreamHandle = std::sync::Weak<tokio::sync::Mutex<crate::wasm::WasmAgent>>;
+/// Weak channel handle to the upstream layer's [`WasmActor`]. Weak so
+/// that the back-edge between paired stages doesn't keep either alive
+/// after the chain is dropped.
+pub type UpstreamHandle = crate::wasm_actor::WasmActorWeak;
 
-/// Shared handle to the next stage's wasm instance. Defined here (rather
-/// than in `wasm.rs`) so `HostState` can hold one without a forward
-/// reference cycle in the type definition.
-///
-/// `Arc<tokio::sync::Mutex<_>>` (rather than `Rc<RefCell<_>>`) because
-/// wasmtime's bindgen-generated async traits require `Send` futures, even
-/// though every stage in a chain ultimately runs on the same `LocalSet`
-/// thread. The mutex is uncontended in practice — only the upstream
-/// stage's host trait reaches for the downstream — so the lock is just a
-/// `Send` adapter.
-pub type DownstreamHandle = std::sync::Arc<tokio::sync::Mutex<crate::wasm::WasmAgent>>;
+/// Strong channel handle to the next stage's [`WasmActor`]. The chain
+/// owns each stage strongly via `downstream`; calls become messages on
+/// the channel — no mutex, no nested `run_concurrent`.
+pub type DownstreamHandle = crate::wasm_actor::WasmActor;
 
 impl WasiView for HostState {
     fn ctx(&mut self) -> WasiCtxView<'_> {

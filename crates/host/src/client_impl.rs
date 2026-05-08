@@ -2,6 +2,12 @@
 //! imports). With the WIT now using async functions, the bindgen output puts
 //! method bodies on the `HostWithStore` trait (static methods taking an
 //! `Accessor`); the original `Host` trait is just a `Send` marker.
+//!
+//! Routing: the topmost stage's `client_sink` is `Outbound`, sending events
+//! to the bridge task; intermediate stages route into the upstream layer's
+//! exported `client` interface via the per-stage [`crate::wasm_actor::WasmActor`].
+//! Sending a [`crate::wasm_actor::Cmd`] on the upstream actor's channel
+//! avoids any cross-store mutex or nested `run_concurrent`.
 
 use agent_client_protocol::Error as AcpError;
 use tokio::sync::{mpsc, oneshot};
@@ -9,7 +15,6 @@ use wasmtime::component::{Accessor, HasSelf};
 
 use crate::state::{ClientSink, HostState, OutboundEvent};
 use crate::translate;
-use crate::wasm::{Bindings, WasmAgent};
 use crate::yosh::acp::client;
 use crate::yosh::acp::errors::Error;
 use crate::yosh::acp::filesystem::{
@@ -47,72 +52,25 @@ async fn send_and_await<T>(
     }
 }
 
-fn trap_to_wit<T>(method: &'static str, res: wasmtime::Result<wasmtime::Result<Result<T, Error>>>) -> Result<T, Error> {
+fn upstream_gone<T>(method: &'static str) -> Result<T, Error> {
+    Err(translate::internal_error(&format!(
+        "upstream `client.{method}` gone"
+    )))
+}
+
+fn flatten_trap<T>(
+    method: &'static str,
+    res: wasmtime::Result<Result<T, Error>>,
+) -> Result<T, Error> {
     match res {
-        Ok(Ok(inner)) => inner,
-        Ok(Err(trap)) | Err(trap) => Err(translate::internal_error(&format!(
-            "upstream `{method}` trapped: {trap:#}"
+        Ok(inner) => inner,
+        Err(trap) => Err(translate::internal_error(&format!(
+            "upstream `client.{method}` trapped: {trap:#}"
         ))),
     }
 }
 
 impl client::Host for HostState {}
-
-// -----------------------------------------------------------------------------
-// client::HostWithStore — routes outbound client calls upward.
-// -----------------------------------------------------------------------------
-//
-// Same recursion-guard concern as the agent direction (see `wasm.rs`):
-// upstream calls are spawned onto a fresh tokio task so wasmtime's
-// per-task `run_concurrent` recursion check doesn't trip.
-
-macro_rules! upstream_call {
-    ($method:literal, $accessor:ident, $req:ident, $call:ident) => {{
-        let sink = $accessor.with(|mut a| a.get().client_sink.clone());
-        async move {
-            match sink {
-                ClientSink::Outbound(_) => Err(translate::method_not_found(concat!(
-                    $method,
-                    " not wired"
-                ))),
-                ClientSink::Upstream(weak) => {
-                    let Some(upstream) = weak.upgrade() else {
-                        return Err(translate::internal_error(concat!(
-                            "upstream `client.",
-                            $method,
-                            "` gone"
-                        )));
-                    };
-                    let join = tokio::task::spawn(async move {
-                        let mut guard = upstream.lock().await;
-                        let WasmAgent { store, bindings } = &mut *guard;
-                        match bindings {
-                            Bindings::Layer(b) => {
-                                let client = b.yosh_acp_client();
-                                store
-                                    .run_concurrent(async move |a| client.$call(a, $req).await)
-                                    .await
-                            }
-                            Bindings::Provider(_) => Ok(Ok(Err(translate::internal_error(concat!(
-                                "host bug: routed `client.",
-                                $method,
-                                "` to a provider stage"
-                            ))))),
-                        }
-                    })
-                    .await;
-                    let res = match join {
-                        Ok(r) => r,
-                        Err(e) => Err(wasmtime::Error::msg(format!(
-                            "upstream task join error: {e}"
-                        ))),
-                    };
-                    trap_to_wit($method, res)
-                }
-            }
-        }
-    }};
-}
 
 impl client::HostWithStore for HasSelf<HostState> {
     fn update_session<T: Send>(
@@ -135,29 +93,7 @@ impl client::HostWithStore for HasSelf<HostState> {
                         tracing::warn!("upstream `client.update-session` gone");
                         return;
                     };
-                    let join = tokio::task::spawn(async move {
-                        let mut guard = upstream.lock().await;
-                        let WasmAgent { store, bindings } = &mut *guard;
-                        match bindings {
-                            Bindings::Layer(b) => {
-                                let client = b.yosh_acp_client();
-                                store
-                                    .run_concurrent(async move |a| {
-                                        client.call_update_session(a, session_id, update).await
-                                    })
-                                    .await
-                            }
-                            Bindings::Provider(_) => Err(wasmtime::Error::msg(
-                                "host bug: routed `client.update-session` to a provider stage",
-                            )),
-                        }
-                    })
-                    .await;
-                    if let Err(e) = join {
-                        tracing::warn!(error = %e, "upstream `client.update-session` task join error");
-                    } else if let Ok(Err(trap)) = join {
-                        tracing::warn!(error = %trap, "upstream `client.update-session` trapped");
-                    } else if let Ok(Ok(Err(trap))) = join {
+                    if let Err(trap) = upstream.call_update_session(session_id, update).await {
                         tracing::warn!(error = %trap, "upstream `client.update-session` trapped");
                     }
                 }
@@ -170,7 +106,20 @@ impl client::HostWithStore for HasSelf<HostState> {
         req: RequestPermissionRequest,
     ) -> impl ::core::future::Future<Output = Result<RequestPermissionResponse, Error>> + Send
     {
-        upstream_call!("request-permission", accessor, req, call_request_permission)
+        let sink = accessor.with(|mut a| a.get().client_sink.clone());
+        async move {
+            match sink {
+                ClientSink::Outbound(_) => {
+                    Err(translate::method_not_found("request-permission not wired"))
+                }
+                ClientSink::Upstream(weak) => {
+                    let Some(upstream) = weak.upgrade() else {
+                        return upstream_gone("request-permission");
+                    };
+                    flatten_trap("request-permission", upstream.call_request_permission(req).await)
+                }
+            }
+        }
     }
 
     fn read_text_file<T: Send>(
@@ -192,35 +141,9 @@ impl client::HostWithStore for HasSelf<HostState> {
                 }
                 ClientSink::Upstream(weak) => {
                     let Some(upstream) = weak.upgrade() else {
-                        return Err(translate::internal_error(
-                            "upstream `client.read-text-file` gone",
-                        ));
+                        return upstream_gone("read-text-file");
                     };
-                    let join = tokio::task::spawn(async move {
-                        let mut guard = upstream.lock().await;
-                        let WasmAgent { store, bindings } = &mut *guard;
-                        match bindings {
-                            Bindings::Layer(b) => {
-                                let client = b.yosh_acp_client();
-                                store
-                                    .run_concurrent(async move |a| {
-                                        client.call_read_text_file(a, req).await
-                                    })
-                                    .await
-                            }
-                            Bindings::Provider(_) => Ok(Ok(Err(translate::internal_error(
-                                "host bug: routed `client.read-text-file` to a provider stage",
-                            )))),
-                        }
-                    })
-                    .await;
-                    let res = match join {
-                        Ok(r) => r,
-                        Err(e) => Err(wasmtime::Error::msg(format!(
-                            "upstream task join error: {e}"
-                        ))),
-                    };
-                    trap_to_wit("read-text-file", res)
+                    flatten_trap("read-text-file", upstream.call_read_text_file(req).await)
                 }
             }
         }
@@ -245,35 +168,9 @@ impl client::HostWithStore for HasSelf<HostState> {
                 }
                 ClientSink::Upstream(weak) => {
                     let Some(upstream) = weak.upgrade() else {
-                        return Err(translate::internal_error(
-                            "upstream `client.write-text-file` gone",
-                        ));
+                        return upstream_gone("write-text-file");
                     };
-                    let join = tokio::task::spawn(async move {
-                        let mut guard = upstream.lock().await;
-                        let WasmAgent { store, bindings } = &mut *guard;
-                        match bindings {
-                            Bindings::Layer(b) => {
-                                let client = b.yosh_acp_client();
-                                store
-                                    .run_concurrent(async move |a| {
-                                        client.call_write_text_file(a, req).await
-                                    })
-                                    .await
-                            }
-                            Bindings::Provider(_) => Ok(Ok(Err(translate::internal_error(
-                                "host bug: routed `client.write-text-file` to a provider stage",
-                            )))),
-                        }
-                    })
-                    .await;
-                    let res = match join {
-                        Ok(r) => r,
-                        Err(e) => Err(wasmtime::Error::msg(format!(
-                            "upstream task join error: {e}"
-                        ))),
-                    };
-                    trap_to_wit("write-text-file", res)
+                    flatten_trap("write-text-file", upstream.call_write_text_file(req).await)
                 }
             }
         }
@@ -283,7 +180,20 @@ impl client::HostWithStore for HasSelf<HostState> {
         accessor: &Accessor<T, Self>,
         req: CreateTerminalRequest,
     ) -> impl ::core::future::Future<Output = Result<CreateTerminalResponse, Error>> + Send {
-        upstream_call!("create-terminal", accessor, req, call_create_terminal)
+        let sink = accessor.with(|mut a| a.get().client_sink.clone());
+        async move {
+            match sink {
+                ClientSink::Outbound(_) => {
+                    Err(translate::method_not_found("create-terminal not wired"))
+                }
+                ClientSink::Upstream(weak) => {
+                    let Some(upstream) = weak.upgrade() else {
+                        return upstream_gone("create-terminal");
+                    };
+                    flatten_trap("create-terminal", upstream.call_create_terminal(req).await)
+                }
+            }
+        }
     }
 
     fn get_terminal_output<T: Send>(
@@ -299,37 +209,14 @@ impl client::HostWithStore for HasSelf<HostState> {
                 )),
                 ClientSink::Upstream(weak) => {
                     let Some(upstream) = weak.upgrade() else {
-                        return Err(translate::internal_error(
-                            "upstream `client.get-terminal-output` gone",
-                        ));
+                        return upstream_gone("get-terminal-output");
                     };
-                    let join = tokio::task::spawn(async move {
-                        let mut guard = upstream.lock().await;
-                        let WasmAgent { store, bindings } = &mut *guard;
-                        match bindings {
-                            Bindings::Layer(b) => {
-                                let client = b.yosh_acp_client();
-                                store
-                                    .run_concurrent(async move |a| {
-                                        client
-                                            .call_get_terminal_output(a, session_id, terminal_id)
-                                            .await
-                                    })
-                                    .await
-                            }
-                            Bindings::Provider(_) => Ok(Ok(Err(translate::internal_error(
-                                "host bug: routed `client.get-terminal-output` to a provider stage",
-                            )))),
-                        }
-                    })
-                    .await;
-                    let res = match join {
-                        Ok(r) => r,
-                        Err(e) => Err(wasmtime::Error::msg(format!(
-                            "upstream task join error: {e}"
-                        ))),
-                    };
-                    trap_to_wit("get-terminal-output", res)
+                    flatten_trap(
+                        "get-terminal-output",
+                        upstream
+                            .call_get_terminal_output(session_id, terminal_id)
+                            .await,
+                    )
                 }
             }
         }
@@ -348,37 +235,14 @@ impl client::HostWithStore for HasSelf<HostState> {
                 )),
                 ClientSink::Upstream(weak) => {
                     let Some(upstream) = weak.upgrade() else {
-                        return Err(translate::internal_error(
-                            "upstream `client.wait-for-terminal-exit` gone",
-                        ));
+                        return upstream_gone("wait-for-terminal-exit");
                     };
-                    let join = tokio::task::spawn(async move {
-                        let mut guard = upstream.lock().await;
-                        let WasmAgent { store, bindings } = &mut *guard;
-                        match bindings {
-                            Bindings::Layer(b) => {
-                                let client = b.yosh_acp_client();
-                                store
-                                    .run_concurrent(async move |a| {
-                                        client
-                                            .call_wait_for_terminal_exit(a, session_id, terminal_id)
-                                            .await
-                                    })
-                                    .await
-                            }
-                            Bindings::Provider(_) => Ok(Ok(Err(translate::internal_error(
-                                "host bug: routed `client.wait-for-terminal-exit` to a provider stage",
-                            )))),
-                        }
-                    })
-                    .await;
-                    let res = match join {
-                        Ok(r) => r,
-                        Err(e) => Err(wasmtime::Error::msg(format!(
-                            "upstream task join error: {e}"
-                        ))),
-                    };
-                    trap_to_wit("wait-for-terminal-exit", res)
+                    flatten_trap(
+                        "wait-for-terminal-exit",
+                        upstream
+                            .call_wait_for_terminal_exit(session_id, terminal_id)
+                            .await,
+                    )
                 }
             }
         }
@@ -397,35 +261,12 @@ impl client::HostWithStore for HasSelf<HostState> {
                 }
                 ClientSink::Upstream(weak) => {
                     let Some(upstream) = weak.upgrade() else {
-                        return Err(translate::internal_error(
-                            "upstream `client.kill-terminal` gone",
-                        ));
+                        return upstream_gone("kill-terminal");
                     };
-                    let join = tokio::task::spawn(async move {
-                        let mut guard = upstream.lock().await;
-                        let WasmAgent { store, bindings } = &mut *guard;
-                        match bindings {
-                            Bindings::Layer(b) => {
-                                let client = b.yosh_acp_client();
-                                store
-                                    .run_concurrent(async move |a| {
-                                        client.call_kill_terminal(a, session_id, terminal_id).await
-                                    })
-                                    .await
-                            }
-                            Bindings::Provider(_) => Ok(Ok(Err(translate::internal_error(
-                                "host bug: routed `client.kill-terminal` to a provider stage",
-                            )))),
-                        }
-                    })
-                    .await;
-                    let res = match join {
-                        Ok(r) => r,
-                        Err(e) => Err(wasmtime::Error::msg(format!(
-                            "upstream task join error: {e}"
-                        ))),
-                    };
-                    trap_to_wit("kill-terminal", res)
+                    flatten_trap(
+                        "kill-terminal",
+                        upstream.call_kill_terminal(session_id, terminal_id).await,
+                    )
                 }
             }
         }
@@ -444,37 +285,14 @@ impl client::HostWithStore for HasSelf<HostState> {
                 )),
                 ClientSink::Upstream(weak) => {
                     let Some(upstream) = weak.upgrade() else {
-                        return Err(translate::internal_error(
-                            "upstream `client.release-terminal` gone",
-                        ));
+                        return upstream_gone("release-terminal");
                     };
-                    let join = tokio::task::spawn(async move {
-                        let mut guard = upstream.lock().await;
-                        let WasmAgent { store, bindings } = &mut *guard;
-                        match bindings {
-                            Bindings::Layer(b) => {
-                                let client = b.yosh_acp_client();
-                                store
-                                    .run_concurrent(async move |a| {
-                                        client
-                                            .call_release_terminal(a, session_id, terminal_id)
-                                            .await
-                                    })
-                                    .await
-                            }
-                            Bindings::Provider(_) => Ok(Ok(Err(translate::internal_error(
-                                "host bug: routed `client.release-terminal` to a provider stage",
-                            )))),
-                        }
-                    })
-                    .await;
-                    let res = match join {
-                        Ok(r) => r,
-                        Err(e) => Err(wasmtime::Error::msg(format!(
-                            "upstream task join error: {e}"
-                        ))),
-                    };
-                    trap_to_wit("release-terminal", res)
+                    flatten_trap(
+                        "release-terminal",
+                        upstream
+                            .call_release_terminal(session_id, terminal_id)
+                            .await,
+                    )
                 }
             }
         }

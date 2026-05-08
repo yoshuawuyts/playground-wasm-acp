@@ -26,6 +26,7 @@ mod translate;
 mod utils;
 mod wasi_log;
 mod wasm;
+mod wasm_actor;
 
 // Generate wasmtime component bindings for both ACP worlds.
 //
@@ -272,7 +273,7 @@ fn init_logging(args: &Args) -> Result<()> {
         let directive = args
             .log_filter
             .clone()
-            .unwrap_or_else(|| format!("host={}", args.log_level.as_str()));
+            .unwrap_or_else(|| format!("host={},wasm_stderr=info", args.log_level.as_str()));
         tracing_subscriber::EnvFilter::new(directive)
     });
 

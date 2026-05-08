@@ -323,6 +323,7 @@ struct ShowResponse {
 /// to plain chat instead of failing the prompt turn.
 pub async fn supports_tools(model: &str) -> Result<bool, String> {
     let url = format!("{}/api/show", base_url());
+    eprintln!("supports_tools: building req url={url}");
     let body = Body::from_json(&ShowRequest { model }).map_err(|e| format!("encode: {e}"))?;
     let req = Request::builder()
         .method(Method::POST)
@@ -330,10 +331,12 @@ pub async fn supports_tools(model: &str) -> Result<bool, String> {
         .header("content-type", "application/json")
         .body(body)
         .map_err(|e| format!("build request: {e}"))?;
+    eprintln!("supports_tools: sending");
     let mut resp = Client::new()
         .send(req)
         .await
         .map_err(|e| format!("send: {e}"))?;
+    eprintln!("supports_tools: response status={}", resp.status());
     if !resp.status().is_success() {
         return Ok(false);
     }
@@ -342,5 +345,6 @@ pub async fn supports_tools(model: &str) -> Result<bool, String> {
         .json::<ShowResponse>()
         .await
         .map_err(|e| format!("decode show: {e}"))?;
+    eprintln!("supports_tools: body decoded");
     Ok(body.capabilities.iter().any(|c| c == "tools"))
 }
