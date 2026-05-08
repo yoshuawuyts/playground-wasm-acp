@@ -1,0 +1,19 @@
+[package]
+name = "e2e-tests"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+anyhow = "1"
+serde_json = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+wiremock = "0.6"
+tempfile = "3"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

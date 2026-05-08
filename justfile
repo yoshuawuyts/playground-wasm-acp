@@ -16,6 +16,12 @@ build-layer:
 build-host:
     cargo build -p host
 
+# Run the end-to-end smoke tests. Builds wasm components + host first.
+# Tests run serial-by-default to keep host stderr ordering legible; pass
+# `-- --test-threads=N` after the recipe to override.
+test-e2e: build
+    cargo test -p e2e-tests -- --test-threads=1 --nocapture
+
 # Build everything, then run the host with the uppercase layer wrapping the
 # ollama provider. Extra args are forwarded to stdin (use `just run < fixture.jsonl`).
 run: build

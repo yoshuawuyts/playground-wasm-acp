@@ -157,8 +157,6 @@ struct CmdTask {
 impl AccessorTask<HostState, HasSelf<HostState>> for CmdTask {
     async fn run(self, accessor: &Accessor<HostState>) -> wasmtime::Result<()> {
         let CmdTask { bindings, cmd } = self;
-        let label = cmd_label(&cmd);
-        tracing::debug!(cmd = label, "CmdTask: enter");
         match cmd {
             // -- agent --
             Cmd::Initialize { req, reply } => {
@@ -300,32 +298,7 @@ impl AccessorTask<HostState, HasSelf<HostState>> for CmdTask {
                 let _ = reply.send(res);
             }
         }
-        tracing::debug!(cmd = label, "CmdTask: exit");
         Ok(())
-    }
-}
-
-fn cmd_label(cmd: &Cmd) -> &'static str {
-    match cmd {
-        Cmd::Initialize { .. } => "initialize",
-        Cmd::Authenticate { .. } => "authenticate",
-        Cmd::NewSession { .. } => "new-session",
-        Cmd::LoadSession { .. } => "load-session",
-        Cmd::ListSessions { .. } => "list-sessions",
-        Cmd::ResumeSession { .. } => "resume-session",
-        Cmd::SetSessionMode { .. } => "set-session-mode",
-        Cmd::Prompt { .. } => "prompt",
-        Cmd::CloseSession { .. } => "close-session",
-        Cmd::Cancel { .. } => "cancel",
-        Cmd::UpdateSession { .. } => "update-session",
-        Cmd::RequestPermission { .. } => "request-permission",
-        Cmd::ReadTextFile { .. } => "read-text-file",
-        Cmd::WriteTextFile { .. } => "write-text-file",
-        Cmd::CreateTerminal { .. } => "create-terminal",
-        Cmd::GetTerminalOutput { .. } => "get-terminal-output",
-        Cmd::WaitForTerminalExit { .. } => "wait-for-terminal-exit",
-        Cmd::KillTerminal { .. } => "kill-terminal",
-        Cmd::ReleaseTerminal { .. } => "release-terminal",
     }
 }
 
@@ -372,24 +345,17 @@ impl WasmActor {
     ) -> tokio::task::JoinHandle<wasmtime::Result<()>> {
         let bindings = Arc::new(bindings);
         tokio::task::spawn(async move {
-            tracing::debug!("wasm actor loop: starting run_concurrent");
-            let r = store
+            store
                 .run_concurrent(async move |accessor| -> wasmtime::Result<()> {
-                    tracing::debug!("wasm actor loop: entered run_concurrent body");
                     while let Some(cmd) = rx.recv().await {
-                        let label = cmd_label(&cmd);
-                        tracing::debug!(cmd = label, "wasm actor: dispatching cmd");
                         accessor.spawn(CmdTask {
                             bindings: bindings.clone(),
                             cmd,
                         });
                     }
-                    tracing::debug!("wasm actor loop: channel closed, exiting");
                     Ok(())
                 })
-                .await;
-            tracing::debug!(?r, "wasm actor loop: run_concurrent returned");
-            r?
+                .await?
         })
     }
 

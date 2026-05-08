@@ -320,7 +320,6 @@ impl Guest for Agent {
     }
 
     async fn prompt(req: PromptRequest) -> Result<PromptResponse, Error> {
-        eprintln!("prompt: enter session={}", req.session_id);
         let user_text = extract_user_text(&req.prompt);
         if user_text.is_empty() {
             return Err(err(

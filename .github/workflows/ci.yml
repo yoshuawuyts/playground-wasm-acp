@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Cache cargo registry & target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (host + wasm components)
+        run: just build
+
+      - name: Host unit tests
+        run: cargo test -p host
+
+      - name: End-to-end smoke tests
+        run: just test-e2e
+
+      - name: Upload host log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-stderr
+          path: |
+            **/host-*.log
+            target/debug/build/**/output
+          if-no-files-found: ignore
