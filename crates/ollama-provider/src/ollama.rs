@@ -211,21 +211,22 @@ pub struct ChatTurn {
 /// `&[]` for plain chat. Models that don't support tools simply ignore
 /// the field — but you can probe with [`supports_tools`] to skip sending
 /// the array entirely.
-pub async fn chat<F>(
-    model: &str,
-    history: &[Message],
-    tools: &[OllamaTool],
+pub async fn chat<F, Fut>(
+    model: String,
+    history: Vec<Message>,
+    tools: Vec<OllamaTool>,
     mut on_chunk: F,
 ) -> Result<ChatTurn, String>
 where
-    F: FnMut(&str),
+    F: FnMut(String) -> Fut,
+    Fut: core::future::Future<Output = ()>,
 {
     let url = endpoint();
     let body = Body::from_json(&ChatRequestOwned {
-        model,
-        messages: history,
+        model: &model,
+        messages: &history,
         stream: true,
-        tools,
+        tools: &tools,
     })
     .map_err(|e| format!("encode: {e}"))?;
 
@@ -252,6 +253,7 @@ where
     }
 
     let mut stream = resp.into_body().into_boxed_body().into_data_stream();
+    eprintln!("chat: got body stream");
     let mut buf: Vec<u8> = Vec::new();
     let mut content = String::new();
     let mut tool_calls: Vec<OllamaToolCall> = Vec::new();
@@ -269,7 +271,7 @@ where
                 serde_json::from_slice(line).map_err(|e| format!("decode chunk: {e}"))?;
             if let Some(msg) = chunk.message {
                 if !msg.content.is_empty() {
-                    on_chunk(&msg.content);
+                    on_chunk(msg.content.clone()).await;
                     content.push_str(&msg.content);
                 }
                 if !msg.tool_calls.is_empty() {
@@ -286,7 +288,7 @@ where
         if let Ok(chunk) = serde_json::from_slice::<StreamChunk>(&buf) {
             if let Some(msg) = chunk.message {
                 if !msg.content.is_empty() {
-                    on_chunk(&msg.content);
+                    on_chunk(msg.content.clone()).await;
                     content.push_str(&msg.content);
                 }
                 if !msg.tool_calls.is_empty() {

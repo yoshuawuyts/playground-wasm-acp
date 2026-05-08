@@ -572,9 +572,12 @@ impl WasmAgent {
         let mut linker: Linker<HostState> = Linker::new(engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
+        wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
 
         let mut wasi = WasiCtxBuilder::new();
-        wasi.inherit_stderr().inherit_stdout().inherit_network();
+        wasi.stderr(crate::wasi_log::TracingStream::new("stderr"))
+            .stdout(crate::wasi_log::TracingStream::new("stdout"))
+            .inherit_network();
         if let Some(dir) = data_dir {
             // `/data` is the component's private read-write state. File
             // access to the user's workspace deliberately *not* preopened:
@@ -815,13 +818,18 @@ macro_rules! downstream_call {
     ($method:literal, $accessor:ident, $req:ident, $call:ident) => {{
         let ds = $accessor.with(|mut a| a.get().downstream.clone());
         async move {
+            tracing::debug!(method = $method, "layer->downstream forward: enter");
             let Some(ds) = ds else {
+                tracing::warn!(method = $method, "layer->downstream forward: no downstream");
                 return no_downstream($method);
             };
+            tracing::debug!(method = $method, "layer->downstream forward: spawning task");
             let join = tokio::task::spawn(async move {
+                tracing::debug!(method = $method, "layer->downstream task: locking");
                 let mut guard = ds.lock().await;
+                tracing::debug!(method = $method, "layer->downstream task: locked, calling");
                 let WasmAgent { store, bindings } = &mut *guard;
-                match bindings {
+                let res = match bindings {
                     Bindings::Provider(b) => {
                         let agent = b.yosh_acp_agent();
                         store
@@ -834,9 +842,12 @@ macro_rules! downstream_call {
                             .run_concurrent(async move |a| agent.$call(a, $req).await)
                             .await
                     }
-                }
+                };
+                tracing::debug!(method = $method, "layer->downstream task: returned");
+                res
             })
             .await;
+            tracing::debug!(method = $method, "layer->downstream forward: task joined");
             let res = match join {
                 Ok(r) => r,
                 Err(e) => Err(wasmtime::Error::msg(format!(

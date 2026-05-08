@@ -24,6 +24,7 @@ mod client_impl;
 mod state;
 mod translate;
 mod utils;
+mod wasi_log;
 mod wasm;
 
 // Generate wasmtime component bindings for both ACP worlds.

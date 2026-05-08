@@ -99,7 +99,7 @@ fn build_modes_state_from_listed(
 
 async fn build_modes_state(preferred_model: Option<&str>) -> (SessionModeState, String) {
     let default = ollama::default_model();
-    let listed = match wstd::runtime::block_on(ollama::list_models()) {
+    let listed = match ollama::list_models().await {
         Ok(models) if !models.is_empty() => models,
         Ok(_) => {
             eprintln!("ollama returned no models; using default");
@@ -320,6 +320,7 @@ impl Guest for Agent {
     }
 
     async fn prompt(req: PromptRequest) -> Result<PromptResponse, Error> {
+        eprintln!("prompt: enter session={}", req.session_id);
         let user_text = extract_user_text(&req.prompt);
         if user_text.is_empty() {
             return Err(err(
@@ -364,8 +365,10 @@ impl Guest for Agent {
         // one-time thought chunk so users understand why their model
         // isn't using tools.
         let session_id = req.session_id.clone();
-        let tools_supported =
-            wstd::runtime::block_on(ollama::supports_tools(&model)).unwrap_or(false);
+        let model_clone = model.clone();
+        eprintln!("prompt: about to call supports_tools");
+        let tools_supported = ollama::supports_tools(&model_clone).await.unwrap_or(false);
+        eprintln!("prompt: supports_tools={}", tools_supported);
         if !tools_supported {
             client::update_session(
                 session_id.clone(),
@@ -399,30 +402,25 @@ impl Guest for Agent {
             turns_remaining -= 1;
 
             let session_id_chunk = session_id.clone();
-            // Buffer streaming chunks during the wstd-driven HTTP call;
-            // we can't `await` wasmtime-side futures (like
-            // `client::update_session`) from inside `wstd::block_on`
-            // because the two runtimes don't drive each other. After
-            // `block_on` returns we emit the buffered chunks.
-            let chunks: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
-            let turn = wstd::runtime::block_on(ollama::chat(
-                &model,
-                &history,
-                &advertised_tools,
+            let turn = ollama::chat(
+                model.clone(),
+                history.clone(),
+                advertised_tools.clone(),
                 |chunk| {
-                    chunks.borrow_mut().push(chunk.to_string());
+                    let sid = session_id_chunk.clone();
+                    async move {
+                        client::update_session(
+                            sid,
+                            SessionUpdate::AgentMessageChunk(ContentBlock::Text(TextContent {
+                                text: chunk,
+                            })),
+                        )
+                        .await;
+                    }
                 },
-            ))
+            )
+            .await
             .map_err(|e| err(ErrorCode::InternalError, &format!("ollama: {e}")))?;
-            for chunk in chunks.into_inner() {
-                client::update_session(
-                    session_id_chunk.clone(),
-                    SessionUpdate::AgentMessageChunk(ContentBlock::Text(TextContent {
-                        text: chunk,
-                    })),
-                )
-                .await;
-            }
 
             // Persist the assistant turn (text + any tool-call requests)
             // back into history so the next ollama call sees it.

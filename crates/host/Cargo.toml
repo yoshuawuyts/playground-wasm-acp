@@ -16,7 +16,7 @@ futures = { workspace = true }
 futures-concurrency = { workspace = true }
 wasmtime = { workspace = true, features = ["component-model", "async", "component-model-async"] }
 wasmtime-wasi = { workspace = true }
-wasmtime-wasi-http = { workspace = true }
+wasmtime-wasi-http = { workspace = true, features = ["p3"] }
 agent-client-protocol = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

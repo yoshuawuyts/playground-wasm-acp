@@ -98,6 +98,16 @@ impl WasiHttpView for HostState {
     }
 }
 
+impl wasmtime_wasi_http::p3::WasiHttpView for HostState {
+    fn http(&mut self) -> wasmtime_wasi_http::p3::WasiHttpCtxView<'_> {
+        wasmtime_wasi_http::p3::WasiHttpCtxView {
+            ctx: &mut self.http,
+            table: &mut self.table,
+            hooks: Default::default(),
+        }
+    }
+}
+
 impl crate::yosh::acp::errors::Host for HostState {}
 impl crate::yosh::acp::sessions::Host for HostState {}
 impl crate::yosh::acp::content::Host for HostState {}
