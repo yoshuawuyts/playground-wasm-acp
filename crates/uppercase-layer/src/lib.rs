@@ -49,8 +49,7 @@ static SHOUT_ENABLED: AtomicBool = AtomicBool::new(false);
 async fn advertise_commands(session_id: &SessionId) {
     let cmds = vec![AvailableCommand {
         name: "shout".to_string(),
-        description: "Toggle uppercase rewriting of agent output for this session."
-            .to_string(),
+        description: "Toggle uppercase rewriting of agent output for this session.".to_string(),
         input: None,
     }];
     client::update_session(
@@ -149,9 +148,9 @@ impl AgentGuest for Layer {
         if is_shout_command(&req.prompt) {
             let now_on = !SHOUT_ENABLED.fetch_xor(true, Ordering::Relaxed);
             let msg = if now_on {
-                "I AM VERY CALM RIGHT NOW!"
+                "CAPS LOCK ENGAGED!"
             } else {
-                "ok, I've calmed down"
+                "no more capsie lock :)"
             };
             client::update_session(
                 req.session_id.clone(),
@@ -166,7 +165,10 @@ impl AgentGuest for Layer {
         }
         eprintln!("uppercase-layer: prompt forwarding downstream");
         let r = agent::prompt(req).await;
-        eprintln!("uppercase-layer: prompt downstream returned ok={}", r.is_ok());
+        eprintln!(
+            "uppercase-layer: prompt downstream returned ok={}",
+            r.is_ok()
+        );
         r
     }
 
@@ -227,10 +229,7 @@ impl ClientGuest for Layer {
         client::kill_terminal(session_id, terminal_id).await
     }
 
-    async fn release_terminal(
-        session_id: SessionId,
-        terminal_id: TerminalId,
-    ) -> Result<(), Error> {
+    async fn release_terminal(session_id: SessionId, terminal_id: TerminalId) -> Result<(), Error> {
         client::release_terminal(session_id, terminal_id).await
     }
 }

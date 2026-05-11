@@ -104,8 +104,7 @@ impl client::HostWithStore for HasSelf<HostState> {
     fn request_permission<T: Send>(
         accessor: &Accessor<T, Self>,
         req: RequestPermissionRequest,
-    ) -> impl ::core::future::Future<Output = Result<RequestPermissionResponse, Error>> + Send
-    {
+    ) -> impl ::core::future::Future<Output = Result<RequestPermissionResponse, Error>> + Send {
         let sink = accessor.with(|mut a| a.get().client_sink.clone());
         async move {
             match sink {
@@ -116,7 +115,10 @@ impl client::HostWithStore for HasSelf<HostState> {
                     let Some(upstream) = weak.upgrade() else {
                         return upstream_gone("request-permission");
                     };
-                    flatten_trap("request-permission", upstream.call_request_permission(req).await)
+                    flatten_trap(
+                        "request-permission",
+                        upstream.call_request_permission(req).await,
+                    )
                 }
             }
         }

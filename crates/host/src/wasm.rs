@@ -31,6 +31,7 @@ use wasmtime::{Engine, Store};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 use wasmtime_wasi_http::WasiHttpCtx;
 
+use crate::secrets::SecretsRegistry;
 use crate::state::{ClientSink, DownstreamHandle, HostState, OutboundEvent};
 use crate::wasm_actor::{Bindings, WasmActor};
 use crate::yosh::acp::errors::Error;
@@ -90,6 +91,7 @@ pub struct SessionFactory {
     layers: Vec<Stage>,
     outbound: mpsc::Sender<OutboundEvent>,
     data_root: PathBuf,
+    secrets: Arc<SecretsRegistry>,
 }
 
 impl SessionFactory {
@@ -99,6 +101,7 @@ impl SessionFactory {
         layers: Vec<Stage>,
         outbound: mpsc::Sender<OutboundEvent>,
         data_root: PathBuf,
+        secrets: Arc<SecretsRegistry>,
     ) -> Self {
         Self {
             engine,
@@ -106,6 +109,7 @@ impl SessionFactory {
             layers,
             outbound,
             data_root,
+            secrets,
         }
     }
 
@@ -182,6 +186,8 @@ impl SessionFactory {
                 client_sink,
                 provider_data.as_deref(),
                 None,
+                &self.provider.component_id,
+                self.secrets.clone(),
             )
             .await?;
             let rx = receivers.remove(0); // own provider rx
@@ -211,6 +217,8 @@ impl SessionFactory {
                 client_sink,
                 data.as_deref(),
                 Some(downstream),
+                &stage.component_id,
+                self.secrets.clone(),
             )
             .await?;
             // We pop the front of `receivers` each iteration; provider
@@ -221,13 +229,17 @@ impl SessionFactory {
         }
 
         let head = actors.pop().expect("at least one stage");
-        Ok(ChainHandle { head, _joins: joins })
+        Ok(ChainHandle {
+            head,
+            _joins: joins,
+        })
     }
 }
 
 /// Build a wasm component instance for one stage: configure WASI,
 /// instantiate against the appropriate world's linker, and return the
 /// store + bindings ready to be handed to a [`WasmActor`] loop.
+#[allow(clippy::too_many_arguments)]
 async fn build_stage(
     engine: &Engine,
     component: &Component,
@@ -235,6 +247,8 @@ async fn build_stage(
     client_sink: ClientSink,
     data_dir: Option<&std::path::Path>,
     downstream: Option<DownstreamHandle>,
+    component_id: &str,
+    secrets: Arc<SecretsRegistry>,
 ) -> Result<(Store<HostState>, Bindings)> {
     let mut linker: Linker<HostState> = Linker::new(engine);
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
@@ -244,8 +258,7 @@ async fn build_stage(
     let mut wasi = WasiCtxBuilder::new();
     wasi.stderr(crate::wasi_log::TracingStream::new("stderr"))
         .stdout(crate::wasi_log::TracingStream::new("stdout"))
-        .inherit_network()
-        .inherit_env();
+        .inherit_network();
     if let Some(dir) = data_dir {
         wasi.preopened_dir(dir, "/data", DirPerms::all(), FilePerms::all())?;
     }
@@ -255,6 +268,8 @@ async fn build_stage(
         table: ResourceTable::new(),
         client_sink,
         downstream,
+        component_id: component_id.to_string(),
+        secrets,
     };
     let mut store = Store::new(engine, state);
 
@@ -539,7 +554,9 @@ impl layer_agent::HostWithStore for wasmtime::component::HasSelf<HostState> {
     ) -> impl ::core::future::Future<Output = Result<InitializeResponse, Error>> + Send {
         let ds = accessor.with(|mut a| a.get().downstream.clone());
         async move {
-            let Some(ds) = ds else { return no_downstream("initialize"); };
+            let Some(ds) = ds else {
+                return no_downstream("initialize");
+            };
             flatten_downstream("initialize", ds.call_initialize(req).await)
         }
     }
@@ -550,7 +567,9 @@ impl layer_agent::HostWithStore for wasmtime::component::HasSelf<HostState> {
     ) -> impl ::core::future::Future<Output = Result<(), Error>> + Send {
         let ds = accessor.with(|mut a| a.get().downstream.clone());
         async move {
-            let Some(ds) = ds else { return no_downstream("authenticate"); };
+            let Some(ds) = ds else {
+                return no_downstream("authenticate");
+            };
             flatten_downstream("authenticate", ds.call_authenticate(req).await)
         }
     }
@@ -561,7 +580,9 @@ impl layer_agent::HostWithStore for wasmtime::component::HasSelf<HostState> {
     ) -> impl ::core::future::Future<Output = Result<NewSessionResponse, Error>> + Send {
         let ds = accessor.with(|mut a| a.get().downstream.clone());
         async move {
-            let Some(ds) = ds else { return no_downstream("new-session"); };
+            let Some(ds) = ds else {
+                return no_downstream("new-session");
+            };
             flatten_downstream("new-session", ds.call_new_session(req).await)
         }
     }
@@ -572,7 +593,9 @@ impl layer_agent::HostWithStore for wasmtime::component::HasSelf<HostState> {
     ) -> impl ::core::future::Future<Output = Result<LoadSessionResponse, Error>> + Send {
         let ds = accessor.with(|mut a| a.get().downstream.clone());
         async move {
-            let Some(ds) = ds else { return no_downstream("load-session"); };
+            let Some(ds) = ds else {
+                return no_downstream("load-session");
+            };
             flatten_downstream("load-session", ds.call_load_session(req).await)
         }
     }
@@ -583,7 +606,9 @@ impl layer_agent::HostWithStore for wasmtime::component::HasSelf<HostState> {
     ) -> impl ::core::future::Future<Output = Result<ListSessionsResponse, Error>> + Send {
         let ds = accessor.with(|mut a| a.get().downstream.clone());
         async move {
-            let Some(ds) = ds else { return no_downstream("list-sessions"); };
+            let Some(ds) = ds else {
+                return no_downstream("list-sessions");
+            };
             flatten_downstream("list-sessions", ds.call_list_sessions(req).await)
         }
     }
@@ -594,7 +619,9 @@ impl layer_agent::HostWithStore for wasmtime::component::HasSelf<HostState> {
     ) -> impl ::core::future::Future<Output = Result<ResumeSessionResponse, Error>> + Send {
         let ds = accessor.with(|mut a| a.get().downstream.clone());
         async move {
-            let Some(ds) = ds else { return no_downstream("resume-session"); };
+            let Some(ds) = ds else {
+                return no_downstream("resume-session");
+            };
             flatten_downstream("resume-session", ds.call_resume_session(req).await)
         }
     }
@@ -605,7 +632,9 @@ impl layer_agent::HostWithStore for wasmtime::component::HasSelf<HostState> {
     ) -> impl ::core::future::Future<Output = Result<(), Error>> + Send {
         let ds = accessor.with(|mut a| a.get().downstream.clone());
         async move {
-            let Some(ds) = ds else { return no_downstream("close-session"); };
+            let Some(ds) = ds else {
+                return no_downstream("close-session");
+            };
             flatten_downstream("close-session", ds.call_close_session(session_id).await)
         }
     }
@@ -616,7 +645,9 @@ impl layer_agent::HostWithStore for wasmtime::component::HasSelf<HostState> {
     ) -> impl ::core::future::Future<Output = Result<(), Error>> + Send {
         let ds = accessor.with(|mut a| a.get().downstream.clone());
         async move {
-            let Some(ds) = ds else { return no_downstream("set-session-mode"); };
+            let Some(ds) = ds else {
+                return no_downstream("set-session-mode");
+            };
             flatten_downstream("set-session-mode", ds.call_set_session_mode(req).await)
         }
     }
@@ -627,7 +658,9 @@ impl layer_agent::HostWithStore for wasmtime::component::HasSelf<HostState> {
     ) -> impl ::core::future::Future<Output = Result<PromptResponse, Error>> + Send {
         let ds = accessor.with(|mut a| a.get().downstream.clone());
         async move {
-            let Some(ds) = ds else { return no_downstream("prompt"); };
+            let Some(ds) = ds else {
+                return no_downstream("prompt");
+            };
             flatten_downstream("prompt", ds.call_prompt(req).await)
         }
     }

@@ -1,12 +1,16 @@
 //! Per-store host state and the WASI / wasmtime-side trait impls. The actual
 //! `client::Host` impl lives in [`crate::client_impl`].
 
+use std::sync::Arc;
+
 use agent_client_protocol::{Error as AcpError, schema};
 use tokio::sync::{mpsc, oneshot};
 use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::WasiHttpCtx;
 use wasmtime_wasi_http::p2::{WasiHttpCtxView, WasiHttpView, default_hooks};
+
+use crate::secrets::SecretsRegistry;
 
 /// Events the wasm-side host trait sends out to the bridge task. The bridge
 /// task is the only one with the JSON-RPC `ConnectionTo`, so the host trait
@@ -44,6 +48,10 @@ pub struct HostState {
     /// impl on `HostState` forwards each imported-`agent` call by sending
     /// a message on this actor's channel.
     pub downstream: Option<DownstreamHandle>,
+    /// Component id of this stage, used to scope secret lookups.
+    pub component_id: String,
+    /// Shared secrets registry. Lookups are scoped by `component_id`.
+    pub secrets: Arc<SecretsRegistry>,
 }
 
 /// Where the `client::Host` impl forwards outbound client calls.

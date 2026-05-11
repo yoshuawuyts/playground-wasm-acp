@@ -95,13 +95,29 @@ pub async fn run(
         )
         .on_receive_request(
             async move |req, responder, cx| {
-                handlers::handle_new_session(&factory_new, &registry_new, &gate_new, req, responder, cx).await
+                handlers::handle_new_session(
+                    &factory_new,
+                    &registry_new,
+                    &gate_new,
+                    req,
+                    responder,
+                    cx,
+                )
+                .await
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
             async move |req, responder, cx| {
-                handlers::handle_load_session(&factory_load, &registry_load, &gate_load, req, responder, cx).await
+                handlers::handle_load_session(
+                    &factory_load,
+                    &registry_load,
+                    &gate_load,
+                    req,
+                    responder,
+                    cx,
+                )
+                .await
             },
             agent_client_protocol::on_receive_request!(),
         )

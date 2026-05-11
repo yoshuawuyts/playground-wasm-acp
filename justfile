@@ -41,6 +41,7 @@ bindgen-provider:
         --world provider \
         --runtime-path wit_bindgen::rt \
         --pub-export-macro \
+        --generate-all \
         --out-dir crates/acp-wasm-sys/src \
         --format
     rm -rf crates/acp-wasm-sys/wit
@@ -59,6 +60,7 @@ bindgen-layer:
         --world layer \
         --runtime-path wit_bindgen::rt \
         --pub-export-macro \
+        --generate-all \
         --out-dir crates/acp-wasm-sys/src \
         --format
     rm -rf crates/acp-wasm-sys/wit

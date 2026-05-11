@@ -4,6 +4,310 @@
 //   * pub-export-macro
 #[rustfmt::skip]
 #[allow(dead_code, clippy::all)]
+pub mod wasmcloud {
+    pub mod secrets {
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod store {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
+            /// An error type that encapsulates the different errors that can occur fetching secrets
+            #[derive(Clone)]
+            pub enum SecretsError {
+                /// This indicates an error from an "upstream" secrets source.
+                /// As this could be almost _anything_ (such as Vault, Kubernetes Secrets, KeyValue buckets, etc),
+                /// the error message is a string.
+                Upstream(_rt::String),
+                /// This indicates an error from an I/O operation.
+                /// As this could be almost _anything_ (such as a file read, network connection, etc),
+                /// the error message is a string.
+                /// Depending on how this ends up being consumed,
+                /// we may consider moving this to use the `wasi:io/error` type instead.
+                /// For simplicity right now in supporting multiple implementations, it is being left as a string.
+                Io(_rt::String),
+                /// This indicates that the secret was not found. Generally "not found" errors will
+                /// be handled by the upstream secrets backend, but there are cases where the host
+                /// may need to return this error.
+                NotFound,
+            }
+            impl ::core::fmt::Debug for SecretsError {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    match self {
+                        SecretsError::Upstream(e) => {
+                            f.debug_tuple("SecretsError::Upstream").field(e).finish()
+                        }
+                        SecretsError::Io(e) => {
+                            f.debug_tuple("SecretsError::Io").field(e).finish()
+                        }
+                        SecretsError::NotFound => {
+                            f.debug_tuple("SecretsError::NotFound").finish()
+                        }
+                    }
+                }
+            }
+            impl ::core::fmt::Display for SecretsError {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    write!(f, "{:?}", self)
+                }
+            }
+            impl ::core::error::Error for SecretsError {}
+            /// A secret value can be either a string or a byte array, which lets you
+            /// store binary data as a secret.
+            #[derive(Clone)]
+            pub enum SecretValue {
+                /// A string value
+                String(_rt::String),
+                /// A byte array value
+                Bytes(_rt::Vec<u8>),
+            }
+            impl ::core::fmt::Debug for SecretValue {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    match self {
+                        SecretValue::String(e) => {
+                            f.debug_tuple("SecretValue::String").field(e).finish()
+                        }
+                        SecretValue::Bytes(e) => {
+                            f.debug_tuple("SecretValue::Bytes").field(e).finish()
+                        }
+                    }
+                }
+            }
+            /// A secret is a resource that can only be borrowed. This allows you to
+            /// pass around handles to secrets and not reveal the values until a
+            /// component needs them.
+            /// You need to use the reveal interface to get the value.
+            #[derive(Debug)]
+            #[repr(transparent)]
+            pub struct Secret {
+                handle: _rt::Resource<Secret>,
+            }
+            impl Secret {
+                #[doc(hidden)]
+                pub unsafe fn from_handle(handle: u32) -> Self {
+                    Self {
+                        handle: unsafe { _rt::Resource::from_handle(handle) },
+                    }
+                }
+                #[doc(hidden)]
+                pub fn take_handle(&self) -> u32 {
+                    _rt::Resource::take_handle(&self.handle)
+                }
+                #[doc(hidden)]
+                pub fn handle(&self) -> u32 {
+                    _rt::Resource::handle(&self.handle)
+                }
+            }
+            unsafe impl _rt::WasmResource for Secret {
+                #[inline]
+                unsafe fn drop(_handle: u32) {
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "wasmcloud:secrets/store@0.1.0-draft")]
+                    unsafe extern "C" {
+                        #[link_name = "[resource-drop]secret"]
+                        fn drop(_: i32);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn drop(_: i32) {
+                        unreachable!()
+                    }
+                    unsafe {
+                        drop(_handle as i32);
+                    }
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            /// Gets a single opaque secrets value set at the given key if it exists
+            #[allow(async_fn_in_trait)]
+            pub fn get(key: &str) -> Result<Secret, SecretsError> {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 4 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 4
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let vec0 = key;
+                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                    let len0 = vec0.len();
+                    let ptr1 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "wasmcloud:secrets/store@0.1.0-draft")]
+                    unsafe extern "C" {
+                        #[link_name = "get"]
+                        fn wit_import2(_: *mut u8, _: usize, _: *mut u8);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import2(_: *mut u8, _: usize, _: *mut u8) {
+                        unreachable!()
+                    }
+                    wit_import2(ptr0.cast_mut(), len0, ptr1);
+                    let l3 = i32::from(*ptr1.add(0).cast::<u8>());
+                    let result13 = match l3 {
+                        0 => {
+                            let e = {
+                                let l4 = *ptr1
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<i32>();
+                                Secret::from_handle(l4 as u32)
+                            };
+                            Ok(e)
+                        }
+                        1 => {
+                            let e = {
+                                let l5 = i32::from(
+                                    *ptr1.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
+                                );
+                                let v12 = match l5 {
+                                    0 => {
+                                        let e12 = {
+                                            let l6 = *ptr1
+                                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>();
+                                            let l7 = *ptr1
+                                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>();
+                                            let len8 = l7;
+                                            let bytes8 = _rt::Vec::from_raw_parts(
+                                                l6.cast(),
+                                                len8,
+                                                len8,
+                                            );
+                                            _rt::string_lift(bytes8)
+                                        };
+                                        SecretsError::Upstream(e12)
+                                    }
+                                    1 => {
+                                        let e12 = {
+                                            let l9 = *ptr1
+                                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>();
+                                            let l10 = *ptr1
+                                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>();
+                                            let len11 = l10;
+                                            let bytes11 = _rt::Vec::from_raw_parts(
+                                                l9.cast(),
+                                                len11,
+                                                len11,
+                                            );
+                                            _rt::string_lift(bytes11)
+                                        };
+                                        SecretsError::Io(e12)
+                                    }
+                                    n => {
+                                        debug_assert_eq!(n, 2, "invalid enum discriminant");
+                                        SecretsError::NotFound
+                                    }
+                                };
+                                v12
+                            };
+                            Err(e)
+                        }
+                        _ => _rt::invalid_enum_discriminant(),
+                    };
+                    result13
+                }
+            }
+        }
+        #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
+        pub mod reveal {
+            #[used]
+            #[doc(hidden)]
+            static __FORCE_SECTION_REF: fn() = super::super::super::__link_custom_section_describing_imports;
+            use super::super::super::_rt;
+            pub type Secret = super::super::super::wasmcloud::secrets::store::Secret;
+            pub type SecretValue = super::super::super::wasmcloud::secrets::store::SecretValue;
+            #[allow(unused_unsafe, clippy::all)]
+            /// Reveals the value of a secret to the caller.
+            /// This lets you easily audit your code to discover where secrets are being used.
+            #[allow(async_fn_in_trait)]
+            pub fn reveal(s: &Secret) -> SecretValue {
+                unsafe {
+                    #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
+                    #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
+                    struct RetArea(
+                        [::core::mem::MaybeUninit<
+                            u8,
+                        >; 3 * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let mut ret_area = RetArea(
+                        [::core::mem::MaybeUninit::uninit(); 3
+                            * ::core::mem::size_of::<*const u8>()],
+                    );
+                    let ptr0 = ret_area.0.as_mut_ptr().cast::<u8>();
+                    #[cfg(target_arch = "wasm32")]
+                    #[link(wasm_import_module = "wasmcloud:secrets/reveal@0.1.0-draft")]
+                    unsafe extern "C" {
+                        #[link_name = "reveal"]
+                        fn wit_import1(_: i32, _: *mut u8);
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    unsafe extern "C" fn wit_import1(_: i32, _: *mut u8) {
+                        unreachable!()
+                    }
+                    wit_import1((s).handle() as i32, ptr0);
+                    let l2 = i32::from(*ptr0.add(0).cast::<u8>());
+                    use super::super::super::wasmcloud::secrets::store::SecretValue as V9;
+                    let v9 = match l2 {
+                        0 => {
+                            let e9 = {
+                                let l3 = *ptr0
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l4 = *ptr0
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len5 = l4;
+                                let bytes5 = _rt::Vec::from_raw_parts(
+                                    l3.cast(),
+                                    len5,
+                                    len5,
+                                );
+                                _rt::string_lift(bytes5)
+                            };
+                            V9::String(e9)
+                        }
+                        n => {
+                            debug_assert_eq!(n, 1, "invalid enum discriminant");
+                            let e9 = {
+                                let l6 = *ptr0
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<*mut u8>();
+                                let l7 = *ptr0
+                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                let len8 = l7;
+                                <_ as From<
+                                    _rt::Vec<_>,
+                                >>::from(_rt::Vec::from_raw_parts(l6.cast(), len8, len8))
+                            };
+                            V9::Bytes(e9)
+                        }
+                    };
+                    let result10 = v9;
+                    result10
+                }
+            }
+        }
+    }
+}
+#[rustfmt::skip]
+#[allow(dead_code, clippy::all)]
 pub mod yosh {
     pub mod acp {
         /// Protocol errors, modelled after JSON-RPC 2.0.
@@ -24603,6 +24907,80 @@ mod _rt {
             self as i64
         }
     }
+    use core::fmt;
+    use core::marker;
+    use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
+    /// A type which represents a component model resource, either imported or
+    /// exported into this component.
+    ///
+    /// This is a low-level wrapper which handles the lifetime of the resource
+    /// (namely this has a destructor). The `T` provided defines the component model
+    /// intrinsics that this wrapper uses.
+    ///
+    /// One of the chief purposes of this type is to provide `Deref` implementations
+    /// to access the underlying data when it is owned.
+    ///
+    /// This type is primarily used in generated code for exported and imported
+    /// resources.
+    #[repr(transparent)]
+    pub struct Resource<T: WasmResource> {
+        handle: AtomicU32,
+        _marker: marker::PhantomData<T>,
+    }
+    /// A trait which all wasm resources implement, namely providing the ability to
+    /// drop a resource.
+    ///
+    /// This generally is implemented by generated code, not user-facing code.
+    #[allow(clippy::missing_safety_doc)]
+    pub unsafe trait WasmResource {
+        /// Invokes the `[resource-drop]...` intrinsic.
+        unsafe fn drop(handle: u32);
+    }
+    impl<T: WasmResource> Resource<T> {
+        #[doc(hidden)]
+        pub unsafe fn from_handle(handle: u32) -> Self {
+            debug_assert!(handle != 0 && handle != u32::MAX);
+            Self {
+                handle: AtomicU32::new(handle),
+                _marker: marker::PhantomData,
+            }
+        }
+        /// Takes ownership of the handle owned by `resource`.
+        ///
+        /// Note that this ideally would be `into_handle` taking `Resource<T>` by
+        /// ownership. The code generator does not enable that in all situations,
+        /// unfortunately, so this is provided instead.
+        ///
+        /// Also note that `take_handle` is in theory only ever called on values
+        /// owned by a generated function. For example a generated function might
+        /// take `Resource<T>` as an argument but then call `take_handle` on a
+        /// reference to that argument. In that sense the dynamic nature of
+        /// `take_handle` should only be exposed internally to generated code, not
+        /// to user code.
+        #[doc(hidden)]
+        pub fn take_handle(resource: &Resource<T>) -> u32 {
+            resource.handle.swap(u32::MAX, Relaxed)
+        }
+        #[doc(hidden)]
+        pub fn handle(resource: &Resource<T>) -> u32 {
+            resource.handle.load(Relaxed)
+        }
+    }
+    impl<T: WasmResource> fmt::Debug for Resource<T> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("Resource").field("handle", &self.handle).finish()
+        }
+    }
+    impl<T: WasmResource> Drop for Resource<T> {
+        fn drop(&mut self) {
+            unsafe {
+                match self.handle.load(Relaxed) {
+                    u32::MAX => {}
+                    other => T::drop(other),
+                }
+            }
+        }
+    }
     #[cfg(target_arch = "wasm32")]
     pub fn run_ctors_once() {
         wit_bindgen::rt::run_ctors_once();
@@ -24641,9 +25019,9 @@ macro_rules! __export_layer_impl {
         = { #[rustfmt::skip] #[cfg(target_arch = "wasm32")] #[unsafe (link_section =
         "component-type:wit-bindgen:0.54.0:yosh:acp@5.1.0:layer:imports and exports")]
         #[doc(hidden)] #[allow(clippy::octal_escapes)] pub static
-        __WIT_BINDGEN_COMPONENT_TYPE : [u8; 8780] = *
+        __WIT_BINDGEN_COMPONENT_TYPE : [u8; 9090] = *
         b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xd0C\x01A\x02\x01A:\x01\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x86F\x01A\x02\x01A@\x01\
 B\x04\x01q\x08\x0bparse-error\0\0\x0finvalid-request\0\0\x10method-not-found\0\0\
 \x0einvalid-params\0\0\x0einternal-error\0\0\x0dauth-required\0\0\x12resource-no\
 t-found\0\0\x05other\x01z\0\x04\0\x0aerror-code\x03\0\0\x01r\x02\x04code\x01\x07\
@@ -24794,27 +25172,34 @@ write-text-file-request\x03\0\x0e\x02\x03\x02\x01\x08\x04\0\x0bterminal-id\x03\0
 j\x01\x19\x01\x01\x01C\x02\x0asession-id\x03\x0bterminal-id\x11\0%\x04\0\x16wait\
 -for-terminal-exit\x01&\x01C\x02\x0asession-id\x03\x0bterminal-id\x11\0\x1f\x04\0\
 \x0dkill-terminal\x01'\x04\0\x10release-terminal\x01'\x03\0\x15yosh:acp/client@5\
-.1.0\x05+\x01B;\x02\x03\x02\x01\x10\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x11\x04\
-\0\x12initialize-request\x03\0\x02\x02\x03\x02\x01\x12\x04\0\x13initialize-respo\
-nse\x03\0\x04\x02\x03\x02\x01\x13\x04\0\x14authenticate-request\x03\0\x06\x02\x03\
-\x02\x01\x04\x04\0\x0asession-id\x03\0\x08\x02\x03\x02\x01\x14\x04\0\x13new-sess\
-ion-request\x03\0\x0a\x02\x03\x02\x01\x15\x04\0\x14new-session-response\x03\0\x0c\
-\x02\x03\x02\x01\x16\x04\0\x14load-session-request\x03\0\x0e\x02\x03\x02\x01\x17\
-\x04\0\x15load-session-response\x03\0\x10\x02\x03\x02\x01\x18\x04\0\x15list-sess\
-ions-request\x03\0\x12\x02\x03\x02\x01\x19\x04\0\x16list-sessions-response\x03\0\
-\x14\x02\x03\x02\x01\x1a\x04\0\x16resume-session-request\x03\0\x16\x02\x03\x02\x01\
-\x1b\x04\0\x17resume-session-response\x03\0\x18\x02\x03\x02\x01\x1c\x04\0\x18set\
--session-mode-request\x03\0\x1a\x02\x03\x02\x01\x1d\x04\0\x0eprompt-request\x03\0\
-\x1c\x02\x03\x02\x01\x1e\x04\0\x0fprompt-response\x03\0\x1e\x01j\x01\x05\x01\x01\
-\x01C\x01\x03req\x03\0\x20\x04\0\x0ainitialize\x01!\x01j\0\x01\x01\x01C\x01\x03r\
-eq\x07\0\"\x04\0\x0cauthenticate\x01#\x01j\x01\x0d\x01\x01\x01C\x01\x03req\x0b\0\
-$\x04\0\x0bnew-session\x01%\x01j\x01\x11\x01\x01\x01C\x01\x03req\x0f\0&\x04\0\x0c\
+.1.0\x05+\x01B\x0a\x01q\x03\x08upstream\x01s\0\x02io\x01s\0\x09not-found\0\0\x04\
+\0\x0dsecrets-error\x03\0\0\x01p}\x01q\x02\x06string\x01s\0\x05bytes\x01\x02\0\x04\
+\0\x0csecret-value\x03\0\x03\x04\0\x06secret\x03\x01\x01i\x05\x01j\x01\x06\x01\x01\
+\x01@\x01\x03keys\0\x07\x04\0\x03get\x01\x08\x03\0#wasmcloud:secrets/store@0.1.0\
+-draft\x05,\x02\x03\0\x0a\x06secret\x02\x03\0\x0a\x0csecret-value\x01B\x07\x02\x03\
+\x02\x01-\x04\0\x06secret\x03\0\0\x02\x03\x02\x01.\x04\0\x0csecret-value\x03\0\x02\
+\x01h\x01\x01@\x01\x01s\x04\0\x03\x04\0\x06reveal\x01\x05\x03\0$wasmcloud:secret\
+s/reveal@0.1.0-draft\x05/\x01B;\x02\x03\x02\x01\x10\x04\0\x05error\x03\0\0\x02\x03\
+\x02\x01\x11\x04\0\x12initialize-request\x03\0\x02\x02\x03\x02\x01\x12\x04\0\x13\
+initialize-response\x03\0\x04\x02\x03\x02\x01\x13\x04\0\x14authenticate-request\x03\
+\0\x06\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\x08\x02\x03\x02\x01\x14\x04\
+\0\x13new-session-request\x03\0\x0a\x02\x03\x02\x01\x15\x04\0\x14new-session-res\
+ponse\x03\0\x0c\x02\x03\x02\x01\x16\x04\0\x14load-session-request\x03\0\x0e\x02\x03\
+\x02\x01\x17\x04\0\x15load-session-response\x03\0\x10\x02\x03\x02\x01\x18\x04\0\x15\
+list-sessions-request\x03\0\x12\x02\x03\x02\x01\x19\x04\0\x16list-sessions-respo\
+nse\x03\0\x14\x02\x03\x02\x01\x1a\x04\0\x16resume-session-request\x03\0\x16\x02\x03\
+\x02\x01\x1b\x04\0\x17resume-session-response\x03\0\x18\x02\x03\x02\x01\x1c\x04\0\
+\x18set-session-mode-request\x03\0\x1a\x02\x03\x02\x01\x1d\x04\0\x0eprompt-reque\
+st\x03\0\x1c\x02\x03\x02\x01\x1e\x04\0\x0fprompt-response\x03\0\x1e\x01j\x01\x05\
+\x01\x01\x01C\x01\x03req\x03\0\x20\x04\0\x0ainitialize\x01!\x01j\0\x01\x01\x01C\x01\
+\x03req\x07\0\"\x04\0\x0cauthenticate\x01#\x01j\x01\x0d\x01\x01\x01C\x01\x03req\x0b\
+\0$\x04\0\x0bnew-session\x01%\x01j\x01\x11\x01\x01\x01C\x01\x03req\x0f\0&\x04\0\x0c\
 load-session\x01'\x01j\x01\x15\x01\x01\x01C\x01\x03req\x13\0(\x04\0\x0dlist-sess\
 ions\x01)\x01j\x01\x19\x01\x01\x01C\x01\x03req\x17\0*\x04\0\x0eresume-session\x01\
 +\x01C\x01\x0asession-id\x09\0\"\x04\0\x0dclose-session\x01,\x01C\x01\x03req\x1b\
 \0\"\x04\0\x10set-session-mode\x01-\x01j\x01\x1f\x01\x01\x01C\x01\x03req\x1d\0.\x04\
 \0\x06prompt\x01/\x01C\x01\x0asession-id\x09\x01\0\x04\0\x06cancel\x010\x04\0\x14\
-yosh:acp/agent@5.1.0\x05,\x01B1\x02\x03\x02\x01\x10\x04\0\x05error\x03\0\0\x02\x03\
+yosh:acp/agent@5.1.0\x050\x01B1\x02\x03\x02\x01\x10\x04\0\x05error\x03\0\0\x02\x03\
 \x02\x01\x04\x04\0\x0asession-id\x03\0\x02\x02\x03\x02\x01!\x04\0\x0esession-upd\
 ate\x03\0\x04\x02\x03\x02\x01\"\x04\0\x1arequest-permission-request\x03\0\x06\x02\
 \x03\x02\x01#\x04\0\x1brequest-permission-response\x03\0\x08\x02\x03\x02\x01$\x04\
@@ -24832,7 +25217,7 @@ te-terminal\x01\"\x01j\x01\x17\x01\x01\x01C\x02\x0asession-id\x03\x0bterminal-id
 \x11\0#\x04\0\x13get-terminal-output\x01$\x01j\x01\x19\x01\x01\x01C\x02\x0asessi\
 on-id\x03\x0bterminal-id\x11\0%\x04\0\x16wait-for-terminal-exit\x01&\x01C\x02\x0a\
 session-id\x03\x0bterminal-id\x11\0\x1f\x04\0\x0dkill-terminal\x01'\x04\0\x10rel\
-ease-terminal\x01'\x04\0\x15yosh:acp/client@5.1.0\x05-\x04\0\x14yosh:acp/layer@5\
+ease-terminal\x01'\x04\0\x15yosh:acp/client@5.1.0\x051\x04\0\x14yosh:acp/layer@5\
 .1.0\x04\0\x0b\x0b\x01\0\x05layer\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\
 \x0dwit-component\x070.245.1\x10wit-bindgen-rust\x060.54.0";
         };
@@ -24847,8 +25232,8 @@ pub use __export_layer_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 7233] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xa57\x01A\x02\x01A6\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 7543] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xdb9\x01A\x02\x01A<\x01\
 B\x04\x01q\x08\x0bparse-error\0\0\x0finvalid-request\0\0\x10method-not-found\0\0\
 \x0einvalid-params\0\0\x0einternal-error\0\0\x0dauth-required\0\0\x12resource-no\
 t-found\0\0\x05other\x01z\0\x04\0\x0aerror-code\x03\0\0\x01r\x02\x04code\x01\x07\
@@ -24999,9 +25384,17 @@ write-text-file-request\x03\0\x0e\x02\x03\x02\x01\x08\x04\0\x0bterminal-id\x03\0
 j\x01\x19\x01\x01\x01C\x02\x0asession-id\x03\x0bterminal-id\x11\0%\x04\0\x16wait\
 -for-terminal-exit\x01&\x01C\x02\x0asession-id\x03\x0bterminal-id\x11\0\x1f\x04\0\
 \x0dkill-terminal\x01'\x04\0\x10release-terminal\x01'\x03\0\x15yosh:acp/client@5\
-.1.0\x05+\x04\04yosh:acp/layer-with-all-of-its-exports-removed@5.1.0\x04\0\x0b+\x01\
-\0%layer-with-all-of-its-exports-removed\x03\0\0\0G\x09producers\x01\x0cprocesse\
-d-by\x02\x0dwit-component\x070.245.1\x10wit-bindgen-rust\x060.54.0";
+.1.0\x05+\x01B\x0a\x01q\x03\x08upstream\x01s\0\x02io\x01s\0\x09not-found\0\0\x04\
+\0\x0dsecrets-error\x03\0\0\x01p}\x01q\x02\x06string\x01s\0\x05bytes\x01\x02\0\x04\
+\0\x0csecret-value\x03\0\x03\x04\0\x06secret\x03\x01\x01i\x05\x01j\x01\x06\x01\x01\
+\x01@\x01\x03keys\0\x07\x04\0\x03get\x01\x08\x03\0#wasmcloud:secrets/store@0.1.0\
+-draft\x05,\x02\x03\0\x0a\x06secret\x02\x03\0\x0a\x0csecret-value\x01B\x07\x02\x03\
+\x02\x01-\x04\0\x06secret\x03\0\0\x02\x03\x02\x01.\x04\0\x0csecret-value\x03\0\x02\
+\x01h\x01\x01@\x01\x01s\x04\0\x03\x04\0\x06reveal\x01\x05\x03\0$wasmcloud:secret\
+s/reveal@0.1.0-draft\x05/\x04\04yosh:acp/layer-with-all-of-its-exports-removed@5\
+.1.0\x04\0\x0b+\x01\0%layer-with-all-of-its-exports-removed\x03\0\0\0G\x09produc\
+ers\x01\x0cprocessed-by\x02\x0dwit-component\x070.245.1\x10wit-bindgen-rust\x060\
+.54.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

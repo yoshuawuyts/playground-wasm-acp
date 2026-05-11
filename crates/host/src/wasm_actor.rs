@@ -161,50 +161,74 @@ impl AccessorTask<HostState, HasSelf<HostState>> for CmdTask {
             // -- agent --
             Cmd::Initialize { req, reply } => {
                 let res = match &*bindings {
-                    Bindings::Provider(b) => b.yosh_acp_agent().call_initialize(accessor, req).await,
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent().call_initialize(accessor, req).await
+                    }
                     Bindings::Layer(b) => b.yosh_acp_agent().call_initialize(accessor, req).await,
                 };
                 let _ = reply.send(res);
             }
             Cmd::Authenticate { req, reply } => {
                 let res = match &*bindings {
-                    Bindings::Provider(b) => b.yosh_acp_agent().call_authenticate(accessor, req).await,
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent().call_authenticate(accessor, req).await
+                    }
                     Bindings::Layer(b) => b.yosh_acp_agent().call_authenticate(accessor, req).await,
                 };
                 let _ = reply.send(res);
             }
             Cmd::NewSession { req, reply } => {
                 let res = match &*bindings {
-                    Bindings::Provider(b) => b.yosh_acp_agent().call_new_session(accessor, req).await,
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent().call_new_session(accessor, req).await
+                    }
                     Bindings::Layer(b) => b.yosh_acp_agent().call_new_session(accessor, req).await,
                 };
                 let _ = reply.send(res);
             }
             Cmd::LoadSession { req, reply } => {
                 let res = match &*bindings {
-                    Bindings::Provider(b) => b.yosh_acp_agent().call_load_session(accessor, req).await,
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent().call_load_session(accessor, req).await
+                    }
                     Bindings::Layer(b) => b.yosh_acp_agent().call_load_session(accessor, req).await,
                 };
                 let _ = reply.send(res);
             }
             Cmd::ListSessions { req, reply } => {
                 let res = match &*bindings {
-                    Bindings::Provider(b) => b.yosh_acp_agent().call_list_sessions(accessor, req).await,
-                    Bindings::Layer(b) => b.yosh_acp_agent().call_list_sessions(accessor, req).await,
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent().call_list_sessions(accessor, req).await
+                    }
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_agent().call_list_sessions(accessor, req).await
+                    }
                 };
                 let _ = reply.send(res);
             }
             Cmd::ResumeSession { req, reply } => {
                 let res = match &*bindings {
-                    Bindings::Provider(b) => b.yosh_acp_agent().call_resume_session(accessor, req).await,
-                    Bindings::Layer(b) => b.yosh_acp_agent().call_resume_session(accessor, req).await,
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent().call_resume_session(accessor, req).await
+                    }
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_agent().call_resume_session(accessor, req).await
+                    }
                 };
                 let _ = reply.send(res);
             }
             Cmd::SetSessionMode { req, reply } => {
                 let res = match &*bindings {
-                    Bindings::Provider(b) => b.yosh_acp_agent().call_set_session_mode(accessor, req).await,
-                    Bindings::Layer(b) => b.yosh_acp_agent().call_set_session_mode(accessor, req).await,
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent()
+                            .call_set_session_mode(accessor, req)
+                            .await
+                    }
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_agent()
+                            .call_set_session_mode(accessor, req)
+                            .await
+                    }
                 };
                 let _ = reply.send(res);
             }
@@ -217,23 +241,41 @@ impl AccessorTask<HostState, HasSelf<HostState>> for CmdTask {
             }
             Cmd::CloseSession { session_id, reply } => {
                 let res = match &*bindings {
-                    Bindings::Provider(b) => b.yosh_acp_agent().call_close_session(accessor, session_id).await,
-                    Bindings::Layer(b) => b.yosh_acp_agent().call_close_session(accessor, session_id).await,
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent()
+                            .call_close_session(accessor, session_id)
+                            .await
+                    }
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_agent()
+                            .call_close_session(accessor, session_id)
+                            .await
+                    }
                 };
                 let _ = reply.send(res);
             }
             Cmd::Cancel { session_id, reply } => {
                 let res = match &*bindings {
-                    Bindings::Provider(b) => b.yosh_acp_agent().call_cancel(accessor, session_id).await,
-                    Bindings::Layer(b) => b.yosh_acp_agent().call_cancel(accessor, session_id).await,
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent().call_cancel(accessor, session_id).await
+                    }
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_agent().call_cancel(accessor, session_id).await
+                    }
                 };
                 let _ = reply.send(res);
             }
             // -- client (Layer only) --
-            Cmd::UpdateSession { session_id, update, reply } => {
+            Cmd::UpdateSession {
+                session_id,
+                update,
+                reply,
+            } => {
                 let res = match &*bindings {
                     Bindings::Layer(b) => {
-                        b.yosh_acp_client().call_update_session(accessor, session_id, update).await
+                        b.yosh_acp_client()
+                            .call_update_session(accessor, session_id, update)
+                            .await
                     }
                     Bindings::Provider(_) => Err(wasmtime::Error::msg(
                         "host bug: routed `client.update-session` to a provider stage",
@@ -243,56 +285,102 @@ impl AccessorTask<HostState, HasSelf<HostState>> for CmdTask {
             }
             Cmd::RequestPermission { req, reply } => {
                 let res = match &*bindings {
-                    Bindings::Layer(b) => b.yosh_acp_client().call_request_permission(accessor, req).await,
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_client()
+                            .call_request_permission(accessor, req)
+                            .await
+                    }
                     Bindings::Provider(_) => provider_only_client("request-permission"),
                 };
                 let _ = reply.send(res);
             }
             Cmd::ReadTextFile { req, reply } => {
                 let res = match &*bindings {
-                    Bindings::Layer(b) => b.yosh_acp_client().call_read_text_file(accessor, req).await,
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_client().call_read_text_file(accessor, req).await
+                    }
                     Bindings::Provider(_) => provider_only_client("read-text-file"),
                 };
                 let _ = reply.send(res);
             }
             Cmd::WriteTextFile { req, reply } => {
                 let res = match &*bindings {
-                    Bindings::Layer(b) => b.yosh_acp_client().call_write_text_file(accessor, req).await,
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_client()
+                            .call_write_text_file(accessor, req)
+                            .await
+                    }
                     Bindings::Provider(_) => provider_only_client("write-text-file"),
                 };
                 let _ = reply.send(res);
             }
             Cmd::CreateTerminal { req, reply } => {
                 let res = match &*bindings {
-                    Bindings::Layer(b) => b.yosh_acp_client().call_create_terminal(accessor, req).await,
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_client()
+                            .call_create_terminal(accessor, req)
+                            .await
+                    }
                     Bindings::Provider(_) => provider_only_client("create-terminal"),
                 };
                 let _ = reply.send(res);
             }
-            Cmd::GetTerminalOutput { session_id, terminal_id, reply } => {
+            Cmd::GetTerminalOutput {
+                session_id,
+                terminal_id,
+                reply,
+            } => {
                 let res = match &*bindings {
-                    Bindings::Layer(b) => b.yosh_acp_client().call_get_terminal_output(accessor, session_id, terminal_id).await,
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_client()
+                            .call_get_terminal_output(accessor, session_id, terminal_id)
+                            .await
+                    }
                     Bindings::Provider(_) => provider_only_client("get-terminal-output"),
                 };
                 let _ = reply.send(res);
             }
-            Cmd::WaitForTerminalExit { session_id, terminal_id, reply } => {
+            Cmd::WaitForTerminalExit {
+                session_id,
+                terminal_id,
+                reply,
+            } => {
                 let res = match &*bindings {
-                    Bindings::Layer(b) => b.yosh_acp_client().call_wait_for_terminal_exit(accessor, session_id, terminal_id).await,
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_client()
+                            .call_wait_for_terminal_exit(accessor, session_id, terminal_id)
+                            .await
+                    }
                     Bindings::Provider(_) => provider_only_client("wait-for-terminal-exit"),
                 };
                 let _ = reply.send(res);
             }
-            Cmd::KillTerminal { session_id, terminal_id, reply } => {
+            Cmd::KillTerminal {
+                session_id,
+                terminal_id,
+                reply,
+            } => {
                 let res = match &*bindings {
-                    Bindings::Layer(b) => b.yosh_acp_client().call_kill_terminal(accessor, session_id, terminal_id).await,
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_client()
+                            .call_kill_terminal(accessor, session_id, terminal_id)
+                            .await
+                    }
                     Bindings::Provider(_) => provider_only_client("kill-terminal"),
                 };
                 let _ = reply.send(res);
             }
-            Cmd::ReleaseTerminal { session_id, terminal_id, reply } => {
+            Cmd::ReleaseTerminal {
+                session_id,
+                terminal_id,
+                reply,
+            } => {
                 let res = match &*bindings {
-                    Bindings::Layer(b) => b.yosh_acp_client().call_release_terminal(accessor, session_id, terminal_id).await,
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_client()
+                            .call_release_terminal(accessor, session_id, terminal_id)
+                            .await
+                    }
                     Bindings::Provider(_) => provider_only_client("release-terminal"),
                 };
                 let _ = reply.send(res);
@@ -402,11 +490,17 @@ macro_rules! make_call {
 
 macro_rules! make_call_session {
     ($name:ident, $variant:ident, $resp_ty:ty) => {
-        pub async fn $name(&self, session_id: SessionId) -> wasmtime::Result<Result<$resp_ty, Error>> {
+        pub async fn $name(
+            &self,
+            session_id: SessionId,
+        ) -> wasmtime::Result<Result<$resp_ty, Error>> {
             let (tx, rx) = oneshot::channel();
-            self.send(Cmd::$variant { session_id, reply: tx })
-                .await
-                .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
+            self.send(Cmd::$variant {
+                session_id,
+                reply: tx,
+            })
+            .await
+            .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
             rx.await
                 .map_err(|_| wasmtime::Error::msg("wasm actor dropped reply"))?
         }
@@ -435,21 +529,54 @@ macro_rules! make_call_terminal {
 }
 
 impl WasmActor {
-    make_call!(call_initialize, Initialize, InitializeRequest, InitializeResponse);
+    make_call!(
+        call_initialize,
+        Initialize,
+        InitializeRequest,
+        InitializeResponse
+    );
     make_call!(call_authenticate, Authenticate, AuthenticateRequest, ());
-    make_call!(call_new_session, NewSession, NewSessionRequest, NewSessionResponse);
-    make_call!(call_load_session, LoadSession, LoadSessionRequest, LoadSessionResponse);
-    make_call!(call_list_sessions, ListSessions, ListSessionsRequest, ListSessionsResponse);
-    make_call!(call_resume_session, ResumeSession, ResumeSessionRequest, ResumeSessionResponse);
-    make_call!(call_set_session_mode, SetSessionMode, SetSessionModeRequest, ());
+    make_call!(
+        call_new_session,
+        NewSession,
+        NewSessionRequest,
+        NewSessionResponse
+    );
+    make_call!(
+        call_load_session,
+        LoadSession,
+        LoadSessionRequest,
+        LoadSessionResponse
+    );
+    make_call!(
+        call_list_sessions,
+        ListSessions,
+        ListSessionsRequest,
+        ListSessionsResponse
+    );
+    make_call!(
+        call_resume_session,
+        ResumeSession,
+        ResumeSessionRequest,
+        ResumeSessionResponse
+    );
+    make_call!(
+        call_set_session_mode,
+        SetSessionMode,
+        SetSessionModeRequest,
+        ()
+    );
     make_call!(call_prompt, Prompt, PromptRequest, PromptResponse);
     make_call_session!(call_close_session, CloseSession, ());
 
     pub async fn call_cancel(&self, session_id: SessionId) -> wasmtime::Result<()> {
         let (tx, rx) = oneshot::channel();
-        self.send(Cmd::Cancel { session_id, reply: tx })
-            .await
-            .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
+        self.send(Cmd::Cancel {
+            session_id,
+            reply: tx,
+        })
+        .await
+        .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
         rx.await
             .map_err(|_| wasmtime::Error::msg("wasm actor dropped reply"))?
     }
@@ -472,12 +599,36 @@ impl WasmActor {
             .map_err(|_| wasmtime::Error::msg("wasm actor dropped reply"))?
     }
 
-    make_call!(call_request_permission, RequestPermission, RequestPermissionRequest, RequestPermissionResponse);
-    make_call!(call_read_text_file, ReadTextFile, ReadTextFileRequest, ReadTextFileResponse);
-    make_call!(call_write_text_file, WriteTextFile, WriteTextFileRequest, ());
-    make_call!(call_create_terminal, CreateTerminal, CreateTerminalRequest, CreateTerminalResponse);
+    make_call!(
+        call_request_permission,
+        RequestPermission,
+        RequestPermissionRequest,
+        RequestPermissionResponse
+    );
+    make_call!(
+        call_read_text_file,
+        ReadTextFile,
+        ReadTextFileRequest,
+        ReadTextFileResponse
+    );
+    make_call!(
+        call_write_text_file,
+        WriteTextFile,
+        WriteTextFileRequest,
+        ()
+    );
+    make_call!(
+        call_create_terminal,
+        CreateTerminal,
+        CreateTerminalRequest,
+        CreateTerminalResponse
+    );
     make_call_terminal!(call_get_terminal_output, GetTerminalOutput, TerminalOutput);
-    make_call_terminal!(call_wait_for_terminal_exit, WaitForTerminalExit, TerminalExitStatus);
+    make_call_terminal!(
+        call_wait_for_terminal_exit,
+        WaitForTerminalExit,
+        TerminalExitStatus
+    );
     make_call_terminal!(call_kill_terminal, KillTerminal, ());
     make_call_terminal!(call_release_terminal, ReleaseTerminal, ());
 }

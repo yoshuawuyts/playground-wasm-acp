@@ -17,8 +17,8 @@ use agent_client_protocol::{ConnectionTo, Error as AcpError, schema};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use crate::state::OutboundEvent;
 use super::gate::NotificationGate;
+use crate::state::OutboundEvent;
 
 pub(super) async fn run_outbound_drain(
     cx: ConnectionTo<Client>,

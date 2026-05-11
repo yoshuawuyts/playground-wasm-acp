@@ -36,10 +36,7 @@ impl NotificationGate {
 
     /// Returns `Some(notif)` to forward immediately, or `None` if the
     /// notification was held for later replay.
-    pub fn admit(
-        &self,
-        notif: schema::SessionNotification,
-    ) -> Option<schema::SessionNotification> {
+    pub fn admit(&self, notif: schema::SessionNotification) -> Option<schema::SessionNotification> {
         let session_id = notif.session_id.0.to_string();
         let mut g = self.inner.lock().unwrap();
         if g.opened.contains(&session_id) {

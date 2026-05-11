@@ -21,6 +21,8 @@ use wasmtime::{Config, Engine};
 
 mod bridge;
 mod client_impl;
+mod secrets;
+mod secrets_impl;
 mod state;
 mod translate;
 mod utils;
@@ -72,6 +74,8 @@ mod layer_bindings {
             "yosh:acp/terminals": crate::yosh::acp::terminals,
             "yosh:acp/filesystem": crate::yosh::acp::filesystem,
             "yosh:acp/client": crate::yosh::acp::client,
+            "wasmcloud:secrets/store@0.1.0-draft": crate::wasmcloud::secrets::store,
+            "wasmcloud:secrets/reveal@0.1.0-draft": crate::wasmcloud::secrets::reveal,
         },
     });
 }
@@ -122,6 +126,13 @@ struct Args {
     /// `--log-filter "host=debug,agent_client_protocol=trace"`.
     #[arg(long)]
     log_filter: Option<String>,
+
+    /// Path to a TOML secrets config. Lookups are scoped by component
+    /// id (deny-by-default); see `README.md` for the file format. If
+    /// omitted, every `wasmcloud:secrets/store.get` returns
+    /// `not-found`.
+    #[arg(long, value_name = "PATH")]
+    secrets: Option<PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
@@ -189,6 +200,15 @@ fn main() -> Result<()> {
 
     let data_root = init_data_root()?;
 
+    let secrets = Arc::new(match args.secrets.as_deref() {
+        Some(path) => crate::secrets::SecretsRegistry::load(path)
+            .with_context(|| format!("loading secrets config {}", path.display()))?,
+        None => crate::secrets::SecretsRegistry::empty(),
+    });
+    if let Some(path) = args.secrets.as_deref() {
+        info!(path = %path.display(), "loaded secrets config");
+    }
+
     // Multi-threaded runtime + `LocalSet`: pins `!Send` session actors to
     // the `block_on` thread while `Send` work runs on the worker pool.
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -204,6 +224,7 @@ fn main() -> Result<()> {
             layers,
             outbound_tx,
             data_root,
+            secrets,
         ));
         let registry = Arc::new(SessionRegistry::new());
 

@@ -237,6 +237,7 @@ pub struct HostBuilder {
     provider: PathBuf,
     layers: Vec<PathBuf>,
     env: Vec<(String, String)>,
+    secrets: Option<PathBuf>,
 }
 
 impl HostBuilder {
@@ -245,6 +246,7 @@ impl HostBuilder {
             provider: provider_wasm(),
             layers: Vec::new(),
             env: Vec::new(),
+            secrets: None,
         }
     }
 
@@ -258,6 +260,12 @@ impl HostBuilder {
         self
     }
 
+    /// Pass `--secrets <path>` to the host.
+    pub fn with_secrets(mut self, p: PathBuf) -> Self {
+        self.secrets = Some(p);
+        self
+    }
+
     pub async fn spawn(self) -> Result<HostProcess> {
         let state_dir = tempfile::tempdir().context("tempdir for XDG_STATE_HOME")?;
 
@@ -266,8 +274,11 @@ impl HostBuilder {
         for l in &self.layers {
             cmd.arg("--layer").arg(l);
         }
+        if let Some(p) = &self.secrets {
+            cmd.arg("--secrets").arg(p);
+        }
         cmd.env("XDG_STATE_HOME", state_dir.path())
-            .env("RUST_LOG", "host=debug,acp=debug,wasm_stderr=info");
+            .env("RUST_LOG", "host=debug,acp=debug");
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
