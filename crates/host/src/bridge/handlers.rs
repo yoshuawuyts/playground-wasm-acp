@@ -84,6 +84,9 @@ pub(super) async fn handle_new_session(
     // Outbound `update-session` events emitted *during* `new-session` carry
     // the guest-minted id and route through the shared outbound channel,
     // so they reach the editor even before the registry has the entry.
+    if let Ok(payload) = serde_json::to_string(&req) {
+        tracing::info!(payload = %payload, "← wire: session/new");
+    }
     let chain = factory
         .instantiate_for_project(&req.cwd)
         .await
@@ -218,6 +221,9 @@ pub(super) fn handle_prompt(
 ) -> Result<(), AcpError> {
     let session_key = req.session_id.0.to_string();
     debug!(session = %session_key, "session/prompt");
+    if let Ok(payload) = serde_json::to_string(&req) {
+        tracing::info!(session = %session_key, payload = %payload, "← wire: session/prompt");
+    }
 
     let handle = require_session(registry, &session_key)?;
     let wit_req = translate::prompt_request_schema_to_wit(req);

@@ -47,7 +47,6 @@ static SHOUT_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Push the layer's `available-commands-update` upstream so the editor
 /// learns about `/shout`. Sent after each session lifecycle method.
 async fn advertise_commands(session_id: &SessionId) {
-    eprintln!("uppercase-layer: advertising /shout for session={session_id}");
     let cmds = vec![AvailableCommand {
         name: "shout".to_string(),
         description: "Toggle uppercase rewriting of agent output for this session."
@@ -59,7 +58,6 @@ async fn advertise_commands(session_id: &SessionId) {
         SessionUpdate::AvailableCommandsUpdate(cmds),
     )
     .await;
-    eprintln!("uppercase-layer: advertise_commands done");
 }
 
 /// Uppercase the `text` field of any `ContentBlock::Text`. Other content
@@ -145,6 +143,15 @@ impl AgentGuest for Layer {
     }
 
     async fn prompt(req: PromptRequest) -> Result<PromptResponse, Error> {
+        eprintln!("uppercase-layer: prompt enter session={}", req.session_id);
+        // Re-advertise commands here too. The `available-commands-update`
+        // sent during `new-session` races with the editor's registration
+        // of its session-side thread: if it arrives first, the editor
+        // drops it as referring to an unknown session, and the user sees
+        // "Available commands: none" forever. By the time a prompt
+        // request arrives, the session is fully registered, so this
+        // advertisement is guaranteed to land.
+        advertise_commands(&req.session_id).await;
         // Intercept `/shout` to toggle uppercase rewriting for the
         // remainder of this session.
         if is_shout_command(&req.prompt) {
@@ -165,7 +172,10 @@ impl AgentGuest for Layer {
                 stop_reason: StopReason::EndTurn,
             });
         }
-        agent::prompt(req).await
+        eprintln!("uppercase-layer: prompt forwarding downstream");
+        let r = agent::prompt(req).await;
+        eprintln!("uppercase-layer: prompt downstream returned ok={}", r.is_ok());
+        r
     }
 
     async fn cancel(session_id: SessionId) {
@@ -179,12 +189,14 @@ impl AgentGuest for Layer {
 
 impl ClientGuest for Layer {
     async fn update_session(session_id: SessionId, update: SessionUpdate) {
+        eprintln!("uppercase-layer: update_session enter");
         let rewritten = if SHOUT_ENABLED.load(Ordering::Relaxed) {
             uppercase_update(update)
         } else {
             update
         };
         client::update_session(session_id, rewritten).await;
+        eprintln!("uppercase-layer: update_session exit");
     }
 
     async fn request_permission(
