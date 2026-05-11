@@ -151,20 +151,40 @@ pub(super) async fn handle_load_session(
 /// After responding to `session/new` or `session/load`, mark the
 /// session as opened in the gate and forward any notifications that
 /// were buffered while the wasm chain processed the call.
+///
+/// We deliberately delay the flush by a few hundred milliseconds. The
+/// editor reads our `session/new` response and any `session/update`
+/// notification from the same stdio stream into separate async tasks;
+/// if the notification task is polled before the editor's response
+/// handler finishes registering its session-side thread, the update is
+/// looked up against an empty session map and silently dropped. The
+/// concrete user-visible symptom in Zed is "Available commands: none"
+/// even though the layer advertised commands at session start. A small
+/// delay reliably gives the editor's response handler time to wire up
+/// the session before our held notifications arrive.
 fn flush_held_notifications(
-    gate: &NotificationGate,
+    gate: &Arc<NotificationGate>,
     session_id: &str,
     cx: &ConnectionTo<Client>,
 ) {
-    for notif in gate.open_session(session_id) {
-        if let Ok(json) = serde_json::to_string(&notif) {
-            tracing::info!(payload = %json, "→ wire: flushed session/update");
+    let gate = gate.clone();
+    let session_id = session_id.to_string();
+    let cx_inner = cx.clone();
+    let _ = cx.spawn(async move {
+        // 200ms is comfortably above the inter-task scheduling latency
+        // we've observed in Zed and small enough to feel instantaneous.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        for notif in gate.open_session(&session_id) {
+            if let Ok(json) = serde_json::to_string(&notif) {
+                tracing::info!(payload = %json, "→ wire: flushed session/update");
+            }
+            if let Err(e) = cx_inner.send_notification(notif) {
+                tracing::warn!(error = ?e, "failed to flush held session/update");
+                break;
+            }
         }
-        if let Err(e) = cx.send_notification(notif) {
-            tracing::warn!(error = ?e, "failed to flush held session/update");
-            break;
-        }
-    }
+        Ok(())
+    });
 }
 
 /// Spawn the wasm round-trip so this handler returns immediately. If we

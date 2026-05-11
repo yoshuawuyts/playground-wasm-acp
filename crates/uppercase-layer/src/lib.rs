@@ -144,14 +144,6 @@ impl AgentGuest for Layer {
 
     async fn prompt(req: PromptRequest) -> Result<PromptResponse, Error> {
         eprintln!("uppercase-layer: prompt enter session={}", req.session_id);
-        // Re-advertise commands here too. The `available-commands-update`
-        // sent during `new-session` races with the editor's registration
-        // of its session-side thread: if it arrives first, the editor
-        // drops it as referring to an unknown session, and the user sees
-        // "Available commands: none" forever. By the time a prompt
-        // request arrives, the session is fully registered, so this
-        // advertisement is guaranteed to land.
-        advertise_commands(&req.session_id).await;
         // Intercept `/shout` to toggle uppercase rewriting for the
         // remainder of this session.
         if is_shout_command(&req.prompt) {
