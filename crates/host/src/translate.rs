@@ -404,11 +404,18 @@ pub fn session_update_wit_to_schema(
                     v
                 })
                 .collect();
-            let upd: schema::SessionUpdate = serde_json::from_value(serde_json::json!({
+            let json = serde_json::json!({
                 "sessionUpdate": "available_commands_update",
                 "availableCommands": cmds_json,
-            }))
-            .ok()?;
+            });
+            tracing::info!(session = %session_id, payload = %json, "available-commands-update outbound");
+            let upd: schema::SessionUpdate = match serde_json::from_value(json) {
+                Ok(u) => u,
+                Err(e) => {
+                    tracing::warn!(session = %session_id, error = %e, "failed to deserialize available-commands-update");
+                    return None;
+                }
+            };
             return Some(schema::SessionNotification::new(
                 schema::SessionId::from(session_id),
                 upd,

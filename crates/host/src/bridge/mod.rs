@@ -21,6 +21,7 @@
 //! - [`outbound`] — the drain loop that forwards wasm-emitted events back
 //!   out to the editor.
 
+mod gate;
 mod handlers;
 mod outbound;
 
@@ -34,6 +35,8 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::state::OutboundEvent;
 use crate::wasm::{SessionFactory, SessionHandle, SessionRegistry};
+
+pub use gate::NotificationGate;
 
 /// Look up a session's handle, or return an ACP `invalid-params` error if
 /// the session id is unknown.
@@ -57,6 +60,8 @@ pub async fn run(
         tokio::io::stdin().compat(),
     );
 
+    let gate = Arc::new(NotificationGate::new());
+
     // Clone the Arcs once per handler closure. Cheap (Arc bump) and keeps
     // the closures `'static`. Each closure is a thin shim that forwards to
     // a named handler in the [`handlers`] submodule.
@@ -69,6 +74,9 @@ pub async fn run(
     let registry_set_mode = registry.clone();
     let registry_prompt = registry.clone();
     let registry_cancel = registry.clone();
+    let gate_new = gate.clone();
+    let gate_load = gate.clone();
+    let gate_drain = gate.clone();
 
     AgentRole
         .builder()
@@ -86,14 +94,14 @@ pub async fn run(
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |req, responder, _cx| {
-                handlers::handle_new_session(&factory_new, &registry_new, req, responder).await
+            async move |req, responder, cx| {
+                handlers::handle_new_session(&factory_new, &registry_new, &gate_new, req, responder, cx).await
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |req, responder, _cx| {
-                handlers::handle_load_session(&factory_load, &registry_load, req, responder).await
+            async move |req, responder, cx| {
+                handlers::handle_load_session(&factory_load, &registry_load, &gate_load, req, responder, cx).await
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -114,7 +122,7 @@ pub async fn run(
             agent_client_protocol::on_receive_notification!(),
         )
         .connect_with(transport, async move |cx| {
-            outbound::run_outbound_drain(cx, &mut outbound_rx).await
+            outbound::run_outbound_drain(cx, &mut outbound_rx, &gate_drain).await
         })
         .await
         .map_err(|e| anyhow::anyhow!("acp connection error: {e:?}"))?;

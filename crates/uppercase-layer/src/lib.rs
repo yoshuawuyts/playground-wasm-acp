@@ -47,6 +47,7 @@ static SHOUT_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Push the layer's `available-commands-update` upstream so the editor
 /// learns about `/shout`. Sent after each session lifecycle method.
 async fn advertise_commands(session_id: &SessionId) {
+    eprintln!("uppercase-layer: advertising /shout for session={session_id}");
     let cmds = vec![AvailableCommand {
         name: "shout".to_string(),
         description: "Toggle uppercase rewriting of agent output for this session."
@@ -58,6 +59,7 @@ async fn advertise_commands(session_id: &SessionId) {
         SessionUpdate::AvailableCommandsUpdate(cmds),
     )
     .await;
+    eprintln!("uppercase-layer: advertise_commands done");
 }
 
 /// Uppercase the `text` field of any `ContentBlock::Text`. Other content

@@ -16,6 +16,7 @@ use agent_client_protocol::role::acp::Client;
 use agent_client_protocol::{ConnectionTo, Error as AcpError, Responder, schema};
 use tracing::debug;
 
+use super::gate::NotificationGate;
 use super::require_session;
 use crate::translate;
 use crate::wasm::{PromptOutcome, SessionActor, SessionFactory, SessionRegistry, SetModeOutcome};
@@ -70,8 +71,10 @@ pub(super) async fn handle_authenticate(
 pub(super) async fn handle_new_session(
     factory: &SessionFactory,
     registry: &Arc<SessionRegistry>,
+    gate: &Arc<NotificationGate>,
     req: schema::NewSessionRequest,
     responder: Responder<schema::NewSessionResponse>,
+    cx: ConnectionTo<Client>,
 ) -> Result<(), AcpError> {
     // Spin up a fresh instance scoped to the session's project (cwd-derived
     // data dir under `/data`), run `new-session` on it directly, then
@@ -96,18 +99,27 @@ pub(super) async fn handle_new_session(
     let session_id = resp.session_id.clone();
     let (actor, handle) = SessionActor::new(chain, 8, registry.clone());
     tokio::task::spawn_local(actor.run());
-    registry.insert(session_id, handle);
+    registry.insert(session_id.clone(), handle);
     responder.respond(translate::new_session_response_wit_to_schema(
         resp,
         factory.component_id(),
-    )?)
+    )?)?;
+    // Now that the session/new response has been sent, release any
+    // notifications the chain emitted *during* the call (e.g. a layer
+    // advertising slash commands). Sending them earlier would race the
+    // response and the editor would drop them as referring to an
+    // unknown session id.
+    flush_held_notifications(gate, &session_id, &cx);
+    Ok(())
 }
 
 pub(super) async fn handle_load_session(
     factory: &SessionFactory,
     registry: &Arc<SessionRegistry>,
+    gate: &Arc<NotificationGate>,
     req: schema::LoadSessionRequest,
     responder: Responder<schema::LoadSessionResponse>,
+    cx: ConnectionTo<Client>,
 ) -> Result<(), AcpError> {
     let session_key = req.session_id.0.to_string();
     debug!(session = %session_key, "session/load");
@@ -124,11 +136,32 @@ pub(super) async fn handle_load_session(
     let resp = result.map_err(translate::wit_error_to_acp)?;
     let (actor, handle) = SessionActor::new(chain, 8, registry.clone());
     tokio::task::spawn_local(actor.run());
-    registry.insert(session_key, handle);
+    registry.insert(session_key.clone(), handle);
     responder.respond(translate::load_session_response_wit_to_schema(
         resp,
         factory.component_id(),
-    )?)
+    )?)?;
+    flush_held_notifications(gate, &session_key, &cx);
+    Ok(())
+}
+
+/// After responding to `session/new` or `session/load`, mark the
+/// session as opened in the gate and forward any notifications that
+/// were buffered while the wasm chain processed the call.
+fn flush_held_notifications(
+    gate: &NotificationGate,
+    session_id: &str,
+    cx: &ConnectionTo<Client>,
+) {
+    for notif in gate.open_session(session_id) {
+        if let Ok(json) = serde_json::to_string(&notif) {
+            tracing::info!(payload = %json, "→ wire: flushed session/update");
+        }
+        if let Err(e) = cx.send_notification(notif) {
+            tracing::warn!(error = ?e, "failed to flush held session/update");
+            break;
+        }
+    }
 }
 
 /// Spawn the wasm round-trip so this handler returns immediately. If we

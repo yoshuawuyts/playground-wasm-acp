@@ -18,15 +18,24 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
 use crate::state::OutboundEvent;
+use super::gate::NotificationGate;
 
 pub(super) async fn run_outbound_drain(
     cx: ConnectionTo<Client>,
     outbound_rx: &mut mpsc::Receiver<OutboundEvent>,
+    gate: &NotificationGate,
 ) -> Result<(), AcpError> {
     while let Some(event) = outbound_rx.recv().await {
         match event {
             OutboundEvent::SessionUpdate(notif) => {
-                if !forward_session_update(&cx, notif) {
+                // Hold notifications for sessions whose `session/new`
+                // (or `session/load`) response hasn't been emitted to
+                // the editor yet. Otherwise the editor receives the
+                // notification before learning about the session id
+                // and silently drops it.
+                if let Some(notif) = gate.admit(notif)
+                    && !forward_session_update(&cx, notif)
+                {
                     break;
                 }
             }
@@ -44,6 +53,9 @@ pub(super) async fn run_outbound_drain(
 /// Forward a `session/update` notification. Returns `false` if the
 /// connection has shut down and the drain loop should exit.
 fn forward_session_update(cx: &ConnectionTo<Client>, notif: schema::SessionNotification) -> bool {
+    if let Ok(json) = serde_json::to_string(&notif) {
+        tracing::info!(payload = %json, "→ wire: session/update");
+    }
     if let Err(e) = cx.send_notification(notif) {
         warn!("failed to send session/update: {e:?}");
         return false;
