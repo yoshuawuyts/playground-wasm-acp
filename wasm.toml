@@ -1,5 +1,6 @@
 [dependencies.components]
+"yosh:tablemark" = "2.0.6"
 
 [dependencies.interfaces]
-"wasmcloud:secrets" = "0.1.0-draft"
 "yosh:acp" = "5.1.0"
+"wasmcloud:secrets" = "0.1.0-draft"

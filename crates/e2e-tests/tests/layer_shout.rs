@@ -115,7 +115,7 @@ async fn shout_toggles_layer_uppercase() {
     loop {
         let msg = host.recv_any().await.unwrap();
         let s = serde_json::to_string(&msg).unwrap_or_default();
-        if s.contains("I AM VERY CALM RIGHT NOW!") {
+        if s.contains("CAPS LOCK ENGAGED!") {
             saw_ack = true;
         }
         if msg.get("id").and_then(Value::as_i64) == Some(shout_id) {
@@ -139,12 +139,26 @@ async fn shout_toggles_layer_uppercase() {
     let mut saw_lowercased = false;
     loop {
         let msg = host.recv_any().await.unwrap();
-        let s = serde_json::to_string(&msg).unwrap_or_default();
-        if s.contains("HELLO FROM OLLAMA") {
-            saw_uppercased = true;
-        }
-        if s.contains("hello from ollama") {
-            saw_lowercased = true;
+        // Inspect only the text of agent_message_chunk updates so we
+        // don't get false positives from session ids, method names, etc.
+        if msg.get("method").and_then(Value::as_str) == Some("session/update")
+            && msg.pointer("/params/update/sessionUpdate").and_then(Value::as_str)
+                == Some("agent_message_chunk")
+            && let Some(text) = msg
+                .pointer("/params/update/content/text")
+                .and_then(Value::as_str)
+        {
+            if text.chars().any(|c| c.is_ascii_lowercase()) {
+                saw_lowercased = true;
+            }
+            // A chunk that contains ≥1 ASCII letter and no lowercase
+            // letters is evidence that the layer is rewriting agent
+            // output for this session.
+            if text.chars().any(|c| c.is_ascii_uppercase())
+                && !text.chars().any(|c| c.is_ascii_lowercase())
+            {
+                saw_uppercased = true;
+            }
         }
         if msg.get("id").and_then(Value::as_i64) == Some(prompt_id) {
             break;
@@ -156,6 +170,6 @@ async fn shout_toggles_layer_uppercase() {
     );
     assert!(
         saw_uppercased,
-        "expected an uppercased text fragment (HELLO FROM OLLAMA) in the post-/shout stream",
+        "expected at least one uppercased agent_message_chunk in the post-/shout stream",
     );
 }
