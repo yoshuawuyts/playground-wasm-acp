@@ -347,9 +347,20 @@ impl Guest for Agent {
                     cwd: String::new(),
                 });
             if entry.history.is_empty() {
+                let mut prompt = SYSTEM_PROMPT.to_string();
+                if !entry.cwd.is_empty() {
+                    prompt.push_str("\n\nThe user's current project directory is `");
+                    prompt.push_str(&entry.cwd);
+                    prompt.push_str(
+                        "`. When the user refers to files without an absolute path, \
+                         resolve them relative to this directory. Never call `read_file` \
+                         with `/`, `.`, `..`, the project directory itself, or any other \
+                         directory - only call it with a path to a specific file.",
+                    );
+                }
                 entry.history.push(Message {
                     role: "system".to_string(),
-                    content: SYSTEM_PROMPT.to_string(),
+                    content: prompt,
                     tool_calls: Vec::new(),
                 });
             }

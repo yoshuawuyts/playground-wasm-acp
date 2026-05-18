@@ -258,7 +258,8 @@ async fn build_stage(
     let mut wasi = WasiCtxBuilder::new();
     wasi.stderr(crate::wasi_log::TracingStream::new("stderr"))
         .stdout(crate::wasi_log::TracingStream::new("stdout"))
-        .inherit_network();
+        .inherit_network()
+        .inherit_env();
     if let Some(dir) = data_dir {
         wasi.preopened_dir(dir, "/data", DirPerms::all(), FilePerms::all())?;
     }

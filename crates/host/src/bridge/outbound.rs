@@ -69,6 +69,7 @@ fn forward_read_text_file(
     reply: oneshot::Sender<Result<schema::ReadTextFileResponse, AcpError>>,
 ) {
     let path = req.path.display().to_string();
+    let host_path = req.path.clone();
     let session = req.session_id.0.to_string();
     debug!(session = %session, path = %path, "fs/read_text_file dispatched");
     let pending = cx.send_request(req);
@@ -80,12 +81,33 @@ fn forward_read_text_file(
                 path = %path,
                 "fs/read_text_file responded ok"
             ),
-            Err(e) => debug!(
-                session = %session,
-                path = %path,
-                error = %e.message,
-                "fs/read_text_file responded err"
-            ),
+            Err(e) => {
+                debug!(
+                    session = %session,
+                    path = %path,
+                    code = ?e.code,
+                    error = %e.message,
+                    "fs/read_text_file responded err"
+                );
+                // The editor said "no", but the file might actually
+                // exist on the host's filesystem. This is the classic
+                // Zed-launched-outside-a-project failure: the editor
+                // restricts fs/read_text_file to its workspace tree
+                // and reports a generic "Resource not found" for
+                // anything outside it. Surfacing the disagreement makes
+                // the failure mode obvious in the host log.
+                if host_path.exists() {
+                    warn!(
+                        session = %session,
+                        path = %path,
+                        editor_code = ?e.code,
+                        editor_error = %e.message,
+                        "fs/read_text_file: editor refused a path that exists on the host \
+                         filesystem. The editor likely doesn't consider this path part of \
+                         its open workspace. Open the file's project in the editor."
+                    );
+                }
+            }
         }
         let _ = reply.send(result);
         Ok(())

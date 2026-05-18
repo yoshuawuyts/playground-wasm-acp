@@ -1,5 +1,4 @@
 [dependencies.components]
-"yosh:tablemark" = "2.0.6"
 
 [dependencies.interfaces]
 "yosh:acp" = "5.1.0"

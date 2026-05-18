@@ -87,6 +87,8 @@ pub(super) async fn handle_new_session(
     if let Ok(payload) = serde_json::to_string(&req) {
         tracing::info!(payload = %payload, "← wire: session/new");
     }
+    resolve_workspace_cwd(&mut req.cwd);
+    warn_if_unlikely_workspace(&req.cwd);
     let chain = factory
         .instantiate_for_project(&req.cwd)
         .await
@@ -126,6 +128,7 @@ pub(super) async fn handle_load_session(
 ) -> Result<(), AcpError> {
     let session_key = req.session_id.0.to_string();
     debug!(session = %session_key, "session/load");
+    warn_if_unlikely_workspace(&req.cwd);
     let chain = factory
         .instantiate_for_project(&req.cwd)
         .await
@@ -296,4 +299,45 @@ pub(super) async fn handle_cancel(
         handle.cancel();
     }
     Ok(())
+}
+
+/// Emit a one-time `tracing::warn` if the editor's session `cwd` doesn't
+/// look like a project root (no common project markers found, or the
+/// path is the user's `$HOME`). This is the most frequent cause of
+/// "tools don't work" demo failures: the editor was launched outside a
+/// project, every relative `read_file` resolves under `$HOME`, and
+/// nothing is found.
+fn warn_if_unlikely_workspace(cwd: &std::path::Path) {
+    if !cwd.is_absolute() {
+        tracing::warn!(cwd = %cwd.display(), "session cwd is not absolute; tool calls with relative paths will likely fail");
+        return;
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    if home.as_deref() == Some(cwd) {
+        tracing::warn!(
+            cwd = %cwd.display(),
+            "session cwd is $HOME; the editor was likely launched outside a project. \
+             Relative paths from the model (e.g. `README.md`) will resolve under $HOME \
+             and almost certainly miss. Open the editor inside a project directory."
+        );
+        return;
+    }
+    const MARKERS: &[&str] = &[
+        ".git",
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "go.mod",
+        "deno.json",
+        "tsconfig.json",
+    ];
+    let has_marker = MARKERS.iter().any(|m| cwd.join(m).exists());
+    if !has_marker {
+        tracing::warn!(
+            cwd = %cwd.display(),
+            "session cwd has no obvious project markers ({}); model tool calls with \
+             relative paths may not resolve to anything useful",
+            MARKERS.join(", ")
+        );
+    }
 }
