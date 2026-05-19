@@ -7,7 +7,7 @@
 //! * [`layer`] — bidirectional ACP middleware. Exports both `agent` and
 //!   `client`, imports both. Used by the `uppercase-layer` crate.
 //!
-//! Both bindings are regenerated from `vendor/wit/*.wit` by
+//! Both bindings are regenerated from `wit/*.wit` by
 //! `just bindgen` (or the per-world `just bindgen-provider` /
 //! `just bindgen-layer`). Do not edit `provider.rs` / `layer.rs` by
 //! hand — changes will be overwritten.

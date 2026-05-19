@@ -38,7 +38,7 @@ use acp_wasm_sys::layer::yosh::acp::prompts::{PromptRequest, PromptResponse, Ses
 use acp_wasm_sys::layer::yosh::acp::sessions::{
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
     NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse, SessionId,
-    SessionMode, SessionModeState, SetSessionModeRequest,
+    ComponentSource, SessionMode, SessionModeState, SetSessionModeRequest,
 };
 use acp_wasm_sys::layer::yosh::acp::terminals::{
     CreateTerminalRequest, CreateTerminalResponse, TerminalExitStatus, TerminalId, TerminalOutput,
@@ -83,6 +83,9 @@ fn plan_mode() -> SessionMode {
              files or run commands."
                 .to_string(),
         ),
+        provided_by: ComponentSource {
+            component_id: "local:plan-layer".to_string(),
+        },
     }
 }
 
@@ -91,6 +94,9 @@ fn default_mode() -> SessionMode {
         id: DEFAULT_MODE_ID.to_string(),
         name: "Default".to_string(),
         description: Some("Normal execution: agent may edit files and run tools.".to_string()),
+        provided_by: ComponentSource {
+            component_id: "local:plan-layer".to_string(),
+        },
     }
 }
 
@@ -162,7 +168,16 @@ impl AgentGuest for Layer {
 
     async fn new_session(req: NewSessionRequest) -> Result<NewSessionResponse, Error> {
         let mut resp = agent::new_session(req).await?;
+        eprintln!(
+            "plan-layer: new_session downstream returned modes={:?}",
+            resp.modes.as_ref().map(|s| s.available_modes.len())
+        );
         resp.modes = inject_plan_mode(resp.modes);
+        eprintln!(
+            "plan-layer: new_session injecting; total modes={} session={}",
+            resp.modes.as_ref().map(|s| s.available_modes.len()).unwrap_or(0),
+            resp.session_id,
+        );
         set_plan(&resp.session_id, false);
         Ok(resp)
     }
@@ -170,7 +185,16 @@ impl AgentGuest for Layer {
     async fn load_session(req: LoadSessionRequest) -> Result<LoadSessionResponse, Error> {
         let sid = req.session_id.clone();
         let mut resp = agent::load_session(req).await?;
+        eprintln!(
+            "plan-layer: load_session downstream returned modes={:?} session={}",
+            resp.modes.as_ref().map(|s| s.available_modes.len()),
+            sid,
+        );
         resp.modes = inject_plan_mode(resp.modes);
+        eprintln!(
+            "plan-layer: load_session injecting; total modes={}",
+            resp.modes.as_ref().map(|s| s.available_modes.len()).unwrap_or(0),
+        );
         set_plan(&sid, false);
         Ok(resp)
     }

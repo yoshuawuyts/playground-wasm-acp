@@ -72,7 +72,7 @@ pub(super) async fn handle_new_session(
     factory: &SessionFactory,
     registry: &Arc<SessionRegistry>,
     gate: &Arc<NotificationGate>,
-    req: schema::NewSessionRequest,
+    mut req: schema::NewSessionRequest,
     responder: Responder<schema::NewSessionResponse>,
     cx: ConnectionTo<Client>,
 ) -> Result<(), AcpError> {
@@ -105,10 +105,11 @@ pub(super) async fn handle_new_session(
     let (actor, handle) = SessionActor::new(chain, 8, registry.clone());
     tokio::task::spawn_local(actor.run());
     registry.insert(session_id.clone(), handle);
-    responder.respond(translate::new_session_response_wit_to_schema(
-        resp,
-        factory.component_id(),
-    )?)?;
+    let schema_resp = translate::new_session_response_wit_to_schema(resp, factory.component_id())?;
+    if let Ok(payload) = serde_json::to_string(&schema_resp) {
+        tracing::info!(payload = %payload, "→ wire: session/new response");
+    }
+    responder.respond(schema_resp)?;
     // Now that the session/new response has been sent, release any
     // notifications the chain emitted *during* the call (e.g. a layer
     // advertising slash commands). Sending them earlier would race the
@@ -299,6 +300,21 @@ pub(super) async fn handle_cancel(
         handle.cancel();
     }
     Ok(())
+}
+
+/// Normalize a session `cwd` provided by the editor. Today this only
+/// canonicalizes relative paths against the host process's working
+/// directory — absolute paths are left alone. Editors are supposed to
+/// send an absolute path, but some don't; making it absolute up front
+/// keeps every downstream consumer (data dir derivation, wasm preopens,
+/// tool-call path resolution) on the same footing.
+fn resolve_workspace_cwd(cwd: &mut std::path::PathBuf) {
+    if cwd.is_absolute() {
+        return;
+    }
+    if let Ok(here) = std::env::current_dir() {
+        *cwd = here.join(&*cwd);
+    }
 }
 
 /// Emit a one-time `tracing::warn` if the editor's session `cwd` doesn't

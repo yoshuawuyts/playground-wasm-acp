@@ -46,7 +46,7 @@ mod wasm_actor;
 // `Host` traits we implement; exported interfaces (`agent`) become
 // callable methods on the wrapper struct.
 wasmtime::component::bindgen!({
-    path: "../../vendor/wit",
+    path: "../../wit/acp",
     world: "provider",
     imports: { default: async },
     exports: { default: async },
@@ -60,7 +60,7 @@ mod layer_bindings {
     // root, and a single set of `Host` impls on `HostState` satisfies
     // both linkers.
     wasmtime::component::bindgen!({
-        path: "../../vendor/wit",
+        path: "../../wit/acp",
         world: "layer",
         imports: { default: async },
         exports: { default: async },

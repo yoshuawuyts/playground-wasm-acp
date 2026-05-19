@@ -33,7 +33,7 @@ between the WIT types and `agent_client_protocol::schema` types in
 ## Installation
 
 You need a Rust toolchain plus the `wasm32-wasip2` target and `wit-bindgen` for
-regenerating bindings (only required if `vendor/wit/*.wit` changes).
+regenerating bindings (only required if `wit/*.wit` changes).
 
 ```shell
 rustup target add wasm32-wasip2

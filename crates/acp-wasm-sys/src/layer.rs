@@ -826,6 +826,34 @@ pub mod yosh {
                 }
             }
             /// ------------------------------------------------------------------
+            /// Component provenance
+            /// ------------------------------------------------------------------
+            /// Identifies the component (provider or layer) that contributed a
+            /// session mode or model.
+            ///
+            /// Providers set this to their own component id. Layers that
+            /// synthesize new modes/models (which the downstream stage doesn't
+            /// know about) set this to their own component id; layers
+            /// forwarding downstream entries MUST pass the existing value
+            /// through unchanged.
+            #[derive(Clone)]
+            pub struct ComponentSource {
+                /// Stable component identifier. Format is host-defined but
+                /// conventionally `namespace:name` (e.g. `local:plan-layer`,
+                /// `ghcr.io/yosh:ollama-provider`).
+                pub component_id: _rt::String,
+            }
+            impl ::core::fmt::Debug for ComponentSource {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("ComponentSource")
+                        .field("component-id", &self.component_id)
+                        .finish()
+                }
+            }
+            /// ------------------------------------------------------------------
             /// Session modes
             ///
             /// See: https://agentclientprotocol.com/protocol/session-modes
@@ -840,6 +868,11 @@ pub mod yosh {
                 pub name: _rt::String,
                 /// Optional longer description.
                 pub description: Option<_rt::String>,
+                /// Which component contributed this mode. Layers that synthesize
+                /// new modes set this to their own component id; layers
+                /// forwarding downstream entries pass it through unchanged.
+                /// Providers set it to their own component id.
+                pub provided_by: ComponentSource,
             }
             impl ::core::fmt::Debug for SessionMode {
                 fn fmt(
@@ -850,6 +883,7 @@ pub mod yosh {
                         .field("id", &self.id)
                         .field("name", &self.name)
                         .field("description", &self.description)
+                        .field("provided-by", &self.provided_by)
                         .finish()
                 }
             }
@@ -1962,6 +1996,10 @@ pub mod yosh {
         ///
         /// See: <https://agentclientprotocol.com/protocol/prompt-turn>
         ///      <https://agentclientprotocol.com/protocol/slash-commands>
+        /// Prompt turns, streaming session updates, and slash commands.
+        ///
+        /// See: <https://agentclientprotocol.com/protocol/prompt-turn>
+        ///      <https://agentclientprotocol.com/protocol/slash-commands>
         #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
         pub mod prompts {
             #[used]
@@ -2269,7 +2307,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]initialize"]
                                 fn call(_: *mut u8, _: *mut u8) -> i32;
@@ -2793,7 +2831,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]authenticate"]
                                 fn call(_: *mut u8, _: usize, _: *mut u8) -> i32;
@@ -2946,7 +2984,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]new-session"]
                                 fn call(
@@ -3698,13 +3736,13 @@ pub mod yosh {
                                                             let l9 = *_ptr
                                                                 .add(7 * ::core::mem::size_of::<*const u8>())
                                                                 .cast::<usize>();
-                                                            let base20 = l8;
-                                                            let len20 = l9;
-                                                            let mut result20 = _rt::Vec::with_capacity(len20);
-                                                            for i in 0..len20 {
-                                                                let base = base20
-                                                                    .add(i * (7 * ::core::mem::size_of::<*const u8>()));
-                                                                let e20 = {
+                                                            let base23 = l8;
+                                                            let len23 = l9;
+                                                            let mut result23 = _rt::Vec::with_capacity(len23);
+                                                            for i in 0..len23 {
+                                                                let base = base23
+                                                                    .add(i * (9 * ::core::mem::size_of::<*const u8>()));
+                                                                let e23 = {
                                                                     let l10 = *base.add(0).cast::<*mut u8>();
                                                                     let l11 = *base
                                                                         .add(::core::mem::size_of::<*const u8>())
@@ -3732,6 +3770,18 @@ pub mod yosh {
                                                                             .add(4 * ::core::mem::size_of::<*const u8>())
                                                                             .cast::<u8>(),
                                                                     );
+                                                                    let l20 = *base
+                                                                        .add(7 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<*mut u8>();
+                                                                    let l21 = *base
+                                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<usize>();
+                                                                    let len22 = l21;
+                                                                    let bytes22 = _rt::Vec::from_raw_parts(
+                                                                        l20.cast(),
+                                                                        len22,
+                                                                        len22,
+                                                                    );
                                                                     super::super::super::yosh::acp::sessions::SessionMode {
                                                                         id: _rt::string_lift(bytes12),
                                                                         name: _rt::string_lift(bytes15),
@@ -3757,18 +3807,21 @@ pub mod yosh {
                                                                             }
                                                                             _ => _rt::invalid_enum_discriminant(),
                                                                         },
+                                                                        provided_by: super::super::super::yosh::acp::sessions::ComponentSource {
+                                                                            component_id: _rt::string_lift(bytes22),
+                                                                        },
                                                                     }
                                                                 };
-                                                                result20.push(e20);
+                                                                result23.push(e23);
                                                             }
                                                             _rt::cabi_dealloc(
-                                                                base20,
-                                                                len20 * (7 * ::core::mem::size_of::<*const u8>()),
+                                                                base23,
+                                                                len23 * (9 * ::core::mem::size_of::<*const u8>()),
                                                                 ::core::mem::size_of::<*const u8>(),
                                                             );
                                                             super::super::super::yosh::acp::sessions::SessionModeState {
                                                                 current_mode_id: _rt::string_lift(bytes7),
-                                                                available_modes: result20,
+                                                                available_modes: result23,
                                                             }
                                                         };
                                                         Some(e)
@@ -3781,44 +3834,44 @@ pub mod yosh {
                                     }
                                     1 => {
                                         let e = {
-                                            let l21 = i32::from(
+                                            let l24 = i32::from(
                                                 *_ptr.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
                                             );
-                                            use super::super::super::yosh::acp::errors::ErrorCode as V23;
-                                            let v23 = match l21 {
-                                                0 => V23::ParseError,
-                                                1 => V23::InvalidRequest,
-                                                2 => V23::MethodNotFound,
-                                                3 => V23::InvalidParams,
-                                                4 => V23::InternalError,
-                                                5 => V23::AuthRequired,
-                                                6 => V23::ResourceNotFound,
+                                            use super::super::super::yosh::acp::errors::ErrorCode as V26;
+                                            let v26 = match l24 {
+                                                0 => V26::ParseError,
+                                                1 => V26::InvalidRequest,
+                                                2 => V26::MethodNotFound,
+                                                3 => V26::InvalidParams,
+                                                4 => V26::InternalError,
+                                                5 => V26::AuthRequired,
+                                                6 => V26::ResourceNotFound,
                                                 n => {
                                                     debug_assert_eq!(n, 7, "invalid enum discriminant");
-                                                    let e23 = {
-                                                        let l22 = *_ptr
+                                                    let e26 = {
+                                                        let l25 = *_ptr
                                                             .add(4 + 1 * ::core::mem::size_of::<*const u8>())
                                                             .cast::<i32>();
-                                                        l22
+                                                        l25
                                                     };
-                                                    V23::Other(e23)
+                                                    V26::Other(e26)
                                                 }
                                             };
-                                            let l24 = *_ptr
+                                            let l27 = *_ptr
                                                 .add(8 + 1 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<*mut u8>();
-                                            let l25 = *_ptr
+                                            let l28 = *_ptr
                                                 .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<usize>();
-                                            let len26 = l25;
-                                            let bytes26 = _rt::Vec::from_raw_parts(
-                                                l24.cast(),
-                                                len26,
-                                                len26,
+                                            let len29 = l28;
+                                            let bytes29 = _rt::Vec::from_raw_parts(
+                                                l27.cast(),
+                                                len29,
+                                                len29,
                                             );
                                             super::super::super::yosh::acp::errors::Error {
-                                                code: v23,
-                                                message: _rt::string_lift(bytes26),
+                                                code: v26,
+                                                message: _rt::string_lift(bytes29),
                                             }
                                         };
                                         Err(e)
@@ -3878,7 +3931,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]load-session"]
                                 fn call(_: *mut u8, _: *mut u8) -> i32;
@@ -4666,13 +4719,13 @@ pub mod yosh {
                                                             let l6 = *_ptr
                                                                 .add(5 * ::core::mem::size_of::<*const u8>())
                                                                 .cast::<usize>();
-                                                            let base17 = l5;
-                                                            let len17 = l6;
-                                                            let mut result17 = _rt::Vec::with_capacity(len17);
-                                                            for i in 0..len17 {
-                                                                let base = base17
-                                                                    .add(i * (7 * ::core::mem::size_of::<*const u8>()));
-                                                                let e17 = {
+                                                            let base20 = l5;
+                                                            let len20 = l6;
+                                                            let mut result20 = _rt::Vec::with_capacity(len20);
+                                                            for i in 0..len20 {
+                                                                let base = base20
+                                                                    .add(i * (9 * ::core::mem::size_of::<*const u8>()));
+                                                                let e20 = {
                                                                     let l7 = *base.add(0).cast::<*mut u8>();
                                                                     let l8 = *base
                                                                         .add(::core::mem::size_of::<*const u8>())
@@ -4700,6 +4753,18 @@ pub mod yosh {
                                                                             .add(4 * ::core::mem::size_of::<*const u8>())
                                                                             .cast::<u8>(),
                                                                     );
+                                                                    let l17 = *base
+                                                                        .add(7 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<*mut u8>();
+                                                                    let l18 = *base
+                                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<usize>();
+                                                                    let len19 = l18;
+                                                                    let bytes19 = _rt::Vec::from_raw_parts(
+                                                                        l17.cast(),
+                                                                        len19,
+                                                                        len19,
+                                                                    );
                                                                     super::super::super::yosh::acp::sessions::SessionMode {
                                                                         id: _rt::string_lift(bytes9),
                                                                         name: _rt::string_lift(bytes12),
@@ -4725,18 +4790,21 @@ pub mod yosh {
                                                                             }
                                                                             _ => _rt::invalid_enum_discriminant(),
                                                                         },
+                                                                        provided_by: super::super::super::yosh::acp::sessions::ComponentSource {
+                                                                            component_id: _rt::string_lift(bytes19),
+                                                                        },
                                                                     }
                                                                 };
-                                                                result17.push(e17);
+                                                                result20.push(e20);
                                                             }
                                                             _rt::cabi_dealloc(
-                                                                base17,
-                                                                len17 * (7 * ::core::mem::size_of::<*const u8>()),
+                                                                base20,
+                                                                len20 * (9 * ::core::mem::size_of::<*const u8>()),
                                                                 ::core::mem::size_of::<*const u8>(),
                                                             );
                                                             super::super::super::yosh::acp::sessions::SessionModeState {
                                                                 current_mode_id: _rt::string_lift(bytes4),
-                                                                available_modes: result17,
+                                                                available_modes: result20,
                                                             }
                                                         };
                                                         Some(e)
@@ -4749,44 +4817,44 @@ pub mod yosh {
                                     }
                                     1 => {
                                         let e = {
-                                            let l18 = i32::from(
+                                            let l21 = i32::from(
                                                 *_ptr.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
                                             );
-                                            use super::super::super::yosh::acp::errors::ErrorCode as V20;
-                                            let v20 = match l18 {
-                                                0 => V20::ParseError,
-                                                1 => V20::InvalidRequest,
-                                                2 => V20::MethodNotFound,
-                                                3 => V20::InvalidParams,
-                                                4 => V20::InternalError,
-                                                5 => V20::AuthRequired,
-                                                6 => V20::ResourceNotFound,
+                                            use super::super::super::yosh::acp::errors::ErrorCode as V23;
+                                            let v23 = match l21 {
+                                                0 => V23::ParseError,
+                                                1 => V23::InvalidRequest,
+                                                2 => V23::MethodNotFound,
+                                                3 => V23::InvalidParams,
+                                                4 => V23::InternalError,
+                                                5 => V23::AuthRequired,
+                                                6 => V23::ResourceNotFound,
                                                 n => {
                                                     debug_assert_eq!(n, 7, "invalid enum discriminant");
-                                                    let e20 = {
-                                                        let l19 = *_ptr
+                                                    let e23 = {
+                                                        let l22 = *_ptr
                                                             .add(4 + 1 * ::core::mem::size_of::<*const u8>())
                                                             .cast::<i32>();
-                                                        l19
+                                                        l22
                                                     };
-                                                    V20::Other(e20)
+                                                    V23::Other(e23)
                                                 }
                                             };
-                                            let l21 = *_ptr
+                                            let l24 = *_ptr
                                                 .add(8 + 1 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<*mut u8>();
-                                            let l22 = *_ptr
+                                            let l25 = *_ptr
                                                 .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<usize>();
-                                            let len23 = l22;
-                                            let bytes23 = _rt::Vec::from_raw_parts(
-                                                l21.cast(),
-                                                len23,
-                                                len23,
+                                            let len26 = l25;
+                                            let bytes26 = _rt::Vec::from_raw_parts(
+                                                l24.cast(),
+                                                len26,
+                                                len26,
                                             );
                                             super::super::super::yosh::acp::errors::Error {
-                                                code: v20,
-                                                message: _rt::string_lift(bytes23),
+                                                code: v23,
+                                                message: _rt::string_lift(bytes26),
                                             }
                                         };
                                         Err(e)
@@ -4845,7 +4913,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]list-sessions"]
                                 fn call(_: *mut u8, _: *mut u8) -> i32;
@@ -5237,7 +5305,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]resume-session"]
                                 fn call(_: *mut u8, _: *mut u8) -> i32;
@@ -6025,13 +6093,13 @@ pub mod yosh {
                                                             let l6 = *_ptr
                                                                 .add(5 * ::core::mem::size_of::<*const u8>())
                                                                 .cast::<usize>();
-                                                            let base17 = l5;
-                                                            let len17 = l6;
-                                                            let mut result17 = _rt::Vec::with_capacity(len17);
-                                                            for i in 0..len17 {
-                                                                let base = base17
-                                                                    .add(i * (7 * ::core::mem::size_of::<*const u8>()));
-                                                                let e17 = {
+                                                            let base20 = l5;
+                                                            let len20 = l6;
+                                                            let mut result20 = _rt::Vec::with_capacity(len20);
+                                                            for i in 0..len20 {
+                                                                let base = base20
+                                                                    .add(i * (9 * ::core::mem::size_of::<*const u8>()));
+                                                                let e20 = {
                                                                     let l7 = *base.add(0).cast::<*mut u8>();
                                                                     let l8 = *base
                                                                         .add(::core::mem::size_of::<*const u8>())
@@ -6059,6 +6127,18 @@ pub mod yosh {
                                                                             .add(4 * ::core::mem::size_of::<*const u8>())
                                                                             .cast::<u8>(),
                                                                     );
+                                                                    let l17 = *base
+                                                                        .add(7 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<*mut u8>();
+                                                                    let l18 = *base
+                                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<usize>();
+                                                                    let len19 = l18;
+                                                                    let bytes19 = _rt::Vec::from_raw_parts(
+                                                                        l17.cast(),
+                                                                        len19,
+                                                                        len19,
+                                                                    );
                                                                     super::super::super::yosh::acp::sessions::SessionMode {
                                                                         id: _rt::string_lift(bytes9),
                                                                         name: _rt::string_lift(bytes12),
@@ -6084,18 +6164,21 @@ pub mod yosh {
                                                                             }
                                                                             _ => _rt::invalid_enum_discriminant(),
                                                                         },
+                                                                        provided_by: super::super::super::yosh::acp::sessions::ComponentSource {
+                                                                            component_id: _rt::string_lift(bytes19),
+                                                                        },
                                                                     }
                                                                 };
-                                                                result17.push(e17);
+                                                                result20.push(e20);
                                                             }
                                                             _rt::cabi_dealloc(
-                                                                base17,
-                                                                len17 * (7 * ::core::mem::size_of::<*const u8>()),
+                                                                base20,
+                                                                len20 * (9 * ::core::mem::size_of::<*const u8>()),
                                                                 ::core::mem::size_of::<*const u8>(),
                                                             );
                                                             super::super::super::yosh::acp::sessions::SessionModeState {
                                                                 current_mode_id: _rt::string_lift(bytes4),
-                                                                available_modes: result17,
+                                                                available_modes: result20,
                                                             }
                                                         };
                                                         Some(e)
@@ -6108,44 +6191,44 @@ pub mod yosh {
                                     }
                                     1 => {
                                         let e = {
-                                            let l18 = i32::from(
+                                            let l21 = i32::from(
                                                 *_ptr.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
                                             );
-                                            use super::super::super::yosh::acp::errors::ErrorCode as V20;
-                                            let v20 = match l18 {
-                                                0 => V20::ParseError,
-                                                1 => V20::InvalidRequest,
-                                                2 => V20::MethodNotFound,
-                                                3 => V20::InvalidParams,
-                                                4 => V20::InternalError,
-                                                5 => V20::AuthRequired,
-                                                6 => V20::ResourceNotFound,
+                                            use super::super::super::yosh::acp::errors::ErrorCode as V23;
+                                            let v23 = match l21 {
+                                                0 => V23::ParseError,
+                                                1 => V23::InvalidRequest,
+                                                2 => V23::MethodNotFound,
+                                                3 => V23::InvalidParams,
+                                                4 => V23::InternalError,
+                                                5 => V23::AuthRequired,
+                                                6 => V23::ResourceNotFound,
                                                 n => {
                                                     debug_assert_eq!(n, 7, "invalid enum discriminant");
-                                                    let e20 = {
-                                                        let l19 = *_ptr
+                                                    let e23 = {
+                                                        let l22 = *_ptr
                                                             .add(4 + 1 * ::core::mem::size_of::<*const u8>())
                                                             .cast::<i32>();
-                                                        l19
+                                                        l22
                                                     };
-                                                    V20::Other(e20)
+                                                    V23::Other(e23)
                                                 }
                                             };
-                                            let l21 = *_ptr
+                                            let l24 = *_ptr
                                                 .add(8 + 1 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<*mut u8>();
-                                            let l22 = *_ptr
+                                            let l25 = *_ptr
                                                 .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<usize>();
-                                            let len23 = l22;
-                                            let bytes23 = _rt::Vec::from_raw_parts(
-                                                l21.cast(),
-                                                len23,
-                                                len23,
+                                            let len26 = l25;
+                                            let bytes26 = _rt::Vec::from_raw_parts(
+                                                l24.cast(),
+                                                len26,
+                                                len26,
                                             );
                                             super::super::super::yosh::acp::errors::Error {
-                                                code: v20,
-                                                message: _rt::string_lift(bytes23),
+                                                code: v23,
+                                                message: _rt::string_lift(bytes26),
                                             }
                                         };
                                         Err(e)
@@ -6200,7 +6283,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]close-session"]
                                 fn call(_: *mut u8, _: usize, _: *mut u8) -> i32;
@@ -6351,7 +6434,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]set-session-mode"]
                                 fn call(
@@ -6525,7 +6608,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]prompt"]
                                 fn call(
@@ -7433,7 +7516,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]cancel"]
                                 fn call(_: *mut u8, _: usize) -> i32;
@@ -7560,7 +7643,11 @@ pub mod yosh {
                 }
             }
         }
-        /// Methods exported by the client. The agent calls these.
+        /// Host-capability callbacks invoked by the agent on the client side:
+        /// streaming session updates, permission prompts, file system access, and
+        /// terminal control.
+        ///
+        /// All methods are called by the agent and implemented by the client.
         ///
         /// Maps to the JSON-RPC methods listed under "Client" in the protocol
         /// overview: <https://agentclientprotocol.com/protocol/overview#client>
@@ -7627,7 +7714,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]update-session"]
                                 fn call(_: *mut u8) -> i32;
@@ -13204,7 +13291,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]request-permission"]
                                 fn call(_: *mut u8, _: *mut u8) -> i32;
@@ -14854,7 +14941,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]read-text-file"]
                                 fn call(_: *mut u8, _: *mut u8) -> i32;
@@ -15096,7 +15183,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]write-text-file"]
                                 fn call(_: *mut u8, _: *mut u8) -> i32;
@@ -15319,7 +15406,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]create-terminal"]
                                 fn call(_: *mut u8, _: *mut u8) -> i32;
@@ -15809,7 +15896,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]get-terminal-output"]
                                 fn call(
@@ -16060,7 +16147,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]wait-for-terminal-exit"]
                                 fn call(
@@ -16275,7 +16362,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]kill-terminal"]
                                 fn call(
@@ -16444,7 +16531,7 @@ pub mod yosh {
                             _results: *mut u8,
                         ) -> u32 {
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[async-lower]release-terminal"]
                                 fn call(
@@ -16954,7 +17041,7 @@ pub mod exports {
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]initialize"]
                                 fn wit_import22(_: *mut u8);
@@ -17032,7 +17119,7 @@ pub mod exports {
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]authenticate"]
                                 fn wit_import7(
@@ -17399,14 +17486,14 @@ pub mod exports {
                                     .await
                             };
                             let (
-                                result70_0,
-                                result70_1,
-                                result70_2,
-                                result70_3,
-                                result70_4,
-                                result70_5,
-                                result70_6,
-                                result70_7,
+                                result72_0,
+                                result72_1,
+                                result72_2,
+                                result72_3,
+                                result72_4,
+                                result72_5,
+                                result72_6,
+                                result72_7,
                             ) = match result55 {
                                 Ok(e) => {
                                     let super::super::super::super::yosh::acp::sessions::NewSessionResponse {
@@ -17417,11 +17504,11 @@ pub mod exports {
                                     let ptr57 = vec57.as_ptr().cast::<u8>();
                                     let len57 = vec57.len();
                                     let (
-                                        result65_0,
-                                        result65_1,
-                                        result65_2,
-                                        result65_3,
-                                        result65_4,
+                                        result67_0,
+                                        result67_1,
+                                        result67_2,
+                                        result67_3,
+                                        result67_4,
                                     ) = match modes56 {
                                         Some(e) => {
                                             let super::super::super::super::yosh::acp::sessions::SessionModeState {
@@ -17431,25 +17518,26 @@ pub mod exports {
                                             let vec59 = current_mode_id58;
                                             let ptr59 = vec59.as_ptr().cast::<u8>();
                                             let len59 = vec59.len();
-                                            let vec64 = available_modes58;
-                                            let len64 = vec64.len();
-                                            let layout64 = _rt::alloc::Layout::from_size_align(
-                                                    vec64.len() * (7 * ::core::mem::size_of::<*const u8>()),
+                                            let vec66 = available_modes58;
+                                            let len66 = vec66.len();
+                                            let layout66 = _rt::alloc::Layout::from_size_align(
+                                                    vec66.len() * (9 * ::core::mem::size_of::<*const u8>()),
                                                     ::core::mem::size_of::<*const u8>(),
                                                 )
                                                 .unwrap();
-                                            let (result64, _cleanup64) = wit_bindgen::rt::Cleanup::new(
-                                                layout64,
+                                            let (result66, _cleanup66) = wit_bindgen::rt::Cleanup::new(
+                                                layout66,
                                             );
-                                            cleanup_list.extend(_cleanup64);
-                                            for (i, e) in vec64.into_iter().enumerate() {
-                                                let base = result64
-                                                    .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                            cleanup_list.extend(_cleanup66);
+                                            for (i, e) in vec66.into_iter().enumerate() {
+                                                let base = result66
+                                                    .add(i * (9 * ::core::mem::size_of::<*const u8>()));
                                                 {
                                                     let super::super::super::super::yosh::acp::sessions::SessionMode {
                                                         id: id60,
                                                         name: name60,
                                                         description: description60,
+                                                        provided_by: provided_by60,
                                                     } = e;
                                                     let vec61 = id60;
                                                     let ptr61 = vec61.as_ptr().cast::<u8>();
@@ -17488,9 +17576,21 @@ pub mod exports {
                                                                 .cast::<u8>() = (0i32) as u8;
                                                         }
                                                     };
+                                                    let super::super::super::super::yosh::acp::sessions::ComponentSource {
+                                                        component_id: component_id64,
+                                                    } = provided_by60;
+                                                    let vec65 = component_id64;
+                                                    let ptr65 = vec65.as_ptr().cast::<u8>();
+                                                    let len65 = vec65.len();
+                                                    *base
+                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len65;
+                                                    *base
+                                                        .add(7 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<*mut u8>() = ptr65.cast_mut();
                                                 }
                                             }
-                                            (1i32, ptr59.cast_mut(), len59, result64, len64)
+                                            (1i32, ptr59.cast_mut(), len59, result66, len66)
                                         }
                                         None => {
                                             (
@@ -17506,38 +17606,38 @@ pub mod exports {
                                         0i32,
                                         ptr57.cast_mut(),
                                         len57,
-                                        result65_0 as *mut u8,
-                                        result65_1,
-                                        result65_2,
-                                        result65_3,
-                                        result65_4,
+                                        result67_0 as *mut u8,
+                                        result67_1,
+                                        result67_2,
+                                        result67_3,
+                                        result67_4,
                                     )
                                 }
                                 Err(e) => {
                                     let super::super::super::super::yosh::acp::errors::Error {
-                                        code: code66,
-                                        message: message66,
+                                        code: code68,
+                                        message: message68,
                                     } = e;
-                                    use super::super::super::super::yosh::acp::errors::ErrorCode as V67;
-                                    let (result68_0, result68_1) = match code66 {
-                                        V67::ParseError => (0i32, 0i32),
-                                        V67::InvalidRequest => (1i32, 0i32),
-                                        V67::MethodNotFound => (2i32, 0i32),
-                                        V67::InvalidParams => (3i32, 0i32),
-                                        V67::InternalError => (4i32, 0i32),
-                                        V67::AuthRequired => (5i32, 0i32),
-                                        V67::ResourceNotFound => (6i32, 0i32),
-                                        V67::Other(e) => (7i32, _rt::as_i32(e)),
+                                    use super::super::super::super::yosh::acp::errors::ErrorCode as V69;
+                                    let (result70_0, result70_1) = match code68 {
+                                        V69::ParseError => (0i32, 0i32),
+                                        V69::InvalidRequest => (1i32, 0i32),
+                                        V69::MethodNotFound => (2i32, 0i32),
+                                        V69::InvalidParams => (3i32, 0i32),
+                                        V69::InternalError => (4i32, 0i32),
+                                        V69::AuthRequired => (5i32, 0i32),
+                                        V69::ResourceNotFound => (6i32, 0i32),
+                                        V69::Other(e) => (7i32, _rt::as_i32(e)),
                                     };
-                                    let vec69 = message66;
-                                    let ptr69 = vec69.as_ptr().cast::<u8>();
-                                    let len69 = vec69.len();
+                                    let vec71 = message68;
+                                    let ptr71 = vec71.as_ptr().cast::<u8>();
+                                    let len71 = vec71.len();
                                     (
                                         1i32,
-                                        result68_0 as *mut u8,
-                                        result68_1 as usize,
-                                        ptr69.cast_mut(),
-                                        len69 as *mut u8,
+                                        result70_0 as *mut u8,
+                                        result70_1 as usize,
+                                        ptr71.cast_mut(),
+                                        len71 as *mut u8,
                                         0usize,
                                         ::core::ptr::null_mut(),
                                         0usize,
@@ -17545,10 +17645,10 @@ pub mod exports {
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]new-session"]
-                                fn wit_import71(
+                                fn wit_import73(
                                     _: i32,
                                     _: *mut u8,
                                     _: usize,
@@ -17560,7 +17660,7 @@ pub mod exports {
                                 );
                             }
                             #[cfg(not(target_arch = "wasm32"))]
-                            unsafe extern "C" fn wit_import71(
+                            unsafe extern "C" fn wit_import73(
                                 _: i32,
                                 _: *mut u8,
                                 _: usize,
@@ -17573,15 +17673,15 @@ pub mod exports {
                                 unreachable!()
                             }
                             _task_cancel.forget();
-                            wit_import71(
-                                result70_0,
-                                result70_1,
-                                result70_2,
-                                result70_3,
-                                result70_4,
-                                result70_5,
-                                result70_6,
-                                result70_7,
+                            wit_import73(
+                                result72_0,
+                                result72_1,
+                                result72_2,
+                                result72_3,
+                                result72_4,
+                                result72_5,
+                                result72_6,
+                                result72_7,
                             );
                         })
                     }
@@ -17930,23 +18030,23 @@ pub mod exports {
                                     .await
                             };
                             let (
-                                result70_0,
-                                result70_1,
-                                result70_2,
-                                result70_3,
-                                result70_4,
-                                result70_5,
+                                result72_0,
+                                result72_1,
+                                result72_2,
+                                result72_3,
+                                result72_4,
+                                result72_5,
                             ) = match result56 {
                                 Ok(e) => {
                                     let super::super::super::super::yosh::acp::sessions::LoadSessionResponse {
                                         modes: modes57,
                                     } = e;
                                     let (
-                                        result65_0,
-                                        result65_1,
-                                        result65_2,
-                                        result65_3,
-                                        result65_4,
+                                        result67_0,
+                                        result67_1,
+                                        result67_2,
+                                        result67_3,
+                                        result67_4,
                                     ) = match modes57 {
                                         Some(e) => {
                                             let super::super::super::super::yosh::acp::sessions::SessionModeState {
@@ -17956,25 +18056,26 @@ pub mod exports {
                                             let vec59 = current_mode_id58;
                                             let ptr59 = vec59.as_ptr().cast::<u8>();
                                             let len59 = vec59.len();
-                                            let vec64 = available_modes58;
-                                            let len64 = vec64.len();
-                                            let layout64 = _rt::alloc::Layout::from_size_align(
-                                                    vec64.len() * (7 * ::core::mem::size_of::<*const u8>()),
+                                            let vec66 = available_modes58;
+                                            let len66 = vec66.len();
+                                            let layout66 = _rt::alloc::Layout::from_size_align(
+                                                    vec66.len() * (9 * ::core::mem::size_of::<*const u8>()),
                                                     ::core::mem::size_of::<*const u8>(),
                                                 )
                                                 .unwrap();
-                                            let (result64, _cleanup64) = wit_bindgen::rt::Cleanup::new(
-                                                layout64,
+                                            let (result66, _cleanup66) = wit_bindgen::rt::Cleanup::new(
+                                                layout66,
                                             );
-                                            cleanup_list.extend(_cleanup64);
-                                            for (i, e) in vec64.into_iter().enumerate() {
-                                                let base = result64
-                                                    .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                            cleanup_list.extend(_cleanup66);
+                                            for (i, e) in vec66.into_iter().enumerate() {
+                                                let base = result66
+                                                    .add(i * (9 * ::core::mem::size_of::<*const u8>()));
                                                 {
                                                     let super::super::super::super::yosh::acp::sessions::SessionMode {
                                                         id: id60,
                                                         name: name60,
                                                         description: description60,
+                                                        provided_by: provided_by60,
                                                     } = e;
                                                     let vec61 = id60;
                                                     let ptr61 = vec61.as_ptr().cast::<u8>();
@@ -18013,9 +18114,21 @@ pub mod exports {
                                                                 .cast::<u8>() = (0i32) as u8;
                                                         }
                                                     };
+                                                    let super::super::super::super::yosh::acp::sessions::ComponentSource {
+                                                        component_id: component_id64,
+                                                    } = provided_by60;
+                                                    let vec65 = component_id64;
+                                                    let ptr65 = vec65.as_ptr().cast::<u8>();
+                                                    let len65 = vec65.len();
+                                                    *base
+                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len65;
+                                                    *base
+                                                        .add(7 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<*mut u8>() = ptr65.cast_mut();
                                                 }
                                             }
-                                            (1i32, ptr59.cast_mut(), len59, result64, len64)
+                                            (1i32, ptr59.cast_mut(), len59, result66, len66)
                                         }
                                         None => {
                                             (
@@ -18029,47 +18142,47 @@ pub mod exports {
                                     };
                                     (
                                         0i32,
-                                        result65_0,
-                                        result65_1,
-                                        result65_2 as *mut u8,
-                                        result65_3,
-                                        result65_4,
+                                        result67_0,
+                                        result67_1,
+                                        result67_2 as *mut u8,
+                                        result67_3,
+                                        result67_4,
                                     )
                                 }
                                 Err(e) => {
                                     let super::super::super::super::yosh::acp::errors::Error {
-                                        code: code66,
-                                        message: message66,
+                                        code: code68,
+                                        message: message68,
                                     } = e;
-                                    use super::super::super::super::yosh::acp::errors::ErrorCode as V67;
-                                    let (result68_0, result68_1) = match code66 {
-                                        V67::ParseError => (0i32, 0i32),
-                                        V67::InvalidRequest => (1i32, 0i32),
-                                        V67::MethodNotFound => (2i32, 0i32),
-                                        V67::InvalidParams => (3i32, 0i32),
-                                        V67::InternalError => (4i32, 0i32),
-                                        V67::AuthRequired => (5i32, 0i32),
-                                        V67::ResourceNotFound => (6i32, 0i32),
-                                        V67::Other(e) => (7i32, _rt::as_i32(e)),
+                                    use super::super::super::super::yosh::acp::errors::ErrorCode as V69;
+                                    let (result70_0, result70_1) = match code68 {
+                                        V69::ParseError => (0i32, 0i32),
+                                        V69::InvalidRequest => (1i32, 0i32),
+                                        V69::MethodNotFound => (2i32, 0i32),
+                                        V69::InvalidParams => (3i32, 0i32),
+                                        V69::InternalError => (4i32, 0i32),
+                                        V69::AuthRequired => (5i32, 0i32),
+                                        V69::ResourceNotFound => (6i32, 0i32),
+                                        V69::Other(e) => (7i32, _rt::as_i32(e)),
                                     };
-                                    let vec69 = message66;
-                                    let ptr69 = vec69.as_ptr().cast::<u8>();
-                                    let len69 = vec69.len();
+                                    let vec71 = message68;
+                                    let ptr71 = vec71.as_ptr().cast::<u8>();
+                                    let len71 = vec71.len();
                                     (
                                         1i32,
-                                        result68_0,
-                                        result68_1 as *mut u8,
-                                        ptr69.cast_mut(),
-                                        len69 as *mut u8,
+                                        result70_0,
+                                        result70_1 as *mut u8,
+                                        ptr71.cast_mut(),
+                                        len71 as *mut u8,
                                         0usize,
                                     )
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]load-session"]
-                                fn wit_import71(
+                                fn wit_import73(
                                     _: i32,
                                     _: i32,
                                     _: *mut u8,
@@ -18079,7 +18192,7 @@ pub mod exports {
                                 );
                             }
                             #[cfg(not(target_arch = "wasm32"))]
-                            unsafe extern "C" fn wit_import71(
+                            unsafe extern "C" fn wit_import73(
                                 _: i32,
                                 _: i32,
                                 _: *mut u8,
@@ -18090,13 +18203,13 @@ pub mod exports {
                                 unreachable!()
                             }
                             _task_cancel.forget();
-                            wit_import71(
-                                result70_0,
-                                result70_1,
-                                result70_2,
-                                result70_3,
-                                result70_4,
-                                result70_5,
+                            wit_import73(
+                                result72_0,
+                                result72_1,
+                                result72_2,
+                                result72_3,
+                                result72_4,
+                                result72_5,
                             );
                         })
                     }
@@ -18306,7 +18419,7 @@ pub mod exports {
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]list-sessions"]
                                 fn wit_import17(
@@ -18685,23 +18798,23 @@ pub mod exports {
                                     .await
                             };
                             let (
-                                result70_0,
-                                result70_1,
-                                result70_2,
-                                result70_3,
-                                result70_4,
-                                result70_5,
+                                result72_0,
+                                result72_1,
+                                result72_2,
+                                result72_3,
+                                result72_4,
+                                result72_5,
                             ) = match result56 {
                                 Ok(e) => {
                                     let super::super::super::super::yosh::acp::sessions::ResumeSessionResponse {
                                         modes: modes57,
                                     } = e;
                                     let (
-                                        result65_0,
-                                        result65_1,
-                                        result65_2,
-                                        result65_3,
-                                        result65_4,
+                                        result67_0,
+                                        result67_1,
+                                        result67_2,
+                                        result67_3,
+                                        result67_4,
                                     ) = match modes57 {
                                         Some(e) => {
                                             let super::super::super::super::yosh::acp::sessions::SessionModeState {
@@ -18711,25 +18824,26 @@ pub mod exports {
                                             let vec59 = current_mode_id58;
                                             let ptr59 = vec59.as_ptr().cast::<u8>();
                                             let len59 = vec59.len();
-                                            let vec64 = available_modes58;
-                                            let len64 = vec64.len();
-                                            let layout64 = _rt::alloc::Layout::from_size_align(
-                                                    vec64.len() * (7 * ::core::mem::size_of::<*const u8>()),
+                                            let vec66 = available_modes58;
+                                            let len66 = vec66.len();
+                                            let layout66 = _rt::alloc::Layout::from_size_align(
+                                                    vec66.len() * (9 * ::core::mem::size_of::<*const u8>()),
                                                     ::core::mem::size_of::<*const u8>(),
                                                 )
                                                 .unwrap();
-                                            let (result64, _cleanup64) = wit_bindgen::rt::Cleanup::new(
-                                                layout64,
+                                            let (result66, _cleanup66) = wit_bindgen::rt::Cleanup::new(
+                                                layout66,
                                             );
-                                            cleanup_list.extend(_cleanup64);
-                                            for (i, e) in vec64.into_iter().enumerate() {
-                                                let base = result64
-                                                    .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                            cleanup_list.extend(_cleanup66);
+                                            for (i, e) in vec66.into_iter().enumerate() {
+                                                let base = result66
+                                                    .add(i * (9 * ::core::mem::size_of::<*const u8>()));
                                                 {
                                                     let super::super::super::super::yosh::acp::sessions::SessionMode {
                                                         id: id60,
                                                         name: name60,
                                                         description: description60,
+                                                        provided_by: provided_by60,
                                                     } = e;
                                                     let vec61 = id60;
                                                     let ptr61 = vec61.as_ptr().cast::<u8>();
@@ -18768,9 +18882,21 @@ pub mod exports {
                                                                 .cast::<u8>() = (0i32) as u8;
                                                         }
                                                     };
+                                                    let super::super::super::super::yosh::acp::sessions::ComponentSource {
+                                                        component_id: component_id64,
+                                                    } = provided_by60;
+                                                    let vec65 = component_id64;
+                                                    let ptr65 = vec65.as_ptr().cast::<u8>();
+                                                    let len65 = vec65.len();
+                                                    *base
+                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len65;
+                                                    *base
+                                                        .add(7 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<*mut u8>() = ptr65.cast_mut();
                                                 }
                                             }
-                                            (1i32, ptr59.cast_mut(), len59, result64, len64)
+                                            (1i32, ptr59.cast_mut(), len59, result66, len66)
                                         }
                                         None => {
                                             (
@@ -18784,47 +18910,47 @@ pub mod exports {
                                     };
                                     (
                                         0i32,
-                                        result65_0,
-                                        result65_1,
-                                        result65_2 as *mut u8,
-                                        result65_3,
-                                        result65_4,
+                                        result67_0,
+                                        result67_1,
+                                        result67_2 as *mut u8,
+                                        result67_3,
+                                        result67_4,
                                     )
                                 }
                                 Err(e) => {
                                     let super::super::super::super::yosh::acp::errors::Error {
-                                        code: code66,
-                                        message: message66,
+                                        code: code68,
+                                        message: message68,
                                     } = e;
-                                    use super::super::super::super::yosh::acp::errors::ErrorCode as V67;
-                                    let (result68_0, result68_1) = match code66 {
-                                        V67::ParseError => (0i32, 0i32),
-                                        V67::InvalidRequest => (1i32, 0i32),
-                                        V67::MethodNotFound => (2i32, 0i32),
-                                        V67::InvalidParams => (3i32, 0i32),
-                                        V67::InternalError => (4i32, 0i32),
-                                        V67::AuthRequired => (5i32, 0i32),
-                                        V67::ResourceNotFound => (6i32, 0i32),
-                                        V67::Other(e) => (7i32, _rt::as_i32(e)),
+                                    use super::super::super::super::yosh::acp::errors::ErrorCode as V69;
+                                    let (result70_0, result70_1) = match code68 {
+                                        V69::ParseError => (0i32, 0i32),
+                                        V69::InvalidRequest => (1i32, 0i32),
+                                        V69::MethodNotFound => (2i32, 0i32),
+                                        V69::InvalidParams => (3i32, 0i32),
+                                        V69::InternalError => (4i32, 0i32),
+                                        V69::AuthRequired => (5i32, 0i32),
+                                        V69::ResourceNotFound => (6i32, 0i32),
+                                        V69::Other(e) => (7i32, _rt::as_i32(e)),
                                     };
-                                    let vec69 = message66;
-                                    let ptr69 = vec69.as_ptr().cast::<u8>();
-                                    let len69 = vec69.len();
+                                    let vec71 = message68;
+                                    let ptr71 = vec71.as_ptr().cast::<u8>();
+                                    let len71 = vec71.len();
                                     (
                                         1i32,
-                                        result68_0,
-                                        result68_1 as *mut u8,
-                                        ptr69.cast_mut(),
-                                        len69 as *mut u8,
+                                        result70_0,
+                                        result70_1 as *mut u8,
+                                        ptr71.cast_mut(),
+                                        len71 as *mut u8,
                                         0usize,
                                     )
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]resume-session"]
-                                fn wit_import71(
+                                fn wit_import73(
                                     _: i32,
                                     _: i32,
                                     _: *mut u8,
@@ -18834,7 +18960,7 @@ pub mod exports {
                                 );
                             }
                             #[cfg(not(target_arch = "wasm32"))]
-                            unsafe extern "C" fn wit_import71(
+                            unsafe extern "C" fn wit_import73(
                                 _: i32,
                                 _: i32,
                                 _: *mut u8,
@@ -18845,13 +18971,13 @@ pub mod exports {
                                 unreachable!()
                             }
                             _task_cancel.forget();
-                            wit_import71(
-                                result70_0,
-                                result70_1,
-                                result70_2,
-                                result70_3,
-                                result70_4,
-                                result70_5,
+                            wit_import73(
+                                result72_0,
+                                result72_1,
+                                result72_2,
+                                result72_3,
+                                result72_4,
+                                result72_5,
                             );
                         })
                     }
@@ -18917,7 +19043,7 @@ pub mod exports {
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]close-session"]
                                 fn wit_import7(
@@ -19022,7 +19148,7 @@ pub mod exports {
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]set-session-mode"]
                                 fn wit_import8(
@@ -19523,7 +19649,7 @@ pub mod exports {
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]prompt"]
                                 fn wit_import72(
@@ -19586,7 +19712,7 @@ pub mod exports {
                                 T_::cancel(_rt::string_lift(bytes0)).await
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/agent@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/agent")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]cancel"]
                                 fn wit_import1();
@@ -19712,110 +19838,106 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[macro_export]
-                macro_rules! __export_yosh_acp_agent_5_1_0_cabi_layer {
+                macro_rules! __export_yosh_acp_agent_cabi_layer {
                     ($ty:ident with_types_in $($path_to_types:tt)*) => {
                         const _ : () = { #[unsafe (export_name =
-                        "[async-lift]yosh:acp/agent@5.1.0#initialize")] unsafe extern "C"
-                        fn export_initialize(arg0 : i32, arg1 : i32, arg2 : i32, arg3 :
-                        i32, arg4 : i32, arg5 : * mut u8, arg6 : usize, arg7 : i32, arg8
-                        : * mut u8, arg9 : usize, arg10 : * mut u8, arg11 : usize,) ->
-                        i32 { unsafe { $($path_to_types)*:: _export_initialize_cabi::<$ty
-                        > (arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9,
+                        "[async-lift]yosh:acp/agent#initialize")] unsafe extern "C" fn
+                        export_initialize(arg0 : i32, arg1 : i32, arg2 : i32, arg3 : i32,
+                        arg4 : i32, arg5 : * mut u8, arg6 : usize, arg7 : i32, arg8 : *
+                        mut u8, arg9 : usize, arg10 : * mut u8, arg11 : usize,) -> i32 {
+                        unsafe { $($path_to_types)*:: _export_initialize_cabi::<$ty >
+                        (arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9,
                         arg10, arg11) } } #[unsafe (export_name =
-                        "[callback][async-lift]yosh:acp/agent@5.1.0#initialize")] unsafe
-                        extern "C" fn _callback_initialize(event0 : u32, event1 : u32,
-                        event2 : u32) -> u32 { unsafe { $($path_to_types)*::
+                        "[callback][async-lift]yosh:acp/agent#initialize")] unsafe extern
+                        "C" fn _callback_initialize(event0 : u32, event1 : u32, event2 :
+                        u32) -> u32 { unsafe { $($path_to_types)*::
                         __callback_initialize(event0, event1, event2) } } #[unsafe
-                        (export_name = "[async-lift]yosh:acp/agent@5.1.0#authenticate")]
-                        unsafe extern "C" fn export_authenticate(arg0 : * mut u8, arg1 :
-                        usize,) -> i32 { unsafe { $($path_to_types)*::
+                        (export_name = "[async-lift]yosh:acp/agent#authenticate")] unsafe
+                        extern "C" fn export_authenticate(arg0 : * mut u8, arg1 : usize,)
+                        -> i32 { unsafe { $($path_to_types)*::
                         _export_authenticate_cabi::<$ty > (arg0, arg1) } } #[unsafe
                         (export_name =
-                        "[callback][async-lift]yosh:acp/agent@5.1.0#authenticate")]
-                        unsafe extern "C" fn _callback_authenticate(event0 : u32, event1
-                        : u32, event2 : u32) -> u32 { unsafe { $($path_to_types)*::
+                        "[callback][async-lift]yosh:acp/agent#authenticate")] unsafe
+                        extern "C" fn _callback_authenticate(event0 : u32, event1 : u32,
+                        event2 : u32) -> u32 { unsafe { $($path_to_types)*::
                         __callback_authenticate(event0, event1, event2) } } #[unsafe
-                        (export_name = "[async-lift]yosh:acp/agent@5.1.0#new-session")]
-                        unsafe extern "C" fn export_new_session(arg0 : * mut u8, arg1 :
-                        usize, arg2 : * mut u8, arg3 : usize,) -> i32 { unsafe {
+                        (export_name = "[async-lift]yosh:acp/agent#new-session")] unsafe
+                        extern "C" fn export_new_session(arg0 : * mut u8, arg1 : usize,
+                        arg2 : * mut u8, arg3 : usize,) -> i32 { unsafe {
                         $($path_to_types)*:: _export_new_session_cabi::<$ty > (arg0,
                         arg1, arg2, arg3) } } #[unsafe (export_name =
-                        "[callback][async-lift]yosh:acp/agent@5.1.0#new-session")] unsafe
+                        "[callback][async-lift]yosh:acp/agent#new-session")] unsafe
                         extern "C" fn _callback_new_session(event0 : u32, event1 : u32,
                         event2 : u32) -> u32 { unsafe { $($path_to_types)*::
                         __callback_new_session(event0, event1, event2) } } #[unsafe
-                        (export_name = "[async-lift]yosh:acp/agent@5.1.0#load-session")]
-                        unsafe extern "C" fn export_load_session(arg0 : * mut u8, arg1 :
-                        usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 :
-                        usize,) -> i32 { unsafe { $($path_to_types)*::
+                        (export_name = "[async-lift]yosh:acp/agent#load-session")] unsafe
+                        extern "C" fn export_load_session(arg0 : * mut u8, arg1 : usize,
+                        arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 : usize,) ->
+                        i32 { unsafe { $($path_to_types)*::
                         _export_load_session_cabi::<$ty > (arg0, arg1, arg2, arg3, arg4,
                         arg5) } } #[unsafe (export_name =
-                        "[callback][async-lift]yosh:acp/agent@5.1.0#load-session")]
-                        unsafe extern "C" fn _callback_load_session(event0 : u32, event1
-                        : u32, event2 : u32) -> u32 { unsafe { $($path_to_types)*::
+                        "[callback][async-lift]yosh:acp/agent#load-session")] unsafe
+                        extern "C" fn _callback_load_session(event0 : u32, event1 : u32,
+                        event2 : u32) -> u32 { unsafe { $($path_to_types)*::
                         __callback_load_session(event0, event1, event2) } } #[unsafe
-                        (export_name = "[async-lift]yosh:acp/agent@5.1.0#list-sessions")]
+                        (export_name = "[async-lift]yosh:acp/agent#list-sessions")]
                         unsafe extern "C" fn export_list_sessions(arg0 : i32, arg1 : *
                         mut u8, arg2 : usize, arg3 : i32, arg4 : * mut u8, arg5 : usize,)
                         -> i32 { unsafe { $($path_to_types)*::
                         _export_list_sessions_cabi::<$ty > (arg0, arg1, arg2, arg3, arg4,
                         arg5) } } #[unsafe (export_name =
-                        "[callback][async-lift]yosh:acp/agent@5.1.0#list-sessions")]
-                        unsafe extern "C" fn _callback_list_sessions(event0 : u32, event1
-                        : u32, event2 : u32) -> u32 { unsafe { $($path_to_types)*::
+                        "[callback][async-lift]yosh:acp/agent#list-sessions")] unsafe
+                        extern "C" fn _callback_list_sessions(event0 : u32, event1 : u32,
+                        event2 : u32) -> u32 { unsafe { $($path_to_types)*::
                         __callback_list_sessions(event0, event1, event2) } } #[unsafe
-                        (export_name =
-                        "[async-lift]yosh:acp/agent@5.1.0#resume-session")] unsafe extern
-                        "C" fn export_resume_session(arg0 : * mut u8, arg1 : usize, arg2
-                        : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 : usize,) -> i32
-                        { unsafe { $($path_to_types)*:: _export_resume_session_cabi::<$ty
-                        > (arg0, arg1, arg2, arg3, arg4, arg5) } } #[unsafe (export_name
-                        = "[callback][async-lift]yosh:acp/agent@5.1.0#resume-session")]
-                        unsafe extern "C" fn _callback_resume_session(event0 : u32,
-                        event1 : u32, event2 : u32) -> u32 { unsafe {
-                        $($path_to_types)*:: __callback_resume_session(event0, event1,
-                        event2) } } #[unsafe (export_name =
-                        "[async-lift]yosh:acp/agent@5.1.0#close-session")] unsafe extern
-                        "C" fn export_close_session(arg0 : * mut u8, arg1 : usize,) ->
-                        i32 { unsafe { $($path_to_types)*::
+                        (export_name = "[async-lift]yosh:acp/agent#resume-session")]
+                        unsafe extern "C" fn export_resume_session(arg0 : * mut u8, arg1
+                        : usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 :
+                        usize,) -> i32 { unsafe { $($path_to_types)*::
+                        _export_resume_session_cabi::<$ty > (arg0, arg1, arg2, arg3,
+                        arg4, arg5) } } #[unsafe (export_name =
+                        "[callback][async-lift]yosh:acp/agent#resume-session")] unsafe
+                        extern "C" fn _callback_resume_session(event0 : u32, event1 :
+                        u32, event2 : u32) -> u32 { unsafe { $($path_to_types)*::
+                        __callback_resume_session(event0, event1, event2) } } #[unsafe
+                        (export_name = "[async-lift]yosh:acp/agent#close-session")]
+                        unsafe extern "C" fn export_close_session(arg0 : * mut u8, arg1 :
+                        usize,) -> i32 { unsafe { $($path_to_types)*::
                         _export_close_session_cabi::<$ty > (arg0, arg1) } } #[unsafe
                         (export_name =
-                        "[callback][async-lift]yosh:acp/agent@5.1.0#close-session")]
-                        unsafe extern "C" fn _callback_close_session(event0 : u32, event1
-                        : u32, event2 : u32) -> u32 { unsafe { $($path_to_types)*::
+                        "[callback][async-lift]yosh:acp/agent#close-session")] unsafe
+                        extern "C" fn _callback_close_session(event0 : u32, event1 : u32,
+                        event2 : u32) -> u32 { unsafe { $($path_to_types)*::
                         __callback_close_session(event0, event1, event2) } } #[unsafe
-                        (export_name =
-                        "[async-lift]yosh:acp/agent@5.1.0#set-session-mode")] unsafe
-                        extern "C" fn export_set_session_mode(arg0 : * mut u8, arg1 :
-                        usize, arg2 : * mut u8, arg3 : usize,) -> i32 { unsafe {
+                        (export_name = "[async-lift]yosh:acp/agent#set-session-mode")]
+                        unsafe extern "C" fn export_set_session_mode(arg0 : * mut u8,
+                        arg1 : usize, arg2 : * mut u8, arg3 : usize,) -> i32 { unsafe {
                         $($path_to_types)*:: _export_set_session_mode_cabi::<$ty > (arg0,
                         arg1, arg2, arg3) } } #[unsafe (export_name =
-                        "[callback][async-lift]yosh:acp/agent@5.1.0#set-session-mode")]
-                        unsafe extern "C" fn _callback_set_session_mode(event0 : u32,
-                        event1 : u32, event2 : u32) -> u32 { unsafe {
-                        $($path_to_types)*:: __callback_set_session_mode(event0, event1,
-                        event2) } } #[unsafe (export_name =
-                        "[async-lift]yosh:acp/agent@5.1.0#prompt")] unsafe extern "C" fn
-                        export_prompt(arg0 : * mut u8, arg1 : usize, arg2 : * mut u8,
-                        arg3 : usize,) -> i32 { unsafe { $($path_to_types)*::
+                        "[callback][async-lift]yosh:acp/agent#set-session-mode")] unsafe
+                        extern "C" fn _callback_set_session_mode(event0 : u32, event1 :
+                        u32, event2 : u32) -> u32 { unsafe { $($path_to_types)*::
+                        __callback_set_session_mode(event0, event1, event2) } } #[unsafe
+                        (export_name = "[async-lift]yosh:acp/agent#prompt")] unsafe
+                        extern "C" fn export_prompt(arg0 : * mut u8, arg1 : usize, arg2 :
+                        * mut u8, arg3 : usize,) -> i32 { unsafe { $($path_to_types)*::
                         _export_prompt_cabi::<$ty > (arg0, arg1, arg2, arg3) } } #[unsafe
-                        (export_name =
-                        "[callback][async-lift]yosh:acp/agent@5.1.0#prompt")] unsafe
-                        extern "C" fn _callback_prompt(event0 : u32, event1 : u32, event2
-                        : u32) -> u32 { unsafe { $($path_to_types)*::
+                        (export_name = "[callback][async-lift]yosh:acp/agent#prompt")]
+                        unsafe extern "C" fn _callback_prompt(event0 : u32, event1 : u32,
+                        event2 : u32) -> u32 { unsafe { $($path_to_types)*::
                         __callback_prompt(event0, event1, event2) } } #[unsafe
-                        (export_name = "[async-lift]yosh:acp/agent@5.1.0#cancel")] unsafe
+                        (export_name = "[async-lift]yosh:acp/agent#cancel")] unsafe
                         extern "C" fn export_cancel(arg0 : * mut u8, arg1 : usize,) ->
                         i32 { unsafe { $($path_to_types)*:: _export_cancel_cabi::<$ty >
                         (arg0, arg1) } } #[unsafe (export_name =
-                        "[callback][async-lift]yosh:acp/agent@5.1.0#cancel")] unsafe
-                        extern "C" fn _callback_cancel(event0 : u32, event1 : u32, event2
-                        : u32) -> u32 { unsafe { $($path_to_types)*::
-                        __callback_cancel(event0, event1, event2) } } };
+                        "[callback][async-lift]yosh:acp/agent#cancel")] unsafe extern "C"
+                        fn _callback_cancel(event0 : u32, event1 : u32, event2 : u32) ->
+                        u32 { unsafe { $($path_to_types)*:: __callback_cancel(event0,
+                        event1, event2) } } };
                     };
                 }
                 #[doc(hidden)]
-                pub use __export_yosh_acp_agent_5_1_0_cabi_layer;
+                pub use __export_yosh_acp_agent_cabi_layer;
                 #[cfg_attr(target_pointer_width = "64", repr(align(8)))]
                 #[cfg_attr(target_pointer_width = "32", repr(align(4)))]
                 struct _RetArea(
@@ -19828,7 +19950,11 @@ pub mod exports {
                         + 11 * ::core::mem::size_of::<*const u8>()],
                 );
             }
-            /// Methods exported by the client. The agent calls these.
+            /// Host-capability callbacks invoked by the agent on the client side:
+            /// streaming session updates, permission prompts, file system access, and
+            /// terminal control.
+            ///
+            /// All methods are called by the agent and implemented by the client.
             ///
             /// Maps to the JSON-RPC methods listed under "Client" in the protocol
             /// overview: <https://agentclientprotocol.com/protocol/overview#client>
@@ -22644,7 +22770,7 @@ pub mod exports {
                                 T_::update_session(_rt::string_lift(bytes2), v440).await
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]update-session"]
                                 fn wit_import441();
@@ -23512,7 +23638,7 @@ pub mod exports {
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]request-permission"]
                                 fn wit_import133(
@@ -23657,7 +23783,7 @@ pub mod exports {
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]read-text-file"]
                                 fn wit_import10(
@@ -23771,7 +23897,7 @@ pub mod exports {
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]write-text-file"]
                                 fn wit_import9(
@@ -23998,7 +24124,7 @@ pub mod exports {
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]create-terminal"]
                                 fn wit_import22(
@@ -24182,7 +24308,7 @@ pub mod exports {
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]get-terminal-output"]
                                 fn wit_import15(
@@ -24336,7 +24462,7 @@ pub mod exports {
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]wait-for-terminal-exit"]
                                 fn wit_import12(
@@ -24444,7 +24570,7 @@ pub mod exports {
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]kill-terminal"]
                                 fn wit_import8(
@@ -24549,7 +24675,7 @@ pub mod exports {
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/client@5.1.0")]
+                            #[link(wasm_import_module = "[export]yosh:acp/client")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]release-terminal"]
                                 fn wit_import8(
@@ -24680,107 +24806,102 @@ pub mod exports {
                 }
                 #[doc(hidden)]
                 #[macro_export]
-                macro_rules! __export_yosh_acp_client_5_1_0_cabi {
+                macro_rules! __export_yosh_acp_client_cabi {
                     ($ty:ident with_types_in $($path_to_types:tt)*) => {
                         const _ : () = { #[unsafe (export_name =
-                        "[async-lift]yosh:acp/client@5.1.0#update-session")] unsafe
-                        extern "C" fn export_update_session(arg0 : * mut u8,) -> i32 {
-                        unsafe { $($path_to_types)*:: _export_update_session_cabi::<$ty >
-                        (arg0) } } #[unsafe (export_name =
-                        "[callback][async-lift]yosh:acp/client@5.1.0#update-session")]
-                        unsafe extern "C" fn _callback_update_session(event0 : u32,
-                        event1 : u32, event2 : u32) -> u32 { unsafe {
-                        $($path_to_types)*:: __callback_update_session(event0, event1,
-                        event2) } } #[unsafe (export_name =
-                        "[async-lift]yosh:acp/client@5.1.0#request-permission")] unsafe
-                        extern "C" fn export_request_permission(arg0 : * mut u8,) -> i32
-                        { unsafe { $($path_to_types)*::
+                        "[async-lift]yosh:acp/client#update-session")] unsafe extern "C"
+                        fn export_update_session(arg0 : * mut u8,) -> i32 { unsafe {
+                        $($path_to_types)*:: _export_update_session_cabi::<$ty > (arg0) }
+                        } #[unsafe (export_name =
+                        "[callback][async-lift]yosh:acp/client#update-session")] unsafe
+                        extern "C" fn _callback_update_session(event0 : u32, event1 :
+                        u32, event2 : u32) -> u32 { unsafe { $($path_to_types)*::
+                        __callback_update_session(event0, event1, event2) } } #[unsafe
+                        (export_name = "[async-lift]yosh:acp/client#request-permission")]
+                        unsafe extern "C" fn export_request_permission(arg0 : * mut u8,)
+                        -> i32 { unsafe { $($path_to_types)*::
                         _export_request_permission_cabi::<$ty > (arg0) } } #[unsafe
                         (export_name =
-                        "[callback][async-lift]yosh:acp/client@5.1.0#request-permission")]
+                        "[callback][async-lift]yosh:acp/client#request-permission")]
                         unsafe extern "C" fn _callback_request_permission(event0 : u32,
                         event1 : u32, event2 : u32) -> u32 { unsafe {
                         $($path_to_types)*:: __callback_request_permission(event0,
                         event1, event2) } } #[unsafe (export_name =
-                        "[async-lift]yosh:acp/client@5.1.0#read-text-file")] unsafe
-                        extern "C" fn export_read_text_file(arg0 : * mut u8, arg1 :
-                        usize, arg2 : * mut u8, arg3 : usize, arg4 : i32, arg5 : i32,
-                        arg6 : i32, arg7 : i32,) -> i32 { unsafe { $($path_to_types)*::
+                        "[async-lift]yosh:acp/client#read-text-file")] unsafe extern "C"
+                        fn export_read_text_file(arg0 : * mut u8, arg1 : usize, arg2 : *
+                        mut u8, arg3 : usize, arg4 : i32, arg5 : i32, arg6 : i32, arg7 :
+                        i32,) -> i32 { unsafe { $($path_to_types)*::
                         _export_read_text_file_cabi::<$ty > (arg0, arg1, arg2, arg3,
                         arg4, arg5, arg6, arg7) } } #[unsafe (export_name =
-                        "[callback][async-lift]yosh:acp/client@5.1.0#read-text-file")]
-                        unsafe extern "C" fn _callback_read_text_file(event0 : u32,
-                        event1 : u32, event2 : u32) -> u32 { unsafe {
-                        $($path_to_types)*:: __callback_read_text_file(event0, event1,
-                        event2) } } #[unsafe (export_name =
-                        "[async-lift]yosh:acp/client@5.1.0#write-text-file")] unsafe
-                        extern "C" fn export_write_text_file(arg0 : * mut u8, arg1 :
-                        usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 :
+                        "[callback][async-lift]yosh:acp/client#read-text-file")] unsafe
+                        extern "C" fn _callback_read_text_file(event0 : u32, event1 :
+                        u32, event2 : u32) -> u32 { unsafe { $($path_to_types)*::
+                        __callback_read_text_file(event0, event1, event2) } } #[unsafe
+                        (export_name = "[async-lift]yosh:acp/client#write-text-file")]
+                        unsafe extern "C" fn export_write_text_file(arg0 : * mut u8, arg1
+                        : usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 :
                         usize,) -> i32 { unsafe { $($path_to_types)*::
                         _export_write_text_file_cabi::<$ty > (arg0, arg1, arg2, arg3,
                         arg4, arg5) } } #[unsafe (export_name =
-                        "[callback][async-lift]yosh:acp/client@5.1.0#write-text-file")]
-                        unsafe extern "C" fn _callback_write_text_file(event0 : u32,
-                        event1 : u32, event2 : u32) -> u32 { unsafe {
-                        $($path_to_types)*:: __callback_write_text_file(event0, event1,
-                        event2) } } #[unsafe (export_name =
-                        "[async-lift]yosh:acp/client@5.1.0#create-terminal")] unsafe
-                        extern "C" fn export_create_terminal(arg0 : * mut u8, arg1 :
-                        usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 :
+                        "[callback][async-lift]yosh:acp/client#write-text-file")] unsafe
+                        extern "C" fn _callback_write_text_file(event0 : u32, event1 :
+                        u32, event2 : u32) -> u32 { unsafe { $($path_to_types)*::
+                        __callback_write_text_file(event0, event1, event2) } } #[unsafe
+                        (export_name = "[async-lift]yosh:acp/client#create-terminal")]
+                        unsafe extern "C" fn export_create_terminal(arg0 : * mut u8, arg1
+                        : usize, arg2 : * mut u8, arg3 : usize, arg4 : * mut u8, arg5 :
                         usize, arg6 : * mut u8, arg7 : usize, arg8 : i32, arg9 : * mut
                         u8, arg10 : usize, arg11 : i32, arg12 : i64,) -> i32 { unsafe {
                         $($path_to_types)*:: _export_create_terminal_cabi::<$ty > (arg0,
                         arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10,
                         arg11, arg12) } } #[unsafe (export_name =
-                        "[callback][async-lift]yosh:acp/client@5.1.0#create-terminal")]
-                        unsafe extern "C" fn _callback_create_terminal(event0 : u32,
-                        event1 : u32, event2 : u32) -> u32 { unsafe {
-                        $($path_to_types)*:: __callback_create_terminal(event0, event1,
-                        event2) } } #[unsafe (export_name =
-                        "[async-lift]yosh:acp/client@5.1.0#get-terminal-output")] unsafe
-                        extern "C" fn export_get_terminal_output(arg0 : * mut u8, arg1 :
-                        usize, arg2 : * mut u8, arg3 : usize,) -> i32 { unsafe {
+                        "[callback][async-lift]yosh:acp/client#create-terminal")] unsafe
+                        extern "C" fn _callback_create_terminal(event0 : u32, event1 :
+                        u32, event2 : u32) -> u32 { unsafe { $($path_to_types)*::
+                        __callback_create_terminal(event0, event1, event2) } } #[unsafe
+                        (export_name =
+                        "[async-lift]yosh:acp/client#get-terminal-output")] unsafe extern
+                        "C" fn export_get_terminal_output(arg0 : * mut u8, arg1 : usize,
+                        arg2 : * mut u8, arg3 : usize,) -> i32 { unsafe {
                         $($path_to_types)*:: _export_get_terminal_output_cabi::<$ty >
                         (arg0, arg1, arg2, arg3) } } #[unsafe (export_name =
-                        "[callback][async-lift]yosh:acp/client@5.1.0#get-terminal-output")]
+                        "[callback][async-lift]yosh:acp/client#get-terminal-output")]
                         unsafe extern "C" fn _callback_get_terminal_output(event0 : u32,
                         event1 : u32, event2 : u32) -> u32 { unsafe {
                         $($path_to_types)*:: __callback_get_terminal_output(event0,
                         event1, event2) } } #[unsafe (export_name =
-                        "[async-lift]yosh:acp/client@5.1.0#wait-for-terminal-exit")]
-                        unsafe extern "C" fn export_wait_for_terminal_exit(arg0 : * mut
-                        u8, arg1 : usize, arg2 : * mut u8, arg3 : usize,) -> i32 { unsafe
-                        { $($path_to_types)*:: _export_wait_for_terminal_exit_cabi::<$ty
-                        > (arg0, arg1, arg2, arg3) } } #[unsafe (export_name =
-                        "[callback][async-lift]yosh:acp/client@5.1.0#wait-for-terminal-exit")]
+                        "[async-lift]yosh:acp/client#wait-for-terminal-exit")] unsafe
+                        extern "C" fn export_wait_for_terminal_exit(arg0 : * mut u8, arg1
+                        : usize, arg2 : * mut u8, arg3 : usize,) -> i32 { unsafe {
+                        $($path_to_types)*:: _export_wait_for_terminal_exit_cabi::<$ty >
+                        (arg0, arg1, arg2, arg3) } } #[unsafe (export_name =
+                        "[callback][async-lift]yosh:acp/client#wait-for-terminal-exit")]
                         unsafe extern "C" fn _callback_wait_for_terminal_exit(event0 :
                         u32, event1 : u32, event2 : u32) -> u32 { unsafe {
                         $($path_to_types)*:: __callback_wait_for_terminal_exit(event0,
                         event1, event2) } } #[unsafe (export_name =
-                        "[async-lift]yosh:acp/client@5.1.0#kill-terminal")] unsafe extern
-                        "C" fn export_kill_terminal(arg0 : * mut u8, arg1 : usize, arg2 :
-                        * mut u8, arg3 : usize,) -> i32 { unsafe { $($path_to_types)*::
+                        "[async-lift]yosh:acp/client#kill-terminal")] unsafe extern "C"
+                        fn export_kill_terminal(arg0 : * mut u8, arg1 : usize, arg2 : *
+                        mut u8, arg3 : usize,) -> i32 { unsafe { $($path_to_types)*::
                         _export_kill_terminal_cabi::<$ty > (arg0, arg1, arg2, arg3) } }
                         #[unsafe (export_name =
-                        "[callback][async-lift]yosh:acp/client@5.1.0#kill-terminal")]
-                        unsafe extern "C" fn _callback_kill_terminal(event0 : u32, event1
-                        : u32, event2 : u32) -> u32 { unsafe { $($path_to_types)*::
+                        "[callback][async-lift]yosh:acp/client#kill-terminal")] unsafe
+                        extern "C" fn _callback_kill_terminal(event0 : u32, event1 : u32,
+                        event2 : u32) -> u32 { unsafe { $($path_to_types)*::
                         __callback_kill_terminal(event0, event1, event2) } } #[unsafe
-                        (export_name =
-                        "[async-lift]yosh:acp/client@5.1.0#release-terminal")] unsafe
-                        extern "C" fn export_release_terminal(arg0 : * mut u8, arg1 :
-                        usize, arg2 : * mut u8, arg3 : usize,) -> i32 { unsafe {
+                        (export_name = "[async-lift]yosh:acp/client#release-terminal")]
+                        unsafe extern "C" fn export_release_terminal(arg0 : * mut u8,
+                        arg1 : usize, arg2 : * mut u8, arg3 : usize,) -> i32 { unsafe {
                         $($path_to_types)*:: _export_release_terminal_cabi::<$ty > (arg0,
                         arg1, arg2, arg3) } } #[unsafe (export_name =
-                        "[callback][async-lift]yosh:acp/client@5.1.0#release-terminal")]
-                        unsafe extern "C" fn _callback_release_terminal(event0 : u32,
-                        event1 : u32, event2 : u32) -> u32 { unsafe {
-                        $($path_to_types)*:: __callback_release_terminal(event0, event1,
-                        event2) } } };
+                        "[callback][async-lift]yosh:acp/client#release-terminal")] unsafe
+                        extern "C" fn _callback_release_terminal(event0 : u32, event1 :
+                        u32, event2 : u32) -> u32 { unsafe { $($path_to_types)*::
+                        __callback_release_terminal(event0, event1, event2) } } };
                     };
                 }
                 #[doc(hidden)]
-                pub use __export_yosh_acp_client_5_1_0_cabi;
+                pub use __export_yosh_acp_client_cabi;
             }
         }
     }
@@ -25012,194 +25133,149 @@ macro_rules! __export_layer_impl {
     };
     ($ty:ident with_types_in $($path_to_types_root:tt)*) => {
         $($path_to_types_root)*::
-        exports::yosh::acp::agent::__export_yosh_acp_agent_5_1_0_cabi_layer!($ty with_types_in
+        exports::yosh::acp::agent::__export_yosh_acp_agent_cabi_layer!($ty with_types_in
         $($path_to_types_root)*:: exports::yosh::acp::agent); $($path_to_types_root)*::
-        exports::yosh::acp::client::__export_yosh_acp_client_5_1_0_cabi!($ty
-        with_types_in $($path_to_types_root)*:: exports::yosh::acp::client); const _ : ()
-        = { #[rustfmt::skip] #[cfg(target_arch = "wasm32")] #[unsafe (link_section =
-        "component-type:wit-bindgen:0.54.0:yosh:acp@5.1.0:layer:imports and exports")]
+        exports::yosh::acp::client::__export_yosh_acp_client_cabi!($ty with_types_in
+        $($path_to_types_root)*:: exports::yosh::acp::client); const _ : () = {
+        #[rustfmt::skip] #[cfg(target_arch = "wasm32")] #[unsafe (link_section =
+        "component-type:wit-bindgen:0.54.0:yosh:acp:layer:imports and exports")]
         #[doc(hidden)] #[allow(clippy::octal_escapes)] pub static
-        __WIT_BINDGEN_COMPONENT_TYPE : [u8; 9090] = *
+        __WIT_BINDGEN_COMPONENT_TYPE : [u8; 9064] = *
         b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x86F\x01A\x02\x01A@\x01\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xecE\x01A\x02\x01A@\x01\
 B\x04\x01q\x08\x0bparse-error\0\0\x0finvalid-request\0\0\x10method-not-found\0\0\
 \x0einvalid-params\0\0\x0einternal-error\0\0\x0dauth-required\0\0\x12resource-no\
 t-found\0\0\x05other\x01z\0\x04\0\x0aerror-code\x03\0\0\x01r\x02\x04code\x01\x07\
-messages\x04\0\x05error\x03\0\x02\x03\0\x15yosh:acp/errors@5.1.0\x05\0\x01B\x19\x01\
-ks\x01r\x03\x04names\x05title\0\x07versions\x04\0\x13implementation-info\x03\0\x01\
-\x01r\x02\x0eread-text-file\x7f\x0fwrite-text-file\x7f\x04\0\x0ffs-capabilities\x03\
-\0\x03\x01r\x02\x02fs\x04\x08terminal\x7f\x04\0\x13client-capabilities\x03\0\x05\
-\x01r\x03\x05image\x7f\x05audio\x7f\x10embedded-context\x7f\x04\0\x13prompt-capa\
-bilities\x03\0\x07\x01r\x02\x04http\x7f\x03sse\x7f\x04\0\x10mcp-capabilities\x03\
-\0\x09\x01r\x03\x04list\x7f\x06resume\x7f\x05close\x7f\x04\0\x14session-capabili\
-ties\x03\0\x0b\x01r\x04\x0cload-session\x7f\x13prompt-capabilities\x08\x10mcp-ca\
-pabilities\x0a\x14session-capabilities\x0c\x04\0\x12agent-capabilities\x03\0\x0d\
-\x01r\x03\x02ids\x04names\x0bdescription\0\x04\0\x0bauth-method\x03\0\x0f\x01r\x01\
-\x09method-ids\x04\0\x14authenticate-request\x03\0\x11\x01k\x02\x01r\x03\x10prot\
-ocol-versiony\x13client-capabilities\x06\x0bclient-info\x13\x04\0\x12initialize-\
-request\x03\0\x14\x01p\x10\x01r\x04\x10protocol-versiony\x12agent-capabilities\x0e\
-\x0aagent-info\x13\x0cauth-methods\x16\x04\0\x13initialize-response\x03\0\x17\x03\
-\0\x13yosh:acp/init@5.1.0\x05\x01\x01B2\x01s\x04\0\x0asession-id\x03\0\0\x01s\x04\
-\0\x0fsession-mode-id\x03\0\x02\x01r\x02\x04names\x05values\x04\0\x07env-var\x03\
-\0\x04\x01r\x02\x04names\x05values\x04\0\x0bhttp-header\x03\0\x06\x01ps\x01p\x05\
-\x01r\x04\x04names\x07commands\x04args\x08\x03env\x09\x04\0\x10mcp-server-stdio\x03\
-\0\x0a\x01p\x07\x01r\x03\x04names\x03urls\x07headers\x0c\x04\0\x0fmcp-server-htt\
-p\x03\0\x0d\x01r\x03\x04names\x03urls\x07headers\x0c\x04\0\x0emcp-server-sse\x03\
-\0\x0f\x01q\x03\x05stdio\x01\x0b\0\x04http\x01\x0e\0\x03sse\x01\x10\0\x04\0\x0am\
-cp-server\x03\0\x11\x01ks\x01r\x03\x02id\x03\x04names\x0bdescription\x13\x04\0\x0c\
-session-mode\x03\0\x14\x01p\x15\x01r\x02\x0fcurrent-mode-id\x03\x0favailable-mod\
-es\x16\x04\0\x12session-mode-state\x03\0\x17\x01r\x02\x0asession-id\x01\x07mode-\
-id\x03\x04\0\x18set-session-mode-request\x03\0\x19\x01p\x12\x01r\x02\x03cwds\x0b\
-mcp-servers\x1b\x04\0\x13new-session-request\x03\0\x1c\x01k\x18\x01r\x02\x0asess\
-ion-id\x01\x05modes\x1e\x04\0\x14new-session-response\x03\0\x1f\x01r\x03\x0asess\
-ion-id\x01\x03cwds\x0bmcp-servers\x1b\x04\0\x14load-session-request\x03\0!\x01r\x01\
-\x05modes\x1e\x04\0\x15load-session-response\x03\0#\x01r\x04\x0asession-id\x01\x03\
-cwds\x05title\x13\x0aupdated-at\x13\x04\0\x0csession-info\x03\0%\x01r\x02\x03cwd\
-\x13\x06cursor\x13\x04\0\x15list-sessions-request\x03\0'\x01p&\x01r\x02\x08sessi\
-ons)\x0bnext-cursor\x13\x04\0\x16list-sessions-response\x03\0*\x01r\x03\x0asessi\
-on-id\x01\x03cwds\x0bmcp-servers\x1b\x04\0\x16resume-session-request\x03\0,\x01r\
-\x01\x05modes\x1e\x04\0\x17resume-session-response\x03\0.\x01r\x02\x05title\x13\x0a\
-updated-at\x13\x04\0\x13session-info-update\x03\00\x03\0\x17yosh:acp/sessions@5.\
-1.0\x05\x02\x01B\x14\x01r\x01\x04texts\x04\0\x0ctext-content\x03\0\0\x01ks\x01r\x03\
-\x04datas\x09mime-types\x03uri\x02\x04\0\x0dimage-content\x03\0\x03\x01r\x02\x04\
-datas\x09mime-types\x04\0\x0daudio-content\x03\0\x05\x01kw\x01r\x06\x03uris\x04n\
-ames\x09mime-type\x02\x05title\x02\x0bdescription\x02\x04size\x07\x04\0\x0dresou\
-rce-link\x03\0\x08\x01r\x03\x03uris\x09mime-type\x02\x04texts\x04\0\x16text-reso\
-urce-contents\x03\0\x0a\x01r\x03\x03uris\x09mime-type\x02\x04blobs\x04\0\x16blob\
--resource-contents\x03\0\x0c\x01q\x02\x04text\x01\x0b\0\x04blob\x01\x0d\0\x04\0\x11\
-resource-contents\x03\0\x0e\x01r\x01\x08resource\x0f\x04\0\x11embedded-resource\x03\
-\0\x10\x01q\x05\x04text\x01\x01\0\x05image\x01\x04\0\x05audio\x01\x06\0\x0dresou\
-rce-link\x01\x09\0\x08resource\x01\x11\0\x04\0\x0dcontent-block\x03\0\x12\x03\0\x16\
-yosh:acp/content@5.1.0\x05\x03\x02\x03\0\x02\x0asession-id\x02\x03\0\x02\x07env-\
-var\x01B\x14\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x05\
-\x04\0\x07env-var\x03\0\x02\x01s\x04\0\x0bterminal-id\x03\0\x04\x01ps\x01p\x03\x01\
-ks\x01kw\x01r\x06\x0asession-id\x01\x07commands\x04args\x06\x03env\x07\x03cwd\x08\
-\x11output-byte-limit\x09\x04\0\x17create-terminal-request\x03\0\x0a\x01r\x01\x0b\
-terminal-id\x05\x04\0\x18create-terminal-response\x03\0\x0c\x01kz\x01r\x02\x09ex\
-it-code\x0e\x06signal\x08\x04\0\x14terminal-exit-status\x03\0\x0f\x01k\x10\x01r\x03\
-\x06outputs\x09truncated\x7f\x0bexit-status\x11\x04\0\x0fterminal-output\x03\0\x12\
-\x03\0\x18yosh:acp/terminals@5.1.0\x05\x06\x02\x03\0\x03\x0dcontent-block\x02\x03\
-\0\x04\x0bterminal-id\x01B2\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x02\x03\
-\x02\x01\x07\x04\0\x0dcontent-block\x03\0\x02\x02\x03\x02\x01\x08\x04\0\x0btermi\
-nal-id\x03\0\x04\x01s\x04\0\x0ctool-call-id\x03\0\x06\x01m\x09\x04read\x04edit\x06\
-delete\x04move\x06search\x07execute\x05think\x05fetch\x05other\x04\0\x09tool-kin\
-d\x03\0\x08\x01m\x04\x07pending\x0bin-progress\x09completed\x06failed\x04\0\x10t\
-ool-call-status\x03\0\x0a\x01ks\x01r\x03\x04paths\x08old-text\x0c\x08new-texts\x04\
-\0\x04diff\x03\0\x0d\x01q\x03\x07content\x01\x03\0\x04diff\x01\x0e\0\x08terminal\
-\x01\x05\0\x04\0\x11tool-call-content\x03\0\x0f\x01ky\x01r\x02\x04paths\x04line\x11\
-\x04\0\x12tool-call-location\x03\0\x12\x01p\x10\x01p\x13\x01r\x08\x02id\x07\x05t\
-itles\x04kind\x09\x06status\x0b\x07content\x14\x09locations\x15\x09raw-input\x0c\
-\x0araw-output\x0c\x04\0\x09tool-call\x03\0\x16\x01k\x09\x01k\x0b\x01k\x14\x01k\x15\
-\x01r\x08\x02id\x07\x05title\x0c\x04kind\x18\x06status\x19\x07content\x1a\x09loc\
-ations\x1b\x09raw-input\x0c\x0araw-output\x0c\x04\0\x10tool-call-update\x03\0\x1c\
-\x01m\x03\x04high\x06medium\x03low\x04\0\x13plan-entry-priority\x03\0\x1e\x01m\x03\
-\x07pending\x0bin-progress\x09completed\x04\0\x11plan-entry-status\x03\0\x20\x01\
-r\x03\x07contents\x08priority\x1f\x06status!\x04\0\x0aplan-entry\x03\0\"\x01p#\x01\
-r\x01\x07entries$\x04\0\x04plan\x03\0%\x01m\x04\x0aallow-once\x0callow-always\x0b\
-reject-once\x0dreject-always\x04\0\x16permission-option-kind\x03\0'\x01r\x03\x02\
-ids\x04names\x04kind(\x04\0\x11permission-option\x03\0)\x01p*\x01r\x03\x0asessio\
-n-id\x01\x09tool-call\x1d\x07options+\x04\0\x1arequest-permission-request\x03\0,\
-\x01q\x02\x09cancelled\0\0\x08selected\x01s\0\x04\0\x12permission-outcome\x03\0.\
-\x01r\x01\x07outcome/\x04\0\x1brequest-permission-response\x03\00\x03\0\x14yosh:\
-acp/tools@5.1.0\x05\x09\x02\x03\0\x02\x0fsession-mode-id\x02\x03\0\x02\x13sessio\
-n-info-update\x02\x03\0\x05\x09tool-call\x02\x03\0\x05\x10tool-call-update\x02\x03\
-\0\x05\x04plan\x01B\x1d\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x02\x03\x02\
-\x01\x0a\x04\0\x0fsession-mode-id\x03\0\x02\x02\x03\x02\x01\x0b\x04\0\x13session\
--info-update\x03\0\x04\x02\x03\x02\x01\x07\x04\0\x0dcontent-block\x03\0\x06\x02\x03\
-\x02\x01\x0c\x04\0\x09tool-call\x03\0\x08\x02\x03\x02\x01\x0d\x04\0\x10tool-call\
--update\x03\0\x0a\x02\x03\x02\x01\x0e\x04\0\x04plan\x03\0\x0c\x01p\x07\x01r\x02\x0a\
-session-id\x01\x06prompt\x0e\x04\0\x0eprompt-request\x03\0\x0f\x01m\x05\x08end-t\
-urn\x0amax-tokens\x11max-turn-requests\x07refusal\x09cancelled\x04\0\x0bstop-rea\
-son\x03\0\x11\x01r\x01\x0bstop-reason\x12\x04\0\x0fprompt-response\x03\0\x13\x01\
-r\x01\x04hints\x04\0\x17available-command-input\x03\0\x15\x01k\x16\x01r\x03\x04n\
-ames\x0bdescriptions\x05input\x17\x04\0\x11available-command\x03\0\x18\x01p\x19\x01\
-q\x09\x12user-message-chunk\x01\x07\0\x13agent-message-chunk\x01\x07\0\x13agent-\
-thought-chunk\x01\x07\0\x09tool-call\x01\x09\0\x10tool-call-update\x01\x0b\0\x04\
-plan\x01\x0d\0\x13current-mode-update\x01\x03\0\x13session-info-update\x01\x05\0\
-\x19available-commands-update\x01\x1a\0\x04\0\x0esession-update\x03\0\x1b\x03\0\x16\
-yosh:acp/prompts@5.1.0\x05\x0f\x02\x03\0\0\x05error\x02\x03\0\x01\x12initialize-\
-request\x02\x03\0\x01\x13initialize-response\x02\x03\0\x01\x14authenticate-reque\
-st\x02\x03\0\x02\x13new-session-request\x02\x03\0\x02\x14new-session-response\x02\
-\x03\0\x02\x14load-session-request\x02\x03\0\x02\x15load-session-response\x02\x03\
-\0\x02\x15list-sessions-request\x02\x03\0\x02\x16list-sessions-response\x02\x03\0\
-\x02\x16resume-session-request\x02\x03\0\x02\x17resume-session-response\x02\x03\0\
-\x02\x18set-session-mode-request\x02\x03\0\x06\x0eprompt-request\x02\x03\0\x06\x0f\
-prompt-response\x01B;\x02\x03\x02\x01\x10\x04\0\x05error\x03\0\0\x02\x03\x02\x01\
-\x11\x04\0\x12initialize-request\x03\0\x02\x02\x03\x02\x01\x12\x04\0\x13initiali\
-ze-response\x03\0\x04\x02\x03\x02\x01\x13\x04\0\x14authenticate-request\x03\0\x06\
-\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\x08\x02\x03\x02\x01\x14\x04\0\x13\
-new-session-request\x03\0\x0a\x02\x03\x02\x01\x15\x04\0\x14new-session-response\x03\
-\0\x0c\x02\x03\x02\x01\x16\x04\0\x14load-session-request\x03\0\x0e\x02\x03\x02\x01\
-\x17\x04\0\x15load-session-response\x03\0\x10\x02\x03\x02\x01\x18\x04\0\x15list-\
-sessions-request\x03\0\x12\x02\x03\x02\x01\x19\x04\0\x16list-sessions-response\x03\
-\0\x14\x02\x03\x02\x01\x1a\x04\0\x16resume-session-request\x03\0\x16\x02\x03\x02\
-\x01\x1b\x04\0\x17resume-session-response\x03\0\x18\x02\x03\x02\x01\x1c\x04\0\x18\
-set-session-mode-request\x03\0\x1a\x02\x03\x02\x01\x1d\x04\0\x0eprompt-request\x03\
-\0\x1c\x02\x03\x02\x01\x1e\x04\0\x0fprompt-response\x03\0\x1e\x01j\x01\x05\x01\x01\
-\x01C\x01\x03req\x03\0\x20\x04\0\x0ainitialize\x01!\x01j\0\x01\x01\x01C\x01\x03r\
-eq\x07\0\"\x04\0\x0cauthenticate\x01#\x01j\x01\x0d\x01\x01\x01C\x01\x03req\x0b\0\
-$\x04\0\x0bnew-session\x01%\x01j\x01\x11\x01\x01\x01C\x01\x03req\x0f\0&\x04\0\x0c\
-load-session\x01'\x01j\x01\x15\x01\x01\x01C\x01\x03req\x13\0(\x04\0\x0dlist-sess\
-ions\x01)\x01j\x01\x19\x01\x01\x01C\x01\x03req\x17\0*\x04\0\x0eresume-session\x01\
-+\x01C\x01\x0asession-id\x09\0\"\x04\0\x0dclose-session\x01,\x01C\x01\x03req\x1b\
-\0\"\x04\0\x10set-session-mode\x01-\x01j\x01\x1f\x01\x01\x01C\x01\x03req\x1d\0.\x04\
-\0\x06prompt\x01/\x01C\x01\x0asession-id\x09\x01\0\x04\0\x06cancel\x010\x03\0\x14\
-yosh:acp/agent@5.1.0\x05\x1f\x01B\x09\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\
-\0\0\x01ky\x01r\x04\x0asession-id\x01\x04paths\x04line\x02\x05limit\x02\x04\0\x16\
-read-text-file-request\x03\0\x03\x01r\x01\x07contents\x04\0\x17read-text-file-re\
-sponse\x03\0\x05\x01r\x03\x0asession-id\x01\x04paths\x07contents\x04\0\x17write-\
-text-file-request\x03\0\x07\x03\0\x19yosh:acp/filesystem@5.1.0\x05\x20\x02\x03\0\
-\x06\x0esession-update\x02\x03\0\x05\x1arequest-permission-request\x02\x03\0\x05\
-\x1brequest-permission-response\x02\x03\0\x08\x16read-text-file-request\x02\x03\0\
-\x08\x17read-text-file-response\x02\x03\0\x08\x17write-text-file-request\x02\x03\
-\0\x04\x17create-terminal-request\x02\x03\0\x04\x18create-terminal-response\x02\x03\
-\0\x04\x0fterminal-output\x02\x03\0\x04\x14terminal-exit-status\x01B1\x02\x03\x02\
-\x01\x10\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\x02\
-\x02\x03\x02\x01!\x04\0\x0esession-update\x03\0\x04\x02\x03\x02\x01\"\x04\0\x1ar\
-equest-permission-request\x03\0\x06\x02\x03\x02\x01#\x04\0\x1brequest-permission\
--response\x03\0\x08\x02\x03\x02\x01$\x04\0\x16read-text-file-request\x03\0\x0a\x02\
-\x03\x02\x01%\x04\0\x17read-text-file-response\x03\0\x0c\x02\x03\x02\x01&\x04\0\x17\
-write-text-file-request\x03\0\x0e\x02\x03\x02\x01\x08\x04\0\x0bterminal-id\x03\0\
-\x10\x02\x03\x02\x01'\x04\0\x17create-terminal-request\x03\0\x12\x02\x03\x02\x01\
-(\x04\0\x18create-terminal-response\x03\0\x14\x02\x03\x02\x01)\x04\0\x0fterminal\
--output\x03\0\x16\x02\x03\x02\x01*\x04\0\x14terminal-exit-status\x03\0\x18\x01C\x02\
-\x0asession-id\x03\x06update\x05\x01\0\x04\0\x0eupdate-session\x01\x1a\x01j\x01\x09\
-\x01\x01\x01C\x01\x03req\x07\0\x1b\x04\0\x12request-permission\x01\x1c\x01j\x01\x0d\
-\x01\x01\x01C\x01\x03req\x0b\0\x1d\x04\0\x0eread-text-file\x01\x1e\x01j\0\x01\x01\
-\x01C\x01\x03req\x0f\0\x1f\x04\0\x0fwrite-text-file\x01\x20\x01j\x01\x15\x01\x01\
-\x01C\x01\x03req\x13\0!\x04\0\x0fcreate-terminal\x01\"\x01j\x01\x17\x01\x01\x01C\
-\x02\x0asession-id\x03\x0bterminal-id\x11\0#\x04\0\x13get-terminal-output\x01$\x01\
-j\x01\x19\x01\x01\x01C\x02\x0asession-id\x03\x0bterminal-id\x11\0%\x04\0\x16wait\
--for-terminal-exit\x01&\x01C\x02\x0asession-id\x03\x0bterminal-id\x11\0\x1f\x04\0\
-\x0dkill-terminal\x01'\x04\0\x10release-terminal\x01'\x03\0\x15yosh:acp/client@5\
-.1.0\x05+\x01B\x0a\x01q\x03\x08upstream\x01s\0\x02io\x01s\0\x09not-found\0\0\x04\
-\0\x0dsecrets-error\x03\0\0\x01p}\x01q\x02\x06string\x01s\0\x05bytes\x01\x02\0\x04\
-\0\x0csecret-value\x03\0\x03\x04\0\x06secret\x03\x01\x01i\x05\x01j\x01\x06\x01\x01\
-\x01@\x01\x03keys\0\x07\x04\0\x03get\x01\x08\x03\0#wasmcloud:secrets/store@0.1.0\
--draft\x05,\x02\x03\0\x0a\x06secret\x02\x03\0\x0a\x0csecret-value\x01B\x07\x02\x03\
-\x02\x01-\x04\0\x06secret\x03\0\0\x02\x03\x02\x01.\x04\0\x0csecret-value\x03\0\x02\
-\x01h\x01\x01@\x01\x01s\x04\0\x03\x04\0\x06reveal\x01\x05\x03\0$wasmcloud:secret\
-s/reveal@0.1.0-draft\x05/\x01B;\x02\x03\x02\x01\x10\x04\0\x05error\x03\0\0\x02\x03\
-\x02\x01\x11\x04\0\x12initialize-request\x03\0\x02\x02\x03\x02\x01\x12\x04\0\x13\
-initialize-response\x03\0\x04\x02\x03\x02\x01\x13\x04\0\x14authenticate-request\x03\
-\0\x06\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\x08\x02\x03\x02\x01\x14\x04\
-\0\x13new-session-request\x03\0\x0a\x02\x03\x02\x01\x15\x04\0\x14new-session-res\
-ponse\x03\0\x0c\x02\x03\x02\x01\x16\x04\0\x14load-session-request\x03\0\x0e\x02\x03\
-\x02\x01\x17\x04\0\x15load-session-response\x03\0\x10\x02\x03\x02\x01\x18\x04\0\x15\
-list-sessions-request\x03\0\x12\x02\x03\x02\x01\x19\x04\0\x16list-sessions-respo\
-nse\x03\0\x14\x02\x03\x02\x01\x1a\x04\0\x16resume-session-request\x03\0\x16\x02\x03\
-\x02\x01\x1b\x04\0\x17resume-session-response\x03\0\x18\x02\x03\x02\x01\x1c\x04\0\
-\x18set-session-mode-request\x03\0\x1a\x02\x03\x02\x01\x1d\x04\0\x0eprompt-reque\
-st\x03\0\x1c\x02\x03\x02\x01\x1e\x04\0\x0fprompt-response\x03\0\x1e\x01j\x01\x05\
-\x01\x01\x01C\x01\x03req\x03\0\x20\x04\0\x0ainitialize\x01!\x01j\0\x01\x01\x01C\x01\
-\x03req\x07\0\"\x04\0\x0cauthenticate\x01#\x01j\x01\x0d\x01\x01\x01C\x01\x03req\x0b\
-\0$\x04\0\x0bnew-session\x01%\x01j\x01\x11\x01\x01\x01C\x01\x03req\x0f\0&\x04\0\x0c\
-load-session\x01'\x01j\x01\x15\x01\x01\x01C\x01\x03req\x13\0(\x04\0\x0dlist-sess\
-ions\x01)\x01j\x01\x19\x01\x01\x01C\x01\x03req\x17\0*\x04\0\x0eresume-session\x01\
-+\x01C\x01\x0asession-id\x09\0\"\x04\0\x0dclose-session\x01,\x01C\x01\x03req\x1b\
-\0\"\x04\0\x10set-session-mode\x01-\x01j\x01\x1f\x01\x01\x01C\x01\x03req\x1d\0.\x04\
-\0\x06prompt\x01/\x01C\x01\x0asession-id\x09\x01\0\x04\0\x06cancel\x010\x04\0\x14\
-yosh:acp/agent@5.1.0\x050\x01B1\x02\x03\x02\x01\x10\x04\0\x05error\x03\0\0\x02\x03\
+messages\x04\0\x05error\x03\0\x02\x03\0\x0fyosh:acp/errors\x05\0\x01B\x19\x01ks\x01\
+r\x03\x04names\x05title\0\x07versions\x04\0\x13implementation-info\x03\0\x01\x01\
+r\x02\x0eread-text-file\x7f\x0fwrite-text-file\x7f\x04\0\x0ffs-capabilities\x03\0\
+\x03\x01r\x02\x02fs\x04\x08terminal\x7f\x04\0\x13client-capabilities\x03\0\x05\x01\
+r\x03\x05image\x7f\x05audio\x7f\x10embedded-context\x7f\x04\0\x13prompt-capabili\
+ties\x03\0\x07\x01r\x02\x04http\x7f\x03sse\x7f\x04\0\x10mcp-capabilities\x03\0\x09\
+\x01r\x03\x04list\x7f\x06resume\x7f\x05close\x7f\x04\0\x14session-capabilities\x03\
+\0\x0b\x01r\x04\x0cload-session\x7f\x13prompt-capabilities\x08\x10mcp-capabiliti\
+es\x0a\x14session-capabilities\x0c\x04\0\x12agent-capabilities\x03\0\x0d\x01r\x03\
+\x02ids\x04names\x0bdescription\0\x04\0\x0bauth-method\x03\0\x0f\x01r\x01\x09met\
+hod-ids\x04\0\x14authenticate-request\x03\0\x11\x01k\x02\x01r\x03\x10protocol-ve\
+rsiony\x13client-capabilities\x06\x0bclient-info\x13\x04\0\x12initialize-request\
+\x03\0\x14\x01p\x10\x01r\x04\x10protocol-versiony\x12agent-capabilities\x0e\x0aa\
+gent-info\x13\x0cauth-methods\x16\x04\0\x13initialize-response\x03\0\x17\x03\0\x0d\
+yosh:acp/init\x05\x01\x01B4\x01s\x04\0\x0asession-id\x03\0\0\x01s\x04\0\x0fsessi\
+on-mode-id\x03\0\x02\x01r\x02\x04names\x05values\x04\0\x07env-var\x03\0\x04\x01r\
+\x02\x04names\x05values\x04\0\x0bhttp-header\x03\0\x06\x01ps\x01p\x05\x01r\x04\x04\
+names\x07commands\x04args\x08\x03env\x09\x04\0\x10mcp-server-stdio\x03\0\x0a\x01\
+p\x07\x01r\x03\x04names\x03urls\x07headers\x0c\x04\0\x0fmcp-server-http\x03\0\x0d\
+\x01r\x03\x04names\x03urls\x07headers\x0c\x04\0\x0emcp-server-sse\x03\0\x0f\x01q\
+\x03\x05stdio\x01\x0b\0\x04http\x01\x0e\0\x03sse\x01\x10\0\x04\0\x0amcp-server\x03\
+\0\x11\x01r\x01\x0ccomponent-ids\x04\0\x10component-source\x03\0\x13\x01ks\x01r\x04\
+\x02id\x03\x04names\x0bdescription\x15\x0bprovided-by\x14\x04\0\x0csession-mode\x03\
+\0\x16\x01p\x17\x01r\x02\x0fcurrent-mode-id\x03\x0favailable-modes\x18\x04\0\x12\
+session-mode-state\x03\0\x19\x01r\x02\x0asession-id\x01\x07mode-id\x03\x04\0\x18\
+set-session-mode-request\x03\0\x1b\x01p\x12\x01r\x02\x03cwds\x0bmcp-servers\x1d\x04\
+\0\x13new-session-request\x03\0\x1e\x01k\x1a\x01r\x02\x0asession-id\x01\x05modes\
+\x20\x04\0\x14new-session-response\x03\0!\x01r\x03\x0asession-id\x01\x03cwds\x0b\
+mcp-servers\x1d\x04\0\x14load-session-request\x03\0#\x01r\x01\x05modes\x20\x04\0\
+\x15load-session-response\x03\0%\x01r\x04\x0asession-id\x01\x03cwds\x05title\x15\
+\x0aupdated-at\x15\x04\0\x0csession-info\x03\0'\x01r\x02\x03cwd\x15\x06cursor\x15\
+\x04\0\x15list-sessions-request\x03\0)\x01p(\x01r\x02\x08sessions+\x0bnext-curso\
+r\x15\x04\0\x16list-sessions-response\x03\0,\x01r\x03\x0asession-id\x01\x03cwds\x0b\
+mcp-servers\x1d\x04\0\x16resume-session-request\x03\0.\x01r\x01\x05modes\x20\x04\
+\0\x17resume-session-response\x03\00\x01r\x02\x05title\x15\x0aupdated-at\x15\x04\
+\0\x13session-info-update\x03\02\x03\0\x11yosh:acp/sessions\x05\x02\x01B\x14\x01\
+r\x01\x04texts\x04\0\x0ctext-content\x03\0\0\x01ks\x01r\x03\x04datas\x09mime-typ\
+es\x03uri\x02\x04\0\x0dimage-content\x03\0\x03\x01r\x02\x04datas\x09mime-types\x04\
+\0\x0daudio-content\x03\0\x05\x01kw\x01r\x06\x03uris\x04names\x09mime-type\x02\x05\
+title\x02\x0bdescription\x02\x04size\x07\x04\0\x0dresource-link\x03\0\x08\x01r\x03\
+\x03uris\x09mime-type\x02\x04texts\x04\0\x16text-resource-contents\x03\0\x0a\x01\
+r\x03\x03uris\x09mime-type\x02\x04blobs\x04\0\x16blob-resource-contents\x03\0\x0c\
+\x01q\x02\x04text\x01\x0b\0\x04blob\x01\x0d\0\x04\0\x11resource-contents\x03\0\x0e\
+\x01r\x01\x08resource\x0f\x04\0\x11embedded-resource\x03\0\x10\x01q\x05\x04text\x01\
+\x01\0\x05image\x01\x04\0\x05audio\x01\x06\0\x0dresource-link\x01\x09\0\x08resou\
+rce\x01\x11\0\x04\0\x0dcontent-block\x03\0\x12\x03\0\x10yosh:acp/content\x05\x03\
+\x02\x03\0\x02\x0asession-id\x02\x03\0\x02\x07env-var\x01B\x14\x02\x03\x02\x01\x04\
+\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x05\x04\0\x07env-var\x03\0\x02\x01s\
+\x04\0\x0bterminal-id\x03\0\x04\x01ps\x01p\x03\x01ks\x01kw\x01r\x06\x0asession-i\
+d\x01\x07commands\x04args\x06\x03env\x07\x03cwd\x08\x11output-byte-limit\x09\x04\
+\0\x17create-terminal-request\x03\0\x0a\x01r\x01\x0bterminal-id\x05\x04\0\x18cre\
+ate-terminal-response\x03\0\x0c\x01kz\x01r\x02\x09exit-code\x0e\x06signal\x08\x04\
+\0\x14terminal-exit-status\x03\0\x0f\x01k\x10\x01r\x03\x06outputs\x09truncated\x7f\
+\x0bexit-status\x11\x04\0\x0fterminal-output\x03\0\x12\x03\0\x12yosh:acp/termina\
+ls\x05\x06\x02\x03\0\x03\x0dcontent-block\x02\x03\0\x04\x0bterminal-id\x01B2\x02\
+\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x07\x04\0\x0dconten\
+t-block\x03\0\x02\x02\x03\x02\x01\x08\x04\0\x0bterminal-id\x03\0\x04\x01s\x04\0\x0c\
+tool-call-id\x03\0\x06\x01m\x09\x04read\x04edit\x06delete\x04move\x06search\x07e\
+xecute\x05think\x05fetch\x05other\x04\0\x09tool-kind\x03\0\x08\x01m\x04\x07pendi\
+ng\x0bin-progress\x09completed\x06failed\x04\0\x10tool-call-status\x03\0\x0a\x01\
+ks\x01r\x03\x04paths\x08old-text\x0c\x08new-texts\x04\0\x04diff\x03\0\x0d\x01q\x03\
+\x07content\x01\x03\0\x04diff\x01\x0e\0\x08terminal\x01\x05\0\x04\0\x11tool-call\
+-content\x03\0\x0f\x01ky\x01r\x02\x04paths\x04line\x11\x04\0\x12tool-call-locati\
+on\x03\0\x12\x01p\x10\x01p\x13\x01r\x08\x02id\x07\x05titles\x04kind\x09\x06statu\
+s\x0b\x07content\x14\x09locations\x15\x09raw-input\x0c\x0araw-output\x0c\x04\0\x09\
+tool-call\x03\0\x16\x01k\x09\x01k\x0b\x01k\x14\x01k\x15\x01r\x08\x02id\x07\x05ti\
+tle\x0c\x04kind\x18\x06status\x19\x07content\x1a\x09locations\x1b\x09raw-input\x0c\
+\x0araw-output\x0c\x04\0\x10tool-call-update\x03\0\x1c\x01m\x03\x04high\x06mediu\
+m\x03low\x04\0\x13plan-entry-priority\x03\0\x1e\x01m\x03\x07pending\x0bin-progre\
+ss\x09completed\x04\0\x11plan-entry-status\x03\0\x20\x01r\x03\x07contents\x08pri\
+ority\x1f\x06status!\x04\0\x0aplan-entry\x03\0\"\x01p#\x01r\x01\x07entries$\x04\0\
+\x04plan\x03\0%\x01m\x04\x0aallow-once\x0callow-always\x0breject-once\x0dreject-\
+always\x04\0\x16permission-option-kind\x03\0'\x01r\x03\x02ids\x04names\x04kind(\x04\
+\0\x11permission-option\x03\0)\x01p*\x01r\x03\x0asession-id\x01\x09tool-call\x1d\
+\x07options+\x04\0\x1arequest-permission-request\x03\0,\x01q\x02\x09cancelled\0\0\
+\x08selected\x01s\0\x04\0\x12permission-outcome\x03\0.\x01r\x01\x07outcome/\x04\0\
+\x1brequest-permission-response\x03\00\x03\0\x0eyosh:acp/tools\x05\x09\x02\x03\0\
+\x02\x0fsession-mode-id\x02\x03\0\x02\x13session-info-update\x02\x03\0\x05\x09to\
+ol-call\x02\x03\0\x05\x10tool-call-update\x02\x03\0\x05\x04plan\x01B\x1d\x02\x03\
+\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x0a\x04\0\x0fsession-mo\
+de-id\x03\0\x02\x02\x03\x02\x01\x0b\x04\0\x13session-info-update\x03\0\x04\x02\x03\
+\x02\x01\x07\x04\0\x0dcontent-block\x03\0\x06\x02\x03\x02\x01\x0c\x04\0\x09tool-\
+call\x03\0\x08\x02\x03\x02\x01\x0d\x04\0\x10tool-call-update\x03\0\x0a\x02\x03\x02\
+\x01\x0e\x04\0\x04plan\x03\0\x0c\x01p\x07\x01r\x02\x0asession-id\x01\x06prompt\x0e\
+\x04\0\x0eprompt-request\x03\0\x0f\x01m\x05\x08end-turn\x0amax-tokens\x11max-tur\
+n-requests\x07refusal\x09cancelled\x04\0\x0bstop-reason\x03\0\x11\x01r\x01\x0bst\
+op-reason\x12\x04\0\x0fprompt-response\x03\0\x13\x01r\x01\x04hints\x04\0\x17avai\
+lable-command-input\x03\0\x15\x01k\x16\x01r\x03\x04names\x0bdescriptions\x05inpu\
+t\x17\x04\0\x11available-command\x03\0\x18\x01p\x19\x01q\x09\x12user-message-chu\
+nk\x01\x07\0\x13agent-message-chunk\x01\x07\0\x13agent-thought-chunk\x01\x07\0\x09\
+tool-call\x01\x09\0\x10tool-call-update\x01\x0b\0\x04plan\x01\x0d\0\x13current-m\
+ode-update\x01\x03\0\x13session-info-update\x01\x05\0\x19available-commands-upda\
+te\x01\x1a\0\x04\0\x0esession-update\x03\0\x1b\x03\0\x10yosh:acp/prompts\x05\x0f\
+\x02\x03\0\0\x05error\x02\x03\0\x01\x12initialize-request\x02\x03\0\x01\x13initi\
+alize-response\x02\x03\0\x01\x14authenticate-request\x02\x03\0\x02\x13new-sessio\
+n-request\x02\x03\0\x02\x14new-session-response\x02\x03\0\x02\x14load-session-re\
+quest\x02\x03\0\x02\x15load-session-response\x02\x03\0\x02\x15list-sessions-requ\
+est\x02\x03\0\x02\x16list-sessions-response\x02\x03\0\x02\x16resume-session-requ\
+est\x02\x03\0\x02\x17resume-session-response\x02\x03\0\x02\x18set-session-mode-r\
+equest\x02\x03\0\x06\x0eprompt-request\x02\x03\0\x06\x0fprompt-response\x01B;\x02\
+\x03\x02\x01\x10\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x11\x04\0\x12initialize-\
+request\x03\0\x02\x02\x03\x02\x01\x12\x04\0\x13initialize-response\x03\0\x04\x02\
+\x03\x02\x01\x13\x04\0\x14authenticate-request\x03\0\x06\x02\x03\x02\x01\x04\x04\
+\0\x0asession-id\x03\0\x08\x02\x03\x02\x01\x14\x04\0\x13new-session-request\x03\0\
+\x0a\x02\x03\x02\x01\x15\x04\0\x14new-session-response\x03\0\x0c\x02\x03\x02\x01\
+\x16\x04\0\x14load-session-request\x03\0\x0e\x02\x03\x02\x01\x17\x04\0\x15load-s\
+ession-response\x03\0\x10\x02\x03\x02\x01\x18\x04\0\x15list-sessions-request\x03\
+\0\x12\x02\x03\x02\x01\x19\x04\0\x16list-sessions-response\x03\0\x14\x02\x03\x02\
+\x01\x1a\x04\0\x16resume-session-request\x03\0\x16\x02\x03\x02\x01\x1b\x04\0\x17\
+resume-session-response\x03\0\x18\x02\x03\x02\x01\x1c\x04\0\x18set-session-mode-\
+request\x03\0\x1a\x02\x03\x02\x01\x1d\x04\0\x0eprompt-request\x03\0\x1c\x02\x03\x02\
+\x01\x1e\x04\0\x0fprompt-response\x03\0\x1e\x01j\x01\x05\x01\x01\x01C\x01\x03req\
+\x03\0\x20\x04\0\x0ainitialize\x01!\x01j\0\x01\x01\x01C\x01\x03req\x07\0\"\x04\0\
+\x0cauthenticate\x01#\x01j\x01\x0d\x01\x01\x01C\x01\x03req\x0b\0$\x04\0\x0bnew-s\
+ession\x01%\x01j\x01\x11\x01\x01\x01C\x01\x03req\x0f\0&\x04\0\x0cload-session\x01\
+'\x01j\x01\x15\x01\x01\x01C\x01\x03req\x13\0(\x04\0\x0dlist-sessions\x01)\x01j\x01\
+\x19\x01\x01\x01C\x01\x03req\x17\0*\x04\0\x0eresume-session\x01+\x01C\x01\x0ases\
+sion-id\x09\0\"\x04\0\x0dclose-session\x01,\x01C\x01\x03req\x1b\0\"\x04\0\x10set\
+-session-mode\x01-\x01j\x01\x1f\x01\x01\x01C\x01\x03req\x1d\0.\x04\0\x06prompt\x01\
+/\x01C\x01\x0asession-id\x09\x01\0\x04\0\x06cancel\x010\x03\0\x0eyosh:acp/agent\x05\
+\x1f\x01B\x09\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x01ky\x01r\x04\x0a\
+session-id\x01\x04paths\x04line\x02\x05limit\x02\x04\0\x16read-text-file-request\
+\x03\0\x03\x01r\x01\x07contents\x04\0\x17read-text-file-response\x03\0\x05\x01r\x03\
+\x0asession-id\x01\x04paths\x07contents\x04\0\x17write-text-file-request\x03\0\x07\
+\x03\0\x13yosh:acp/filesystem\x05\x20\x02\x03\0\x06\x0esession-update\x02\x03\0\x05\
+\x1arequest-permission-request\x02\x03\0\x05\x1brequest-permission-response\x02\x03\
+\0\x08\x16read-text-file-request\x02\x03\0\x08\x17read-text-file-response\x02\x03\
+\0\x08\x17write-text-file-request\x02\x03\0\x04\x17create-terminal-request\x02\x03\
+\0\x04\x18create-terminal-response\x02\x03\0\x04\x0fterminal-output\x02\x03\0\x04\
+\x14terminal-exit-status\x01B1\x02\x03\x02\x01\x10\x04\0\x05error\x03\0\0\x02\x03\
 \x02\x01\x04\x04\0\x0asession-id\x03\0\x02\x02\x03\x02\x01!\x04\0\x0esession-upd\
 ate\x03\0\x04\x02\x03\x02\x01\"\x04\0\x1arequest-permission-request\x03\0\x06\x02\
 \x03\x02\x01#\x04\0\x1brequest-permission-response\x03\0\x08\x02\x03\x02\x01$\x04\
@@ -25217,9 +25293,55 @@ te-terminal\x01\"\x01j\x01\x17\x01\x01\x01C\x02\x0asession-id\x03\x0bterminal-id
 \x11\0#\x04\0\x13get-terminal-output\x01$\x01j\x01\x19\x01\x01\x01C\x02\x0asessi\
 on-id\x03\x0bterminal-id\x11\0%\x04\0\x16wait-for-terminal-exit\x01&\x01C\x02\x0a\
 session-id\x03\x0bterminal-id\x11\0\x1f\x04\0\x0dkill-terminal\x01'\x04\0\x10rel\
-ease-terminal\x01'\x04\0\x15yosh:acp/client@5.1.0\x051\x04\0\x14yosh:acp/layer@5\
-.1.0\x04\0\x0b\x0b\x01\0\x05layer\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\
-\x0dwit-component\x070.245.1\x10wit-bindgen-rust\x060.54.0";
+ease-terminal\x01'\x03\0\x0fyosh:acp/client\x05+\x01B\x0a\x01q\x03\x08upstream\x01\
+s\0\x02io\x01s\0\x09not-found\0\0\x04\0\x0dsecrets-error\x03\0\0\x01p}\x01q\x02\x06\
+string\x01s\0\x05bytes\x01\x02\0\x04\0\x0csecret-value\x03\0\x03\x04\0\x06secret\
+\x03\x01\x01i\x05\x01j\x01\x06\x01\x01\x01@\x01\x03keys\0\x07\x04\0\x03get\x01\x08\
+\x03\0#wasmcloud:secrets/store@0.1.0-draft\x05,\x02\x03\0\x0a\x06secret\x02\x03\0\
+\x0a\x0csecret-value\x01B\x07\x02\x03\x02\x01-\x04\0\x06secret\x03\0\0\x02\x03\x02\
+\x01.\x04\0\x0csecret-value\x03\0\x02\x01h\x01\x01@\x01\x01s\x04\0\x03\x04\0\x06\
+reveal\x01\x05\x03\0$wasmcloud:secrets/reveal@0.1.0-draft\x05/\x01B;\x02\x03\x02\
+\x01\x10\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x11\x04\0\x12initialize-request\x03\
+\0\x02\x02\x03\x02\x01\x12\x04\0\x13initialize-response\x03\0\x04\x02\x03\x02\x01\
+\x13\x04\0\x14authenticate-request\x03\0\x06\x02\x03\x02\x01\x04\x04\0\x0asessio\
+n-id\x03\0\x08\x02\x03\x02\x01\x14\x04\0\x13new-session-request\x03\0\x0a\x02\x03\
+\x02\x01\x15\x04\0\x14new-session-response\x03\0\x0c\x02\x03\x02\x01\x16\x04\0\x14\
+load-session-request\x03\0\x0e\x02\x03\x02\x01\x17\x04\0\x15load-session-respons\
+e\x03\0\x10\x02\x03\x02\x01\x18\x04\0\x15list-sessions-request\x03\0\x12\x02\x03\
+\x02\x01\x19\x04\0\x16list-sessions-response\x03\0\x14\x02\x03\x02\x01\x1a\x04\0\
+\x16resume-session-request\x03\0\x16\x02\x03\x02\x01\x1b\x04\0\x17resume-session\
+-response\x03\0\x18\x02\x03\x02\x01\x1c\x04\0\x18set-session-mode-request\x03\0\x1a\
+\x02\x03\x02\x01\x1d\x04\0\x0eprompt-request\x03\0\x1c\x02\x03\x02\x01\x1e\x04\0\
+\x0fprompt-response\x03\0\x1e\x01j\x01\x05\x01\x01\x01C\x01\x03req\x03\0\x20\x04\
+\0\x0ainitialize\x01!\x01j\0\x01\x01\x01C\x01\x03req\x07\0\"\x04\0\x0cauthentica\
+te\x01#\x01j\x01\x0d\x01\x01\x01C\x01\x03req\x0b\0$\x04\0\x0bnew-session\x01%\x01\
+j\x01\x11\x01\x01\x01C\x01\x03req\x0f\0&\x04\0\x0cload-session\x01'\x01j\x01\x15\
+\x01\x01\x01C\x01\x03req\x13\0(\x04\0\x0dlist-sessions\x01)\x01j\x01\x19\x01\x01\
+\x01C\x01\x03req\x17\0*\x04\0\x0eresume-session\x01+\x01C\x01\x0asession-id\x09\0\
+\"\x04\0\x0dclose-session\x01,\x01C\x01\x03req\x1b\0\"\x04\0\x10set-session-mode\
+\x01-\x01j\x01\x1f\x01\x01\x01C\x01\x03req\x1d\0.\x04\0\x06prompt\x01/\x01C\x01\x0a\
+session-id\x09\x01\0\x04\0\x06cancel\x010\x04\0\x0eyosh:acp/agent\x050\x01B1\x02\
+\x03\x02\x01\x10\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\
+\0\x02\x02\x03\x02\x01!\x04\0\x0esession-update\x03\0\x04\x02\x03\x02\x01\"\x04\0\
+\x1arequest-permission-request\x03\0\x06\x02\x03\x02\x01#\x04\0\x1brequest-permi\
+ssion-response\x03\0\x08\x02\x03\x02\x01$\x04\0\x16read-text-file-request\x03\0\x0a\
+\x02\x03\x02\x01%\x04\0\x17read-text-file-response\x03\0\x0c\x02\x03\x02\x01&\x04\
+\0\x17write-text-file-request\x03\0\x0e\x02\x03\x02\x01\x08\x04\0\x0bterminal-id\
+\x03\0\x10\x02\x03\x02\x01'\x04\0\x17create-terminal-request\x03\0\x12\x02\x03\x02\
+\x01(\x04\0\x18create-terminal-response\x03\0\x14\x02\x03\x02\x01)\x04\0\x0fterm\
+inal-output\x03\0\x16\x02\x03\x02\x01*\x04\0\x14terminal-exit-status\x03\0\x18\x01\
+C\x02\x0asession-id\x03\x06update\x05\x01\0\x04\0\x0eupdate-session\x01\x1a\x01j\
+\x01\x09\x01\x01\x01C\x01\x03req\x07\0\x1b\x04\0\x12request-permission\x01\x1c\x01\
+j\x01\x0d\x01\x01\x01C\x01\x03req\x0b\0\x1d\x04\0\x0eread-text-file\x01\x1e\x01j\
+\0\x01\x01\x01C\x01\x03req\x0f\0\x1f\x04\0\x0fwrite-text-file\x01\x20\x01j\x01\x15\
+\x01\x01\x01C\x01\x03req\x13\0!\x04\0\x0fcreate-terminal\x01\"\x01j\x01\x17\x01\x01\
+\x01C\x02\x0asession-id\x03\x0bterminal-id\x11\0#\x04\0\x13get-terminal-output\x01\
+$\x01j\x01\x19\x01\x01\x01C\x02\x0asession-id\x03\x0bterminal-id\x11\0%\x04\0\x16\
+wait-for-terminal-exit\x01&\x01C\x02\x0asession-id\x03\x0bterminal-id\x11\0\x1f\x04\
+\0\x0dkill-terminal\x01'\x04\0\x10release-terminal\x01'\x04\0\x0fyosh:acp/client\
+\x051\x04\0\x0eyosh:acp/layer\x04\0\x0b\x0b\x01\0\x05layer\x03\0\0\0G\x09produce\
+rs\x01\x0cprocessed-by\x02\x0dwit-component\x070.245.1\x10wit-bindgen-rust\x060.\
+54.0";
         };
     };
 }
@@ -25228,173 +25350,173 @@ pub use __export_layer_impl as export;
 #[rustfmt::skip]
 #[cfg(target_arch = "wasm32")]
 #[unsafe(
-    link_section = "component-type:wit-bindgen:0.54.0:yosh:acp@5.1.0:layer-with-all-of-its-exports-removed:encoded world"
+    link_section = "component-type:wit-bindgen:0.54.0:yosh:acp:layer-with-all-of-its-exports-removed:encoded world"
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 7543] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xdb9\x01A\x02\x01A<\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 7529] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xcd9\x01A\x02\x01A<\x01\
 B\x04\x01q\x08\x0bparse-error\0\0\x0finvalid-request\0\0\x10method-not-found\0\0\
 \x0einvalid-params\0\0\x0einternal-error\0\0\x0dauth-required\0\0\x12resource-no\
 t-found\0\0\x05other\x01z\0\x04\0\x0aerror-code\x03\0\0\x01r\x02\x04code\x01\x07\
-messages\x04\0\x05error\x03\0\x02\x03\0\x15yosh:acp/errors@5.1.0\x05\0\x01B\x19\x01\
-ks\x01r\x03\x04names\x05title\0\x07versions\x04\0\x13implementation-info\x03\0\x01\
-\x01r\x02\x0eread-text-file\x7f\x0fwrite-text-file\x7f\x04\0\x0ffs-capabilities\x03\
-\0\x03\x01r\x02\x02fs\x04\x08terminal\x7f\x04\0\x13client-capabilities\x03\0\x05\
-\x01r\x03\x05image\x7f\x05audio\x7f\x10embedded-context\x7f\x04\0\x13prompt-capa\
-bilities\x03\0\x07\x01r\x02\x04http\x7f\x03sse\x7f\x04\0\x10mcp-capabilities\x03\
-\0\x09\x01r\x03\x04list\x7f\x06resume\x7f\x05close\x7f\x04\0\x14session-capabili\
-ties\x03\0\x0b\x01r\x04\x0cload-session\x7f\x13prompt-capabilities\x08\x10mcp-ca\
-pabilities\x0a\x14session-capabilities\x0c\x04\0\x12agent-capabilities\x03\0\x0d\
-\x01r\x03\x02ids\x04names\x0bdescription\0\x04\0\x0bauth-method\x03\0\x0f\x01r\x01\
-\x09method-ids\x04\0\x14authenticate-request\x03\0\x11\x01k\x02\x01r\x03\x10prot\
-ocol-versiony\x13client-capabilities\x06\x0bclient-info\x13\x04\0\x12initialize-\
-request\x03\0\x14\x01p\x10\x01r\x04\x10protocol-versiony\x12agent-capabilities\x0e\
-\x0aagent-info\x13\x0cauth-methods\x16\x04\0\x13initialize-response\x03\0\x17\x03\
-\0\x13yosh:acp/init@5.1.0\x05\x01\x01B2\x01s\x04\0\x0asession-id\x03\0\0\x01s\x04\
-\0\x0fsession-mode-id\x03\0\x02\x01r\x02\x04names\x05values\x04\0\x07env-var\x03\
-\0\x04\x01r\x02\x04names\x05values\x04\0\x0bhttp-header\x03\0\x06\x01ps\x01p\x05\
-\x01r\x04\x04names\x07commands\x04args\x08\x03env\x09\x04\0\x10mcp-server-stdio\x03\
-\0\x0a\x01p\x07\x01r\x03\x04names\x03urls\x07headers\x0c\x04\0\x0fmcp-server-htt\
-p\x03\0\x0d\x01r\x03\x04names\x03urls\x07headers\x0c\x04\0\x0emcp-server-sse\x03\
-\0\x0f\x01q\x03\x05stdio\x01\x0b\0\x04http\x01\x0e\0\x03sse\x01\x10\0\x04\0\x0am\
-cp-server\x03\0\x11\x01ks\x01r\x03\x02id\x03\x04names\x0bdescription\x13\x04\0\x0c\
-session-mode\x03\0\x14\x01p\x15\x01r\x02\x0fcurrent-mode-id\x03\x0favailable-mod\
-es\x16\x04\0\x12session-mode-state\x03\0\x17\x01r\x02\x0asession-id\x01\x07mode-\
-id\x03\x04\0\x18set-session-mode-request\x03\0\x19\x01p\x12\x01r\x02\x03cwds\x0b\
-mcp-servers\x1b\x04\0\x13new-session-request\x03\0\x1c\x01k\x18\x01r\x02\x0asess\
-ion-id\x01\x05modes\x1e\x04\0\x14new-session-response\x03\0\x1f\x01r\x03\x0asess\
-ion-id\x01\x03cwds\x0bmcp-servers\x1b\x04\0\x14load-session-request\x03\0!\x01r\x01\
-\x05modes\x1e\x04\0\x15load-session-response\x03\0#\x01r\x04\x0asession-id\x01\x03\
-cwds\x05title\x13\x0aupdated-at\x13\x04\0\x0csession-info\x03\0%\x01r\x02\x03cwd\
-\x13\x06cursor\x13\x04\0\x15list-sessions-request\x03\0'\x01p&\x01r\x02\x08sessi\
-ons)\x0bnext-cursor\x13\x04\0\x16list-sessions-response\x03\0*\x01r\x03\x0asessi\
-on-id\x01\x03cwds\x0bmcp-servers\x1b\x04\0\x16resume-session-request\x03\0,\x01r\
-\x01\x05modes\x1e\x04\0\x17resume-session-response\x03\0.\x01r\x02\x05title\x13\x0a\
-updated-at\x13\x04\0\x13session-info-update\x03\00\x03\0\x17yosh:acp/sessions@5.\
-1.0\x05\x02\x01B\x14\x01r\x01\x04texts\x04\0\x0ctext-content\x03\0\0\x01ks\x01r\x03\
-\x04datas\x09mime-types\x03uri\x02\x04\0\x0dimage-content\x03\0\x03\x01r\x02\x04\
-datas\x09mime-types\x04\0\x0daudio-content\x03\0\x05\x01kw\x01r\x06\x03uris\x04n\
-ames\x09mime-type\x02\x05title\x02\x0bdescription\x02\x04size\x07\x04\0\x0dresou\
-rce-link\x03\0\x08\x01r\x03\x03uris\x09mime-type\x02\x04texts\x04\0\x16text-reso\
-urce-contents\x03\0\x0a\x01r\x03\x03uris\x09mime-type\x02\x04blobs\x04\0\x16blob\
--resource-contents\x03\0\x0c\x01q\x02\x04text\x01\x0b\0\x04blob\x01\x0d\0\x04\0\x11\
-resource-contents\x03\0\x0e\x01r\x01\x08resource\x0f\x04\0\x11embedded-resource\x03\
-\0\x10\x01q\x05\x04text\x01\x01\0\x05image\x01\x04\0\x05audio\x01\x06\0\x0dresou\
-rce-link\x01\x09\0\x08resource\x01\x11\0\x04\0\x0dcontent-block\x03\0\x12\x03\0\x16\
-yosh:acp/content@5.1.0\x05\x03\x02\x03\0\x02\x0asession-id\x02\x03\0\x02\x07env-\
-var\x01B\x14\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x05\
-\x04\0\x07env-var\x03\0\x02\x01s\x04\0\x0bterminal-id\x03\0\x04\x01ps\x01p\x03\x01\
-ks\x01kw\x01r\x06\x0asession-id\x01\x07commands\x04args\x06\x03env\x07\x03cwd\x08\
-\x11output-byte-limit\x09\x04\0\x17create-terminal-request\x03\0\x0a\x01r\x01\x0b\
-terminal-id\x05\x04\0\x18create-terminal-response\x03\0\x0c\x01kz\x01r\x02\x09ex\
-it-code\x0e\x06signal\x08\x04\0\x14terminal-exit-status\x03\0\x0f\x01k\x10\x01r\x03\
-\x06outputs\x09truncated\x7f\x0bexit-status\x11\x04\0\x0fterminal-output\x03\0\x12\
-\x03\0\x18yosh:acp/terminals@5.1.0\x05\x06\x02\x03\0\x03\x0dcontent-block\x02\x03\
-\0\x04\x0bterminal-id\x01B2\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x02\x03\
-\x02\x01\x07\x04\0\x0dcontent-block\x03\0\x02\x02\x03\x02\x01\x08\x04\0\x0btermi\
-nal-id\x03\0\x04\x01s\x04\0\x0ctool-call-id\x03\0\x06\x01m\x09\x04read\x04edit\x06\
-delete\x04move\x06search\x07execute\x05think\x05fetch\x05other\x04\0\x09tool-kin\
-d\x03\0\x08\x01m\x04\x07pending\x0bin-progress\x09completed\x06failed\x04\0\x10t\
-ool-call-status\x03\0\x0a\x01ks\x01r\x03\x04paths\x08old-text\x0c\x08new-texts\x04\
-\0\x04diff\x03\0\x0d\x01q\x03\x07content\x01\x03\0\x04diff\x01\x0e\0\x08terminal\
-\x01\x05\0\x04\0\x11tool-call-content\x03\0\x0f\x01ky\x01r\x02\x04paths\x04line\x11\
-\x04\0\x12tool-call-location\x03\0\x12\x01p\x10\x01p\x13\x01r\x08\x02id\x07\x05t\
-itles\x04kind\x09\x06status\x0b\x07content\x14\x09locations\x15\x09raw-input\x0c\
-\x0araw-output\x0c\x04\0\x09tool-call\x03\0\x16\x01k\x09\x01k\x0b\x01k\x14\x01k\x15\
-\x01r\x08\x02id\x07\x05title\x0c\x04kind\x18\x06status\x19\x07content\x1a\x09loc\
-ations\x1b\x09raw-input\x0c\x0araw-output\x0c\x04\0\x10tool-call-update\x03\0\x1c\
-\x01m\x03\x04high\x06medium\x03low\x04\0\x13plan-entry-priority\x03\0\x1e\x01m\x03\
-\x07pending\x0bin-progress\x09completed\x04\0\x11plan-entry-status\x03\0\x20\x01\
-r\x03\x07contents\x08priority\x1f\x06status!\x04\0\x0aplan-entry\x03\0\"\x01p#\x01\
-r\x01\x07entries$\x04\0\x04plan\x03\0%\x01m\x04\x0aallow-once\x0callow-always\x0b\
-reject-once\x0dreject-always\x04\0\x16permission-option-kind\x03\0'\x01r\x03\x02\
-ids\x04names\x04kind(\x04\0\x11permission-option\x03\0)\x01p*\x01r\x03\x0asessio\
-n-id\x01\x09tool-call\x1d\x07options+\x04\0\x1arequest-permission-request\x03\0,\
-\x01q\x02\x09cancelled\0\0\x08selected\x01s\0\x04\0\x12permission-outcome\x03\0.\
-\x01r\x01\x07outcome/\x04\0\x1brequest-permission-response\x03\00\x03\0\x14yosh:\
-acp/tools@5.1.0\x05\x09\x02\x03\0\x02\x0fsession-mode-id\x02\x03\0\x02\x13sessio\
-n-info-update\x02\x03\0\x05\x09tool-call\x02\x03\0\x05\x10tool-call-update\x02\x03\
-\0\x05\x04plan\x01B\x1d\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x02\x03\x02\
-\x01\x0a\x04\0\x0fsession-mode-id\x03\0\x02\x02\x03\x02\x01\x0b\x04\0\x13session\
--info-update\x03\0\x04\x02\x03\x02\x01\x07\x04\0\x0dcontent-block\x03\0\x06\x02\x03\
-\x02\x01\x0c\x04\0\x09tool-call\x03\0\x08\x02\x03\x02\x01\x0d\x04\0\x10tool-call\
--update\x03\0\x0a\x02\x03\x02\x01\x0e\x04\0\x04plan\x03\0\x0c\x01p\x07\x01r\x02\x0a\
-session-id\x01\x06prompt\x0e\x04\0\x0eprompt-request\x03\0\x0f\x01m\x05\x08end-t\
-urn\x0amax-tokens\x11max-turn-requests\x07refusal\x09cancelled\x04\0\x0bstop-rea\
-son\x03\0\x11\x01r\x01\x0bstop-reason\x12\x04\0\x0fprompt-response\x03\0\x13\x01\
-r\x01\x04hints\x04\0\x17available-command-input\x03\0\x15\x01k\x16\x01r\x03\x04n\
-ames\x0bdescriptions\x05input\x17\x04\0\x11available-command\x03\0\x18\x01p\x19\x01\
-q\x09\x12user-message-chunk\x01\x07\0\x13agent-message-chunk\x01\x07\0\x13agent-\
-thought-chunk\x01\x07\0\x09tool-call\x01\x09\0\x10tool-call-update\x01\x0b\0\x04\
-plan\x01\x0d\0\x13current-mode-update\x01\x03\0\x13session-info-update\x01\x05\0\
-\x19available-commands-update\x01\x1a\0\x04\0\x0esession-update\x03\0\x1b\x03\0\x16\
-yosh:acp/prompts@5.1.0\x05\x0f\x02\x03\0\0\x05error\x02\x03\0\x01\x12initialize-\
-request\x02\x03\0\x01\x13initialize-response\x02\x03\0\x01\x14authenticate-reque\
-st\x02\x03\0\x02\x13new-session-request\x02\x03\0\x02\x14new-session-response\x02\
-\x03\0\x02\x14load-session-request\x02\x03\0\x02\x15load-session-response\x02\x03\
-\0\x02\x15list-sessions-request\x02\x03\0\x02\x16list-sessions-response\x02\x03\0\
-\x02\x16resume-session-request\x02\x03\0\x02\x17resume-session-response\x02\x03\0\
-\x02\x18set-session-mode-request\x02\x03\0\x06\x0eprompt-request\x02\x03\0\x06\x0f\
-prompt-response\x01B;\x02\x03\x02\x01\x10\x04\0\x05error\x03\0\0\x02\x03\x02\x01\
-\x11\x04\0\x12initialize-request\x03\0\x02\x02\x03\x02\x01\x12\x04\0\x13initiali\
-ze-response\x03\0\x04\x02\x03\x02\x01\x13\x04\0\x14authenticate-request\x03\0\x06\
-\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\x08\x02\x03\x02\x01\x14\x04\0\x13\
-new-session-request\x03\0\x0a\x02\x03\x02\x01\x15\x04\0\x14new-session-response\x03\
-\0\x0c\x02\x03\x02\x01\x16\x04\0\x14load-session-request\x03\0\x0e\x02\x03\x02\x01\
-\x17\x04\0\x15load-session-response\x03\0\x10\x02\x03\x02\x01\x18\x04\0\x15list-\
-sessions-request\x03\0\x12\x02\x03\x02\x01\x19\x04\0\x16list-sessions-response\x03\
-\0\x14\x02\x03\x02\x01\x1a\x04\0\x16resume-session-request\x03\0\x16\x02\x03\x02\
-\x01\x1b\x04\0\x17resume-session-response\x03\0\x18\x02\x03\x02\x01\x1c\x04\0\x18\
-set-session-mode-request\x03\0\x1a\x02\x03\x02\x01\x1d\x04\0\x0eprompt-request\x03\
-\0\x1c\x02\x03\x02\x01\x1e\x04\0\x0fprompt-response\x03\0\x1e\x01j\x01\x05\x01\x01\
-\x01C\x01\x03req\x03\0\x20\x04\0\x0ainitialize\x01!\x01j\0\x01\x01\x01C\x01\x03r\
-eq\x07\0\"\x04\0\x0cauthenticate\x01#\x01j\x01\x0d\x01\x01\x01C\x01\x03req\x0b\0\
-$\x04\0\x0bnew-session\x01%\x01j\x01\x11\x01\x01\x01C\x01\x03req\x0f\0&\x04\0\x0c\
-load-session\x01'\x01j\x01\x15\x01\x01\x01C\x01\x03req\x13\0(\x04\0\x0dlist-sess\
-ions\x01)\x01j\x01\x19\x01\x01\x01C\x01\x03req\x17\0*\x04\0\x0eresume-session\x01\
-+\x01C\x01\x0asession-id\x09\0\"\x04\0\x0dclose-session\x01,\x01C\x01\x03req\x1b\
-\0\"\x04\0\x10set-session-mode\x01-\x01j\x01\x1f\x01\x01\x01C\x01\x03req\x1d\0.\x04\
-\0\x06prompt\x01/\x01C\x01\x0asession-id\x09\x01\0\x04\0\x06cancel\x010\x03\0\x14\
-yosh:acp/agent@5.1.0\x05\x1f\x01B\x09\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\
-\0\0\x01ky\x01r\x04\x0asession-id\x01\x04paths\x04line\x02\x05limit\x02\x04\0\x16\
-read-text-file-request\x03\0\x03\x01r\x01\x07contents\x04\0\x17read-text-file-re\
-sponse\x03\0\x05\x01r\x03\x0asession-id\x01\x04paths\x07contents\x04\0\x17write-\
-text-file-request\x03\0\x07\x03\0\x19yosh:acp/filesystem@5.1.0\x05\x20\x02\x03\0\
-\x06\x0esession-update\x02\x03\0\x05\x1arequest-permission-request\x02\x03\0\x05\
-\x1brequest-permission-response\x02\x03\0\x08\x16read-text-file-request\x02\x03\0\
-\x08\x17read-text-file-response\x02\x03\0\x08\x17write-text-file-request\x02\x03\
-\0\x04\x17create-terminal-request\x02\x03\0\x04\x18create-terminal-response\x02\x03\
-\0\x04\x0fterminal-output\x02\x03\0\x04\x14terminal-exit-status\x01B1\x02\x03\x02\
-\x01\x10\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\x02\
-\x02\x03\x02\x01!\x04\0\x0esession-update\x03\0\x04\x02\x03\x02\x01\"\x04\0\x1ar\
-equest-permission-request\x03\0\x06\x02\x03\x02\x01#\x04\0\x1brequest-permission\
--response\x03\0\x08\x02\x03\x02\x01$\x04\0\x16read-text-file-request\x03\0\x0a\x02\
-\x03\x02\x01%\x04\0\x17read-text-file-response\x03\0\x0c\x02\x03\x02\x01&\x04\0\x17\
-write-text-file-request\x03\0\x0e\x02\x03\x02\x01\x08\x04\0\x0bterminal-id\x03\0\
-\x10\x02\x03\x02\x01'\x04\0\x17create-terminal-request\x03\0\x12\x02\x03\x02\x01\
-(\x04\0\x18create-terminal-response\x03\0\x14\x02\x03\x02\x01)\x04\0\x0fterminal\
--output\x03\0\x16\x02\x03\x02\x01*\x04\0\x14terminal-exit-status\x03\0\x18\x01C\x02\
-\x0asession-id\x03\x06update\x05\x01\0\x04\0\x0eupdate-session\x01\x1a\x01j\x01\x09\
-\x01\x01\x01C\x01\x03req\x07\0\x1b\x04\0\x12request-permission\x01\x1c\x01j\x01\x0d\
-\x01\x01\x01C\x01\x03req\x0b\0\x1d\x04\0\x0eread-text-file\x01\x1e\x01j\0\x01\x01\
-\x01C\x01\x03req\x0f\0\x1f\x04\0\x0fwrite-text-file\x01\x20\x01j\x01\x15\x01\x01\
-\x01C\x01\x03req\x13\0!\x04\0\x0fcreate-terminal\x01\"\x01j\x01\x17\x01\x01\x01C\
-\x02\x0asession-id\x03\x0bterminal-id\x11\0#\x04\0\x13get-terminal-output\x01$\x01\
-j\x01\x19\x01\x01\x01C\x02\x0asession-id\x03\x0bterminal-id\x11\0%\x04\0\x16wait\
--for-terminal-exit\x01&\x01C\x02\x0asession-id\x03\x0bterminal-id\x11\0\x1f\x04\0\
-\x0dkill-terminal\x01'\x04\0\x10release-terminal\x01'\x03\0\x15yosh:acp/client@5\
-.1.0\x05+\x01B\x0a\x01q\x03\x08upstream\x01s\0\x02io\x01s\0\x09not-found\0\0\x04\
-\0\x0dsecrets-error\x03\0\0\x01p}\x01q\x02\x06string\x01s\0\x05bytes\x01\x02\0\x04\
-\0\x0csecret-value\x03\0\x03\x04\0\x06secret\x03\x01\x01i\x05\x01j\x01\x06\x01\x01\
-\x01@\x01\x03keys\0\x07\x04\0\x03get\x01\x08\x03\0#wasmcloud:secrets/store@0.1.0\
--draft\x05,\x02\x03\0\x0a\x06secret\x02\x03\0\x0a\x0csecret-value\x01B\x07\x02\x03\
-\x02\x01-\x04\0\x06secret\x03\0\0\x02\x03\x02\x01.\x04\0\x0csecret-value\x03\0\x02\
-\x01h\x01\x01@\x01\x01s\x04\0\x03\x04\0\x06reveal\x01\x05\x03\0$wasmcloud:secret\
-s/reveal@0.1.0-draft\x05/\x04\04yosh:acp/layer-with-all-of-its-exports-removed@5\
-.1.0\x04\0\x0b+\x01\0%layer-with-all-of-its-exports-removed\x03\0\0\0G\x09produc\
-ers\x01\x0cprocessed-by\x02\x0dwit-component\x070.245.1\x10wit-bindgen-rust\x060\
-.54.0";
+messages\x04\0\x05error\x03\0\x02\x03\0\x0fyosh:acp/errors\x05\0\x01B\x19\x01ks\x01\
+r\x03\x04names\x05title\0\x07versions\x04\0\x13implementation-info\x03\0\x01\x01\
+r\x02\x0eread-text-file\x7f\x0fwrite-text-file\x7f\x04\0\x0ffs-capabilities\x03\0\
+\x03\x01r\x02\x02fs\x04\x08terminal\x7f\x04\0\x13client-capabilities\x03\0\x05\x01\
+r\x03\x05image\x7f\x05audio\x7f\x10embedded-context\x7f\x04\0\x13prompt-capabili\
+ties\x03\0\x07\x01r\x02\x04http\x7f\x03sse\x7f\x04\0\x10mcp-capabilities\x03\0\x09\
+\x01r\x03\x04list\x7f\x06resume\x7f\x05close\x7f\x04\0\x14session-capabilities\x03\
+\0\x0b\x01r\x04\x0cload-session\x7f\x13prompt-capabilities\x08\x10mcp-capabiliti\
+es\x0a\x14session-capabilities\x0c\x04\0\x12agent-capabilities\x03\0\x0d\x01r\x03\
+\x02ids\x04names\x0bdescription\0\x04\0\x0bauth-method\x03\0\x0f\x01r\x01\x09met\
+hod-ids\x04\0\x14authenticate-request\x03\0\x11\x01k\x02\x01r\x03\x10protocol-ve\
+rsiony\x13client-capabilities\x06\x0bclient-info\x13\x04\0\x12initialize-request\
+\x03\0\x14\x01p\x10\x01r\x04\x10protocol-versiony\x12agent-capabilities\x0e\x0aa\
+gent-info\x13\x0cauth-methods\x16\x04\0\x13initialize-response\x03\0\x17\x03\0\x0d\
+yosh:acp/init\x05\x01\x01B4\x01s\x04\0\x0asession-id\x03\0\0\x01s\x04\0\x0fsessi\
+on-mode-id\x03\0\x02\x01r\x02\x04names\x05values\x04\0\x07env-var\x03\0\x04\x01r\
+\x02\x04names\x05values\x04\0\x0bhttp-header\x03\0\x06\x01ps\x01p\x05\x01r\x04\x04\
+names\x07commands\x04args\x08\x03env\x09\x04\0\x10mcp-server-stdio\x03\0\x0a\x01\
+p\x07\x01r\x03\x04names\x03urls\x07headers\x0c\x04\0\x0fmcp-server-http\x03\0\x0d\
+\x01r\x03\x04names\x03urls\x07headers\x0c\x04\0\x0emcp-server-sse\x03\0\x0f\x01q\
+\x03\x05stdio\x01\x0b\0\x04http\x01\x0e\0\x03sse\x01\x10\0\x04\0\x0amcp-server\x03\
+\0\x11\x01r\x01\x0ccomponent-ids\x04\0\x10component-source\x03\0\x13\x01ks\x01r\x04\
+\x02id\x03\x04names\x0bdescription\x15\x0bprovided-by\x14\x04\0\x0csession-mode\x03\
+\0\x16\x01p\x17\x01r\x02\x0fcurrent-mode-id\x03\x0favailable-modes\x18\x04\0\x12\
+session-mode-state\x03\0\x19\x01r\x02\x0asession-id\x01\x07mode-id\x03\x04\0\x18\
+set-session-mode-request\x03\0\x1b\x01p\x12\x01r\x02\x03cwds\x0bmcp-servers\x1d\x04\
+\0\x13new-session-request\x03\0\x1e\x01k\x1a\x01r\x02\x0asession-id\x01\x05modes\
+\x20\x04\0\x14new-session-response\x03\0!\x01r\x03\x0asession-id\x01\x03cwds\x0b\
+mcp-servers\x1d\x04\0\x14load-session-request\x03\0#\x01r\x01\x05modes\x20\x04\0\
+\x15load-session-response\x03\0%\x01r\x04\x0asession-id\x01\x03cwds\x05title\x15\
+\x0aupdated-at\x15\x04\0\x0csession-info\x03\0'\x01r\x02\x03cwd\x15\x06cursor\x15\
+\x04\0\x15list-sessions-request\x03\0)\x01p(\x01r\x02\x08sessions+\x0bnext-curso\
+r\x15\x04\0\x16list-sessions-response\x03\0,\x01r\x03\x0asession-id\x01\x03cwds\x0b\
+mcp-servers\x1d\x04\0\x16resume-session-request\x03\0.\x01r\x01\x05modes\x20\x04\
+\0\x17resume-session-response\x03\00\x01r\x02\x05title\x15\x0aupdated-at\x15\x04\
+\0\x13session-info-update\x03\02\x03\0\x11yosh:acp/sessions\x05\x02\x01B\x14\x01\
+r\x01\x04texts\x04\0\x0ctext-content\x03\0\0\x01ks\x01r\x03\x04datas\x09mime-typ\
+es\x03uri\x02\x04\0\x0dimage-content\x03\0\x03\x01r\x02\x04datas\x09mime-types\x04\
+\0\x0daudio-content\x03\0\x05\x01kw\x01r\x06\x03uris\x04names\x09mime-type\x02\x05\
+title\x02\x0bdescription\x02\x04size\x07\x04\0\x0dresource-link\x03\0\x08\x01r\x03\
+\x03uris\x09mime-type\x02\x04texts\x04\0\x16text-resource-contents\x03\0\x0a\x01\
+r\x03\x03uris\x09mime-type\x02\x04blobs\x04\0\x16blob-resource-contents\x03\0\x0c\
+\x01q\x02\x04text\x01\x0b\0\x04blob\x01\x0d\0\x04\0\x11resource-contents\x03\0\x0e\
+\x01r\x01\x08resource\x0f\x04\0\x11embedded-resource\x03\0\x10\x01q\x05\x04text\x01\
+\x01\0\x05image\x01\x04\0\x05audio\x01\x06\0\x0dresource-link\x01\x09\0\x08resou\
+rce\x01\x11\0\x04\0\x0dcontent-block\x03\0\x12\x03\0\x10yosh:acp/content\x05\x03\
+\x02\x03\0\x02\x0asession-id\x02\x03\0\x02\x07env-var\x01B\x14\x02\x03\x02\x01\x04\
+\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x05\x04\0\x07env-var\x03\0\x02\x01s\
+\x04\0\x0bterminal-id\x03\0\x04\x01ps\x01p\x03\x01ks\x01kw\x01r\x06\x0asession-i\
+d\x01\x07commands\x04args\x06\x03env\x07\x03cwd\x08\x11output-byte-limit\x09\x04\
+\0\x17create-terminal-request\x03\0\x0a\x01r\x01\x0bterminal-id\x05\x04\0\x18cre\
+ate-terminal-response\x03\0\x0c\x01kz\x01r\x02\x09exit-code\x0e\x06signal\x08\x04\
+\0\x14terminal-exit-status\x03\0\x0f\x01k\x10\x01r\x03\x06outputs\x09truncated\x7f\
+\x0bexit-status\x11\x04\0\x0fterminal-output\x03\0\x12\x03\0\x12yosh:acp/termina\
+ls\x05\x06\x02\x03\0\x03\x0dcontent-block\x02\x03\0\x04\x0bterminal-id\x01B2\x02\
+\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x07\x04\0\x0dconten\
+t-block\x03\0\x02\x02\x03\x02\x01\x08\x04\0\x0bterminal-id\x03\0\x04\x01s\x04\0\x0c\
+tool-call-id\x03\0\x06\x01m\x09\x04read\x04edit\x06delete\x04move\x06search\x07e\
+xecute\x05think\x05fetch\x05other\x04\0\x09tool-kind\x03\0\x08\x01m\x04\x07pendi\
+ng\x0bin-progress\x09completed\x06failed\x04\0\x10tool-call-status\x03\0\x0a\x01\
+ks\x01r\x03\x04paths\x08old-text\x0c\x08new-texts\x04\0\x04diff\x03\0\x0d\x01q\x03\
+\x07content\x01\x03\0\x04diff\x01\x0e\0\x08terminal\x01\x05\0\x04\0\x11tool-call\
+-content\x03\0\x0f\x01ky\x01r\x02\x04paths\x04line\x11\x04\0\x12tool-call-locati\
+on\x03\0\x12\x01p\x10\x01p\x13\x01r\x08\x02id\x07\x05titles\x04kind\x09\x06statu\
+s\x0b\x07content\x14\x09locations\x15\x09raw-input\x0c\x0araw-output\x0c\x04\0\x09\
+tool-call\x03\0\x16\x01k\x09\x01k\x0b\x01k\x14\x01k\x15\x01r\x08\x02id\x07\x05ti\
+tle\x0c\x04kind\x18\x06status\x19\x07content\x1a\x09locations\x1b\x09raw-input\x0c\
+\x0araw-output\x0c\x04\0\x10tool-call-update\x03\0\x1c\x01m\x03\x04high\x06mediu\
+m\x03low\x04\0\x13plan-entry-priority\x03\0\x1e\x01m\x03\x07pending\x0bin-progre\
+ss\x09completed\x04\0\x11plan-entry-status\x03\0\x20\x01r\x03\x07contents\x08pri\
+ority\x1f\x06status!\x04\0\x0aplan-entry\x03\0\"\x01p#\x01r\x01\x07entries$\x04\0\
+\x04plan\x03\0%\x01m\x04\x0aallow-once\x0callow-always\x0breject-once\x0dreject-\
+always\x04\0\x16permission-option-kind\x03\0'\x01r\x03\x02ids\x04names\x04kind(\x04\
+\0\x11permission-option\x03\0)\x01p*\x01r\x03\x0asession-id\x01\x09tool-call\x1d\
+\x07options+\x04\0\x1arequest-permission-request\x03\0,\x01q\x02\x09cancelled\0\0\
+\x08selected\x01s\0\x04\0\x12permission-outcome\x03\0.\x01r\x01\x07outcome/\x04\0\
+\x1brequest-permission-response\x03\00\x03\0\x0eyosh:acp/tools\x05\x09\x02\x03\0\
+\x02\x0fsession-mode-id\x02\x03\0\x02\x13session-info-update\x02\x03\0\x05\x09to\
+ol-call\x02\x03\0\x05\x10tool-call-update\x02\x03\0\x05\x04plan\x01B\x1d\x02\x03\
+\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x0a\x04\0\x0fsession-mo\
+de-id\x03\0\x02\x02\x03\x02\x01\x0b\x04\0\x13session-info-update\x03\0\x04\x02\x03\
+\x02\x01\x07\x04\0\x0dcontent-block\x03\0\x06\x02\x03\x02\x01\x0c\x04\0\x09tool-\
+call\x03\0\x08\x02\x03\x02\x01\x0d\x04\0\x10tool-call-update\x03\0\x0a\x02\x03\x02\
+\x01\x0e\x04\0\x04plan\x03\0\x0c\x01p\x07\x01r\x02\x0asession-id\x01\x06prompt\x0e\
+\x04\0\x0eprompt-request\x03\0\x0f\x01m\x05\x08end-turn\x0amax-tokens\x11max-tur\
+n-requests\x07refusal\x09cancelled\x04\0\x0bstop-reason\x03\0\x11\x01r\x01\x0bst\
+op-reason\x12\x04\0\x0fprompt-response\x03\0\x13\x01r\x01\x04hints\x04\0\x17avai\
+lable-command-input\x03\0\x15\x01k\x16\x01r\x03\x04names\x0bdescriptions\x05inpu\
+t\x17\x04\0\x11available-command\x03\0\x18\x01p\x19\x01q\x09\x12user-message-chu\
+nk\x01\x07\0\x13agent-message-chunk\x01\x07\0\x13agent-thought-chunk\x01\x07\0\x09\
+tool-call\x01\x09\0\x10tool-call-update\x01\x0b\0\x04plan\x01\x0d\0\x13current-m\
+ode-update\x01\x03\0\x13session-info-update\x01\x05\0\x19available-commands-upda\
+te\x01\x1a\0\x04\0\x0esession-update\x03\0\x1b\x03\0\x10yosh:acp/prompts\x05\x0f\
+\x02\x03\0\0\x05error\x02\x03\0\x01\x12initialize-request\x02\x03\0\x01\x13initi\
+alize-response\x02\x03\0\x01\x14authenticate-request\x02\x03\0\x02\x13new-sessio\
+n-request\x02\x03\0\x02\x14new-session-response\x02\x03\0\x02\x14load-session-re\
+quest\x02\x03\0\x02\x15load-session-response\x02\x03\0\x02\x15list-sessions-requ\
+est\x02\x03\0\x02\x16list-sessions-response\x02\x03\0\x02\x16resume-session-requ\
+est\x02\x03\0\x02\x17resume-session-response\x02\x03\0\x02\x18set-session-mode-r\
+equest\x02\x03\0\x06\x0eprompt-request\x02\x03\0\x06\x0fprompt-response\x01B;\x02\
+\x03\x02\x01\x10\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x11\x04\0\x12initialize-\
+request\x03\0\x02\x02\x03\x02\x01\x12\x04\0\x13initialize-response\x03\0\x04\x02\
+\x03\x02\x01\x13\x04\0\x14authenticate-request\x03\0\x06\x02\x03\x02\x01\x04\x04\
+\0\x0asession-id\x03\0\x08\x02\x03\x02\x01\x14\x04\0\x13new-session-request\x03\0\
+\x0a\x02\x03\x02\x01\x15\x04\0\x14new-session-response\x03\0\x0c\x02\x03\x02\x01\
+\x16\x04\0\x14load-session-request\x03\0\x0e\x02\x03\x02\x01\x17\x04\0\x15load-s\
+ession-response\x03\0\x10\x02\x03\x02\x01\x18\x04\0\x15list-sessions-request\x03\
+\0\x12\x02\x03\x02\x01\x19\x04\0\x16list-sessions-response\x03\0\x14\x02\x03\x02\
+\x01\x1a\x04\0\x16resume-session-request\x03\0\x16\x02\x03\x02\x01\x1b\x04\0\x17\
+resume-session-response\x03\0\x18\x02\x03\x02\x01\x1c\x04\0\x18set-session-mode-\
+request\x03\0\x1a\x02\x03\x02\x01\x1d\x04\0\x0eprompt-request\x03\0\x1c\x02\x03\x02\
+\x01\x1e\x04\0\x0fprompt-response\x03\0\x1e\x01j\x01\x05\x01\x01\x01C\x01\x03req\
+\x03\0\x20\x04\0\x0ainitialize\x01!\x01j\0\x01\x01\x01C\x01\x03req\x07\0\"\x04\0\
+\x0cauthenticate\x01#\x01j\x01\x0d\x01\x01\x01C\x01\x03req\x0b\0$\x04\0\x0bnew-s\
+ession\x01%\x01j\x01\x11\x01\x01\x01C\x01\x03req\x0f\0&\x04\0\x0cload-session\x01\
+'\x01j\x01\x15\x01\x01\x01C\x01\x03req\x13\0(\x04\0\x0dlist-sessions\x01)\x01j\x01\
+\x19\x01\x01\x01C\x01\x03req\x17\0*\x04\0\x0eresume-session\x01+\x01C\x01\x0ases\
+sion-id\x09\0\"\x04\0\x0dclose-session\x01,\x01C\x01\x03req\x1b\0\"\x04\0\x10set\
+-session-mode\x01-\x01j\x01\x1f\x01\x01\x01C\x01\x03req\x1d\0.\x04\0\x06prompt\x01\
+/\x01C\x01\x0asession-id\x09\x01\0\x04\0\x06cancel\x010\x03\0\x0eyosh:acp/agent\x05\
+\x1f\x01B\x09\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x01ky\x01r\x04\x0a\
+session-id\x01\x04paths\x04line\x02\x05limit\x02\x04\0\x16read-text-file-request\
+\x03\0\x03\x01r\x01\x07contents\x04\0\x17read-text-file-response\x03\0\x05\x01r\x03\
+\x0asession-id\x01\x04paths\x07contents\x04\0\x17write-text-file-request\x03\0\x07\
+\x03\0\x13yosh:acp/filesystem\x05\x20\x02\x03\0\x06\x0esession-update\x02\x03\0\x05\
+\x1arequest-permission-request\x02\x03\0\x05\x1brequest-permission-response\x02\x03\
+\0\x08\x16read-text-file-request\x02\x03\0\x08\x17read-text-file-response\x02\x03\
+\0\x08\x17write-text-file-request\x02\x03\0\x04\x17create-terminal-request\x02\x03\
+\0\x04\x18create-terminal-response\x02\x03\0\x04\x0fterminal-output\x02\x03\0\x04\
+\x14terminal-exit-status\x01B1\x02\x03\x02\x01\x10\x04\0\x05error\x03\0\0\x02\x03\
+\x02\x01\x04\x04\0\x0asession-id\x03\0\x02\x02\x03\x02\x01!\x04\0\x0esession-upd\
+ate\x03\0\x04\x02\x03\x02\x01\"\x04\0\x1arequest-permission-request\x03\0\x06\x02\
+\x03\x02\x01#\x04\0\x1brequest-permission-response\x03\0\x08\x02\x03\x02\x01$\x04\
+\0\x16read-text-file-request\x03\0\x0a\x02\x03\x02\x01%\x04\0\x17read-text-file-\
+response\x03\0\x0c\x02\x03\x02\x01&\x04\0\x17write-text-file-request\x03\0\x0e\x02\
+\x03\x02\x01\x08\x04\0\x0bterminal-id\x03\0\x10\x02\x03\x02\x01'\x04\0\x17create\
+-terminal-request\x03\0\x12\x02\x03\x02\x01(\x04\0\x18create-terminal-response\x03\
+\0\x14\x02\x03\x02\x01)\x04\0\x0fterminal-output\x03\0\x16\x02\x03\x02\x01*\x04\0\
+\x14terminal-exit-status\x03\0\x18\x01C\x02\x0asession-id\x03\x06update\x05\x01\0\
+\x04\0\x0eupdate-session\x01\x1a\x01j\x01\x09\x01\x01\x01C\x01\x03req\x07\0\x1b\x04\
+\0\x12request-permission\x01\x1c\x01j\x01\x0d\x01\x01\x01C\x01\x03req\x0b\0\x1d\x04\
+\0\x0eread-text-file\x01\x1e\x01j\0\x01\x01\x01C\x01\x03req\x0f\0\x1f\x04\0\x0fw\
+rite-text-file\x01\x20\x01j\x01\x15\x01\x01\x01C\x01\x03req\x13\0!\x04\0\x0fcrea\
+te-terminal\x01\"\x01j\x01\x17\x01\x01\x01C\x02\x0asession-id\x03\x0bterminal-id\
+\x11\0#\x04\0\x13get-terminal-output\x01$\x01j\x01\x19\x01\x01\x01C\x02\x0asessi\
+on-id\x03\x0bterminal-id\x11\0%\x04\0\x16wait-for-terminal-exit\x01&\x01C\x02\x0a\
+session-id\x03\x0bterminal-id\x11\0\x1f\x04\0\x0dkill-terminal\x01'\x04\0\x10rel\
+ease-terminal\x01'\x03\0\x0fyosh:acp/client\x05+\x01B\x0a\x01q\x03\x08upstream\x01\
+s\0\x02io\x01s\0\x09not-found\0\0\x04\0\x0dsecrets-error\x03\0\0\x01p}\x01q\x02\x06\
+string\x01s\0\x05bytes\x01\x02\0\x04\0\x0csecret-value\x03\0\x03\x04\0\x06secret\
+\x03\x01\x01i\x05\x01j\x01\x06\x01\x01\x01@\x01\x03keys\0\x07\x04\0\x03get\x01\x08\
+\x03\0#wasmcloud:secrets/store@0.1.0-draft\x05,\x02\x03\0\x0a\x06secret\x02\x03\0\
+\x0a\x0csecret-value\x01B\x07\x02\x03\x02\x01-\x04\0\x06secret\x03\0\0\x02\x03\x02\
+\x01.\x04\0\x0csecret-value\x03\0\x02\x01h\x01\x01@\x01\x01s\x04\0\x03\x04\0\x06\
+reveal\x01\x05\x03\0$wasmcloud:secrets/reveal@0.1.0-draft\x05/\x04\0.yosh:acp/la\
+yer-with-all-of-its-exports-removed\x04\0\x0b+\x01\0%layer-with-all-of-its-expor\
+ts-removed\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070\
+.245.1\x10wit-bindgen-rust\x060.54.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

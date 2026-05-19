@@ -259,30 +259,22 @@ fn session_mode_state_to_json(state: SessionModeState, component_id: &str) -> se
     })
 }
 
-/// Split a component id into a `(namespace, name)` pair using `:` as the
-/// separator. If the id has no `:`, it's treated as a bare name in the
-/// implicit `local` namespace, mirroring how `wasm.toml` would refer to an
-/// unregistered local component.
-fn split_component_id(component_id: &str) -> (&str, &str) {
-    match component_id.split_once(':') {
-        Some((ns, name)) if !ns.is_empty() && !name.is_empty() => (ns, name),
-        _ => ("local", component_id),
-    }
-}
-
-fn session_mode_to_json(mode: SessionMode, component_id: &str) -> serde_json::Value {
+fn session_mode_to_json(mode: SessionMode, _component_id: &str) -> serde_json::Value {
     let SessionMode {
         id,
         name,
         description,
+        provided_by,
     } = mode;
-    // Prefix the display name with the component's `namespace:name` so the
-    // editor's mode picker shows which provider each model belongs to —
-    // useful when several components are loaded side-by-side. The mode
-    // `id` is left untouched so `set-session-mode` round-trips cleanly.
-    let (ns, comp_name) = split_component_id(component_id);
-    let display = format!("{ns}:{comp_name} - {name}");
-    let mut entry = serde_json::json!({ "id": id, "name": display });
+    // The component that contributed this mode is now carried
+    // explicitly via `provided-by` on the WIT record; no host-side
+    // name mangling needed. Pass `name` through verbatim and emit
+    // `providedBy` as structured metadata for the editor.
+    let mut entry = serde_json::json!({
+        "id": id,
+        "name": name,
+        "providedBy": { "componentId": provided_by.component_id },
+    });
     if let Some(d) = description {
         entry["description"] = serde_json::Value::String(d);
     }

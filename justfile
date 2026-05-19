@@ -39,16 +39,13 @@ doc-provider:
 
 # Generate ollama-provider bindings (provider world).
 bindgen-provider:
-    rm -rf crates/acp-wasm-sys/wit
-    cp -r vendor/wit crates/acp-wasm-sys/wit
-    wit-bindgen rust crates/acp-wasm-sys/wit \
+    wit-bindgen rust wit/acp \
         --world provider \
         --runtime-path wit_bindgen::rt \
         --pub-export-macro \
         --generate-all \
         --out-dir crates/acp-wasm-sys/src \
         --format
-    rm -rf crates/acp-wasm-sys/wit
 
 # Generate uppercase-layer bindings (layer world).
 #
@@ -58,14 +55,11 @@ bindgen-provider:
 # the same crate root). The `client` cabi macro is unique to the
 # layer and needs no rename.
 bindgen-layer:
-    rm -rf crates/acp-wasm-sys/wit
-    cp -r vendor/wit crates/acp-wasm-sys/wit
-    wit-bindgen rust crates/acp-wasm-sys/wit \
+    wit-bindgen rust wit/acp \
         --world layer \
         --runtime-path wit_bindgen::rt \
         --pub-export-macro \
         --generate-all \
         --out-dir crates/acp-wasm-sys/src \
         --format
-    rm -rf crates/acp-wasm-sys/wit
-    sed -i '' 's|__export_yosh_acp_agent_5_1_0_cabi|__export_yosh_acp_agent_5_1_0_cabi_layer|g' crates/acp-wasm-sys/src/layer.rs
+    sed -i '' 's|__export_yosh_acp_agent_cabi|__export_yosh_acp_agent_cabi_layer|g' crates/acp-wasm-sys/src/layer.rs

@@ -1,5 +1,5 @@
 [dependencies.components]
 
 [dependencies.interfaces]
-"yosh:acp" = "5.1.0"
+# yosh:acp lives in-tree under `wit/` (no registry dep).
 "wasmcloud:secrets" = "0.1.0-draft"

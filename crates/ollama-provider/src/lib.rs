@@ -22,7 +22,7 @@ use acp_wasm_sys::provider::yosh::acp::prompts::{
 use acp_wasm_sys::provider::yosh::acp::sessions::{
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
     NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse, SessionId,
-    SessionMode, SessionModeState, SetSessionModeRequest,
+    ComponentSource, SessionMode, SessionModeState, SetSessionModeRequest,
 };
 use acp_wasm_sys::provider::yosh::acp::tools::ToolKind;
 
@@ -85,6 +85,9 @@ fn build_modes_state_from_listed(
             id: name.clone(),
             name,
             description: None,
+            provided_by: ComponentSource {
+                component_id: "local:ollama-provider".to_string(),
+            },
         })
         .collect();
 
