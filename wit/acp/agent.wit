@@ -44,7 +44,7 @@ interface agent {
         /// each one is its own resource with its own body stream.
         ///
         /// See: <https://agentclientprotocol.com/protocol/prompt-turn>
-        prompt: func(prompt: list<content-block>) -> prompt-turn;
+        prompt: async func(prompt: list<content-block>) -> prompt-turn;
 
         /// Switch the active mode for this session. The `mode-id` MUST
         /// be one of the modes returned in the session's lifecycle

@@ -28,7 +28,7 @@ use crate::yosh::acp::sessions::{
     SessionModelState,
 };
 use crate::yosh::acp::tools::{
-    ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
+    ToolCallContent, ToolCallSnapshot, ToolCallStatus, ToolKind,
 };
 
 // -----------------------------------------------------------------------------
@@ -541,8 +541,11 @@ pub fn session_update_wit_to_schema(
                 upd,
             ));
         }
-        SessionUpdate::ToolCallUpdate(update) => {
-            let upd = tool_call_update_to_schema_update(&session_id, update)?;
+        SessionUpdate::ToolCallUpdate(snapshot) => {
+            // Phase 1 streams: both `ToolCall` and `ToolCallUpdate`
+            // variants now carry a full [`ToolCallSnapshot`], so we
+            // can reuse the same translation. Phase 4 may diverge.
+            let upd = tool_call_to_schema_update(&session_id, snapshot)?;
             return Some(schema::SessionNotification::new(
                 schema::SessionId::from(session_id),
                 upd,
@@ -835,7 +838,10 @@ fn tool_call_content_to_json(
     }
 }
 
-fn tool_call_to_schema_update(session_id: &str, call: ToolCall) -> Option<schema::SessionUpdate> {
+fn tool_call_to_schema_update(
+    session_id: &str,
+    call: ToolCallSnapshot,
+) -> Option<schema::SessionUpdate> {
     let content: Vec<serde_json::Value> = call
         .content
         .into_iter()
@@ -867,40 +873,13 @@ fn tool_call_to_schema_update(session_id: &str, call: ToolCall) -> Option<schema
     serde_json::from_value(json).ok()
 }
 
-fn tool_call_update_to_schema_update(
-    session_id: &str,
-    update: ToolCallUpdate,
+fn _dead_tool_call_update_to_schema_update(
+    _session_id: &str,
+    _update: (),
 ) -> Option<schema::SessionUpdate> {
-    let mut json = serde_json::json!({
-        "sessionUpdate": "tool_call_update",
-        "toolCallId": update.id,
-    });
-    if let Some(t) = update.title {
-        json["title"] = serde_json::Value::String(t);
-    }
-    if let Some(k) = update.kind {
-        json["kind"] = serde_json::Value::String(tool_kind_str(k).to_string());
-    }
-    if let Some(s) = update.status {
-        json["status"] = serde_json::Value::String(tool_status_str(s).to_string());
-    }
-    if let Some(content) = update.content {
-        let arr: Vec<serde_json::Value> = content
-            .into_iter()
-            .filter_map(|c| tool_call_content_to_json(session_id, c))
-            .collect();
-        json["content"] = serde_json::Value::Array(arr);
-    }
-    if let Some(raw) = update.raw_input {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
-            json["rawInput"] = v;
-        }
-    }
-    if let Some(raw) = update.raw_output {
-        json["rawOutput"] = serde_json::from_str::<serde_json::Value>(&raw)
-            .unwrap_or(serde_json::Value::String(raw));
-    }
-    serde_json::from_value(json).ok()
+    // Removed in streams phase 1: tool-call updates now ship a full
+    // [`ToolCallSnapshot`] which is handled by [`tool_call_to_schema_update`].
+    None
 }
 
 #[cfg(test)]
@@ -1003,19 +982,13 @@ mod tests {
 
     #[test]
     fn prompt_request_text_only() {
-        let req = schema::PromptRequest::new(
-            schema::SessionId::from("sess-1"),
-            vec![schema::ContentBlock::Text(schema::TextContent::new(
-                "hello",
-            ))],
-        );
-        let wit_req = prompt_request_schema_to_wit(req);
-        assert_eq!(wit_req.session_id, "sess-1");
-        assert_eq!(wit_req.prompt.len(), 1);
-        match &wit_req.prompt[0] {
-            ContentBlock::Text(t) => assert_eq!(t.text, "hello"),
-            other => panic!("expected text, got {other:?}"),
-        }
+        // Phase 1 streams: `prompt_request_schema_to_wit` was deleted
+        // along with the top-level `PromptRequest` record. Prompts now
+        // arrive as `list<content-block>` directly on `session.prompt`.
+        // Keep the test name + comment so the missing coverage is
+        // visible; phase 3 will reintroduce an equivalent translator
+        // (schema content-block -> wit content-block) and replace this
+        // body.
     }
 
     #[test]

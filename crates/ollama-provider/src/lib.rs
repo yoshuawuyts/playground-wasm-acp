@@ -8,8 +8,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use acp_wasm_sys::provider::exports::yosh::acp::agent::{Guest, GuestSession, Session};
-use acp_wasm_sys::provider::yosh::acp::client;
+use acp_wasm_sys::provider::exports::yosh::acp::agent::{
+    Guest, GuestPromptTurn, GuestSession, PromptTurn, Session,
+};
 use acp_wasm_sys::provider::yosh::acp::content::{ContentBlock, TextContent};
 use acp_wasm_sys::provider::yosh::acp::errors::{Error, ErrorCode};
 use acp_wasm_sys::provider::yosh::acp::init::{
@@ -20,8 +21,7 @@ use acp_wasm_sys::provider::yosh::acp::prompts::{PromptResponse, SessionUpdate, 
 use acp_wasm_sys::provider::yosh::acp::sessions::{
     ComponentSource, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, NewSessionRequest, NewSessionResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SessionModel, SessionModelId, SessionModelState,
-    SessionModeId,
+    ResumeSessionResponse, SessionModeId, SessionModel, SessionModelId, SessionModelState,
 };
 use acp_wasm_sys::provider::yosh::acp::tools::ToolKind;
 
@@ -50,16 +50,16 @@ impl Drop for ProviderSession {
 }
 
 impl GuestSession for ProviderSession {
-    async fn cancel(&self) {
-        // TODO: real cancellation. The host serializes all wasm calls
-        // behind a single mutex, so `cancel` cannot run while `prompt`
-        // is in flight. Implementing proper cancellation requires
-        // moving the streaming loop off the lock and using a shared
-        // cancellation flag.
-    }
-
-    async fn prompt(&self, prompt: Vec<ContentBlock>) -> Result<PromptResponse, Error> {
-        prompt_impl(self.id.clone(), prompt).await
+    async fn prompt(&self, prompt: Vec<ContentBlock>) -> PromptTurn {
+        // Phase 1 stub: prompt-turn is a thin holder for the session id
+        // and the user-supplied blocks. Real streaming is wired in
+        // phase 3; for now `updates()` returns a never-yielding stream
+        // and `response()` runs the existing `prompt_impl` to completion
+        // with no streamed updates.
+        PromptTurn::new(ProviderPromptTurn {
+            session_id: self.id.clone(),
+            inputs: std::cell::RefCell::new(Some(prompt)),
+        })
     }
 
     async fn set_mode(&self, _mode_id: SessionModeId) -> Result<(), Error> {
@@ -89,7 +89,54 @@ impl GuestSession for ProviderSession {
     }
 }
 
+/// Stub prompt-turn (phase 1). Wired into the streams + tool-call
+/// machinery in phase 3 / phase 4 of the streams migration plan.
+pub struct ProviderPromptTurn {
+    session_id: String,
+    inputs: std::cell::RefCell<Option<Vec<ContentBlock>>>,
+}
+
+impl GuestPromptTurn for ProviderPromptTurn {
+    fn updates(
+        &self,
+    ) -> wit_bindgen::rt::async_support::StreamReader<SessionUpdate> {
+        // Phase 1 stub: hand out a fresh empty stream that we never
+        // write to. The reader will simply end-of-stream when the
+        // writer drops at end of scope. Phase 3 replaces this with a
+        // real producer driven by the prompt loop.
+        let (_writer, reader) =
+            acp_wasm_sys::provider::wit_stream::new::<SessionUpdate>();
+        reader
+    }
+
+    async fn response(&self) -> Result<PromptResponse, Error> {
+        // Phase 1 stub: consume the saved inputs and run the existing
+        // prompt impl. Any `SessionUpdate`s the impl tried to emit go
+        // nowhere; this is intentional for the phase-1 "makes it
+        // compile" milestone.
+        let inputs = match self.inputs.borrow_mut().take() {
+            Some(v) => v,
+            None => {
+                return Err(err(
+                    ErrorCode::InternalError,
+                    "prompt-turn.response called twice",
+                ));
+            }
+        };
+        prompt_impl(self.session_id.clone(), inputs).await
+    }
+}
+
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Phase-1 stub: where `emit_update` calls used to go.
+/// Phase 3 wires this to push into the active prompt-turn's stream
+/// writer. For now it's a no-op so tests that read `session/update`
+/// notifications will see nothing — that's expected at this milestone.
+#[allow(dead_code)]
+async fn emit_update(_session_id: String, _update: SessionUpdate) {
+    // intentionally empty
+}
 
 // Wasm components are single-threaded; using thread-local + RefCell avoids
 // any synchronization cost while keeping interior mutability.
@@ -221,6 +268,7 @@ fn extract_user_text(prompt: &[ContentBlock]) -> String {
 
 impl Guest for Agent {
     type Session = ProviderSession;
+    type PromptTurn = ProviderPromptTurn;
 
     async fn initialize(_req: InitializeRequest) -> Result<InitializeResponse, Error> {
         Ok(InitializeResponse {
@@ -309,7 +357,7 @@ impl Guest for Agent {
                 "assistant" => SessionUpdate::AgentMessageChunk(block),
                 _ => continue,
             };
-            client::update_session(session_id.clone(), update).await;
+            emit_update(session_id.clone(), update).await;
         }
         SESSIONS.with(|s| {
             s.borrow_mut().insert(
@@ -438,7 +486,7 @@ async fn prompt_impl(
     let model_clone = model.clone();
     let tools_supported = ollama::supports_tools(&model_clone).await.unwrap_or(false);
     if !tools_supported {
-        client::update_session(
+        emit_update(
             session_id.clone(),
             SessionUpdate::AgentThoughtChunk(ContentBlock::Text(TextContent {
                 text: format!(
@@ -477,7 +525,7 @@ async fn prompt_impl(
             |chunk| {
                 let sid = session_id_chunk.clone();
                 async move {
-                    client::update_session(
+                    emit_update(
                         sid,
                         SessionUpdate::AgentMessageChunk(ContentBlock::Text(TextContent {
                             text: chunk,
@@ -506,71 +554,22 @@ async fn prompt_impl(
         // tool, send a `tool_call_update` (status: completed/failed
         // with content), and feed the result back as a `role: "tool"`
         // message for the next iteration.
-        use acp_wasm_sys::provider::yosh::acp::content::ContentBlock as Cb;
-        use acp_wasm_sys::provider::yosh::acp::content::TextContent as Tc;
-        use acp_wasm_sys::provider::yosh::acp::tools::{
-            ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
-        };
+        //
+        // TODO(streams phase 4): replace these inline `SessionUpdate::ToolCall`
+        // / `SessionUpdate::ToolCallUpdate` emissions with the new
+        // [`tools.tool-call`] resource (constructor + `update(patch)`).
+        // For phase 1 the tool-call lifecycle simply isn't surfaced to
+        // the editor — the model still calls tools and consumes their
+        // results, the user just won't see progress cards yet.
         for call in &turn.tool_calls {
             tool_call_seq += 1;
-            let tc_id = format!("tc-{tool_call_seq}");
-            let tool = tools::lookup(&call.function.name);
-            let title = tools::render_title(&call.function.name, &call.function.arguments);
-            let raw_input = serde_json::to_string(&call.function.arguments).ok();
-
-            client::update_session(
-                session_id.clone(),
-                SessionUpdate::ToolCall(ToolCall {
-                    id: tc_id.clone(),
-                    title: title.clone(),
-                    kind: tool.map(|t| t.kind).unwrap_or(ToolKind::Other),
-                    status: ToolCallStatus::InProgress,
-                    content: Vec::new(),
-                    locations: Vec::new(),
-                    raw_input: raw_input.clone(),
-                    raw_output: None,
-                }),
-            )
-            .await;
+            let _tc_id = format!("tc-{tool_call_seq}");
+            let _tool = tools::lookup(&call.function.name);
+            let _title = tools::render_title(&call.function.name, &call.function.arguments);
+            let _raw_input = serde_json::to_string(&call.function.arguments).ok();
 
             let outcome =
                 tools::dispatch(&call.function.name, &session_id, &call.function.arguments).await;
-
-            let locations = if outcome.locations.is_empty() {
-                None
-            } else {
-                use acp_wasm_sys::provider::yosh::acp::tools::ToolCallLocation;
-                Some(
-                    outcome
-                        .locations
-                        .iter()
-                        .map(|p| ToolCallLocation {
-                            path: p.clone(),
-                            line: None,
-                        })
-                        .collect(),
-                )
-            };
-            client::update_session(
-                session_id.clone(),
-                SessionUpdate::ToolCallUpdate(ToolCallUpdate {
-                    id: tc_id.clone(),
-                    title: None,
-                    kind: None,
-                    status: Some(if outcome.failed {
-                        ToolCallStatus::Failed
-                    } else {
-                        ToolCallStatus::Completed
-                    }),
-                    content: Some(vec![ToolCallContent::Content(Cb::Text(Tc {
-                        text: outcome.content.clone(),
-                    }))]),
-                    locations,
-                    raw_input: None,
-                    raw_output: Some(outcome.content.clone()),
-                }),
-            )
-            .await;
 
             // Feed the result back to the model as a `role: "tool"`
             // message. For failures, prefix with a clear marker so
@@ -598,7 +597,7 @@ async fn prompt_impl(
             // Persistence is best-effort: a failed save shouldn't fail
             // the prompt turn (the user already saw the reply). Log
             // via a thought chunk so it's visible.
-            client::update_session(
+            emit_update(
                 session_id.clone(),
                 SessionUpdate::AgentThoughtChunk(ContentBlock::Text(TextContent {
                     text: format!("(failed to persist session: {e})"),

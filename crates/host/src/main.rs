@@ -277,12 +277,12 @@ fn load_stage(engine: &Engine, path: &std::path::Path, kind: StageKind) -> Resul
 /// `yosh:acp/*` exports carry a version outside this range are rejected
 /// up front. The version itself comes from the in-tree WIT
 /// (`package yosh:acp@<v>;`); bump both together.
-pub(crate) const EXPECTED_ACP_REQ: &str = "^6.0.0";
+pub(crate) const EXPECTED_ACP_REQ: &str = "^7.0.0";
 
 /// Concrete version the host's bindgen was generated against. Used for
 /// user-facing error messages so a mismatched component sees the exact
 /// version the host ships, not just the range.
-pub(crate) const HOST_ACP_VERSION: &str = "6.0.0";
+pub(crate) const HOST_ACP_VERSION: &str = "7.0.0";
 
 /// Inspect a component's exports and decide which `yosh:acp` world it
 /// implements:

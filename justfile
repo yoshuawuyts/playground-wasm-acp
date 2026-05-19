@@ -62,4 +62,4 @@ bindgen-layer:
         --generate-all \
         --out-dir crates/acp-wasm-sys/src \
         --format
-    sed -i '' 's|__export_yosh_acp_agent_6_0_0_cabi|__export_yosh_acp_agent_6_0_0_cabi_layer|g' crates/acp-wasm-sys/src/layer.rs
+    sed -i '' 's|__export_yosh_acp_agent_7_0_0_cabi|__export_yosh_acp_agent_7_0_0_cabi_layer|g' crates/acp-wasm-sys/src/layer.rs

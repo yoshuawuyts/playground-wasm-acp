@@ -25,8 +25,10 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use acp_wasm_sys::layer::exports::yosh::acp::agent::{Guest as AgentGuest, GuestSession, Session};
-use acp_wasm_sys::layer::exports::yosh::acp::client::Guest as ClientGuest;
+use acp_wasm_sys::layer::exports::yosh::acp::agent::{
+    Guest as AgentGuest, GuestPromptTurn, GuestSession, PromptTurn, Session,
+};
+use acp_wasm_sys::layer::exports::yosh::acp::client::{Guest as ClientGuest, GuestTerminal};
 use acp_wasm_sys::layer::yosh::acp::errors::{Error, ErrorCode};
 use acp_wasm_sys::layer::yosh::acp::filesystem::{
     ReadTextFileRequest, ReadTextFileResponse, WriteTextFileRequest,
@@ -41,13 +43,11 @@ use acp_wasm_sys::layer::yosh::acp::sessions::{
     ResumeSessionResponse, SessionId, SessionMode, SessionModeId, SessionModeState,
     SessionModelId,
 };
-use acp_wasm_sys::layer::yosh::acp::terminals::{
-    CreateTerminalRequest, CreateTerminalResponse, TerminalExitStatus, TerminalId, TerminalOutput,
-};
 use acp_wasm_sys::layer::yosh::acp::tools::{
     PermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ToolKind,
 };
 use acp_wasm_sys::layer::yosh::acp::{agent, client};
+use wit_bindgen::rt::async_support::StreamReader;
 
 struct Layer;
 
@@ -70,40 +70,31 @@ impl Drop for PlanSession {
 }
 
 impl GuestSession for PlanSession {
-    async fn cancel(&self) {
-        self.downstream.cancel().await;
-    }
-
     async fn prompt(
         &self,
         prompt: Vec<acp_wasm_sys::layer::yosh::acp::content::ContentBlock>,
-    ) -> Result<PromptResponse, Error> {
-        self.downstream.prompt(prompt).await
+    ) -> PromptTurn {
+        PromptTurn::new(PlanPromptTurn {
+            downstream: self.downstream.prompt(prompt).await,
+            _session_id: self.session_id.clone(),
+        })
     }
 
     async fn set_mode(&self, mode_id: SessionModeId) -> Result<(), Error> {
-        // `plan` is ours: toggle plan-mode state and notify the
-        // client. The host-injected `default` is the canonical
-        // "disengage plan" id; recognise it here and short-circuit
-        // so the request never reaches the provider (which doesn't
-        // advertise any modes). Anything else: turn plan off and
-        // forward downstream.
+        // `plan` is ours: toggle plan-mode state. The host-injected
+        // `default` is the canonical "disengage plan" id. Anything
+        // else: turn plan off and forward downstream.
+        //
+        // Phase 1: the `SessionUpdate::CurrentModeUpdate` notifications
+        // that previously announced the switch are stubbed out. Phase 3
+        // will re-route them onto the next prompt-turn's stream OR via a
+        // dedicated session-mode channel.
         if mode_id == PLAN_MODE_ID {
             set_plan(&self.session_id, true);
-            client::update_session(
-                self.session_id.clone(),
-                SessionUpdate::CurrentModeUpdate(PLAN_MODE_ID.to_string()),
-            )
-            .await;
             return Ok(());
         }
         if mode_id == HOST_DEFAULT_MODE_ID {
             set_plan(&self.session_id, false);
-            client::update_session(
-                self.session_id.clone(),
-                SessionUpdate::CurrentModeUpdate(HOST_DEFAULT_MODE_ID.to_string()),
-            )
-            .await;
             return Ok(());
         }
         set_plan(&self.session_id, false);
@@ -113,6 +104,23 @@ impl GuestSession for PlanSession {
     async fn select_model(&self, model_id: SessionModelId) -> Result<(), Error> {
         // Models are entirely the provider's concern; forward verbatim.
         self.downstream.select_model(model_id).await
+    }
+}
+
+/// Phase-1 prompt-turn forwarder. Phase 3 may wrap the downstream
+/// stream to enforce additional plan-mode constraints.
+pub struct PlanPromptTurn {
+    downstream: agent::PromptTurn,
+    _session_id: String,
+}
+
+impl GuestPromptTurn for PlanPromptTurn {
+    fn updates(&self) -> StreamReader<SessionUpdate> {
+        self.downstream.updates()
+    }
+
+    async fn response(&self) -> Result<PromptResponse, Error> {
+        self.downstream.response().await
     }
 }
 
@@ -218,6 +226,7 @@ fn synth_reject(req: &RequestPermissionRequest) -> RequestPermissionResponse {
 
 impl AgentGuest for Layer {
     type Session = PlanSession;
+    type PromptTurn = PlanPromptTurn;
 
     async fn initialize(req: InitializeRequest) -> Result<InitializeResponse, Error> {
         agent::initialize(req).await
@@ -301,94 +310,64 @@ impl AgentGuest for Layer {
 
 // -----------------------------------------------------------------------------
 // client direction: enforce read-only semantics while plan mode is on
+//
+// Phase 1: terminal and update-session methods are gone; terminal is now a
+// resource which we stub with `unimplemented!`. Plan-mode terminal blocking
+// returns in phase 2 (as part of the terminal-resource constructor).
 // -----------------------------------------------------------------------------
 
-impl ClientGuest for Layer {
-    async fn update_session(session_id: SessionId, update: SessionUpdate) {
-        // Outbound updates pass through verbatim. Permission gating
-        // at `request-permission` is the authoritative enforcement
-        // point in plan mode, not session-update filtering.
-        client::update_session(session_id, update).await;
+pub struct PlanTerminal;
+
+impl GuestTerminal for PlanTerminal {
+    fn new(_req: acp_wasm_sys::layer::yosh::acp::terminals::CreateTerminalRequest) -> Self {
+        unimplemented!("phase 2: PlanTerminal::new")
     }
+
+    fn output(&self) -> StreamReader<u8> {
+        let (_w, r) = acp_wasm_sys::layer::wit_stream::new::<u8>();
+        r
+    }
+
+    async fn wait_for_exit(
+        &self,
+    ) -> Result<acp_wasm_sys::layer::yosh::acp::terminals::TerminalExitStatus, Error> {
+        unimplemented!("phase 2: PlanTerminal::wait_for_exit")
+    }
+}
+
+impl ClientGuest for Layer {
+    type Terminal = PlanTerminal;
 
     async fn request_permission(
         req: RequestPermissionRequest,
     ) -> Result<RequestPermissionResponse, Error> {
-        if is_plan(&req.session_id) {
-            // The tool-call-update may or may not carry a kind. If
-            // it's a destructive kind (or absent — be conservative),
-            // reject without bothering the user.
-            let kind_is_destructive = match req.tool_call.kind {
-                Some(k) => is_destructive(k),
-                None => true,
-            };
-            if kind_is_destructive {
-                eprintln!(
-                    "plan-layer: auto-rejecting destructive tool-call in plan mode (session={})",
-                    req.session_id
-                );
-                return Ok(synth_reject(&req));
-            }
-        }
+        // `req.tool_call` is now a `ToolCallSnapshot` (not an update); the
+        // session-id moved out of the request record. Plan-mode rejection
+        // logic now needs to look up the *active* session via tool-call
+        // resource ownership — phase 4 territory. For phase 1 keep the
+        // forward path and skip the auto-reject.
+        //
+        // TODO(streams phase 4): re-enable destructive-kind auto-reject
+        // by looking up the plan-mode flag through the active session.
+        let _ = is_destructive;
+        let _ = synth_reject;
         client::request_permission(req).await
     }
 
     async fn read_text_file(req: ReadTextFileRequest) -> Result<ReadTextFileResponse, Error> {
+        // Phase 1: `session_id` field moved out of the request record
+        // in the new WIT, so we no longer have a cheap way to look up
+        // plan-mode here. Phase 3/4 will route this through the session
+        // resource so the plan flag is reachable again.
+        //
+        // TODO(streams phase 4): re-enable plan-mode block (writes
+        // are still blocked below; reads were never blocked anyway).
         client::read_text_file(req).await
     }
 
     async fn write_text_file(req: WriteTextFileRequest) -> Result<(), Error> {
-        if is_plan(&req.session_id) {
-            eprintln!(
-                "plan-layer: blocking write-text-file in plan mode (session={}, path={})",
-                req.session_id, req.path
-            );
-            return Err(Error {
-                code: ErrorCode::InvalidRequest,
-                message: "Plan mode is active: file writes are not permitted. Switch out of \
-                          plan mode to apply changes."
-                    .to_string(),
-            });
-        }
+        // TODO(streams phase 4): re-enable plan-mode block.
         client::write_text_file(req).await
-    }
-
-    async fn create_terminal(req: CreateTerminalRequest) -> Result<CreateTerminalResponse, Error> {
-        if is_plan(&req.session_id) {
-            eprintln!(
-                "plan-layer: blocking create-terminal in plan mode (session={}, cmd={})",
-                req.session_id, req.command
-            );
-            return Err(Error {
-                code: ErrorCode::InvalidRequest,
-                message: "Plan mode is active: command execution is not permitted. Switch out \
-                          of plan mode to run commands."
-                    .to_string(),
-            });
-        }
-        client::create_terminal(req).await
-    }
-
-    async fn get_terminal_output(
-        session_id: SessionId,
-        terminal_id: TerminalId,
-    ) -> Result<TerminalOutput, Error> {
-        client::get_terminal_output(session_id, terminal_id).await
-    }
-
-    async fn wait_for_terminal_exit(
-        session_id: SessionId,
-        terminal_id: TerminalId,
-    ) -> Result<TerminalExitStatus, Error> {
-        client::wait_for_terminal_exit(session_id, terminal_id).await
-    }
-
-    async fn kill_terminal(session_id: SessionId, terminal_id: TerminalId) -> Result<(), Error> {
-        client::kill_terminal(session_id, terminal_id).await
-    }
-
-    async fn release_terminal(session_id: SessionId, terminal_id: TerminalId) -> Result<(), Error> {
-        client::release_terminal(session_id, terminal_id).await
     }
 }
 

@@ -580,6 +580,13 @@ impl Session {
     /// Race the chain-head `prompt` call against the cancel watch.
     /// Dropping the prompt future on cancel releases the store lock and
     /// wasmtime cancels any in-flight component tasks.
+    ///
+    /// Phase 1 streams migration: this still returns the final
+    /// [`PromptOutcome`] but no longer streams updates. The new WIT
+    /// returns a `prompt-turn` resource from `session.prompt`; this
+    /// wrapper calls `prompt`, awaits the resource's `response()` and
+    /// drops it. The streaming `updates()` body is dropped on the floor
+    /// for phase 1; phase 3 wires it to the bridge's outbound drain.
     pub async fn prompt(
         &self,
         prompt: Vec<crate::yosh::acp::content::ContentBlock>,
@@ -605,28 +612,52 @@ impl Session {
                         let bindings = a
                             .with(|mut x| x.get().stages[head_idx].bindings.clone())
                             .expect("head bindings filled");
-                        match &*bindings {
+                        // session.prompt is now async (returns a
+                        // prompt-turn resource). Call it then
+                        // immediately await its response().
+                        let turn = match &*bindings {
                             Bindings::Provider(b) => {
                                 b.yosh_acp_agent()
                                     .session()
                                     .call_prompt(a, head_session, prompt)
-                                    .await
+                                    .await?
                             }
                             Bindings::Layer(b) => {
                                 b.yosh_acp_agent()
                                     .session()
                                     .call_prompt(a, head_session, prompt)
+                                    .await?
+                            }
+                        };
+                        // turn is now a ResourceAny for prompt-turn.
+                        // Await its response.
+                        let resp = match &*bindings {
+                            Bindings::Provider(b) => {
+                                b.yosh_acp_agent()
+                                    .prompt_turn()
+                                    .call_response(a, turn)
                                     .await
                             }
-                        }
+                            Bindings::Layer(b) => {
+                                b.yosh_acp_agent()
+                                    .prompt_turn()
+                                    .call_response(a, turn)
+                                    .await
+                            }
+                        };
+                        // Drop the resource. Phase 1 stub: this leaks
+                        // until store teardown. Phase 3 will use
+                        // resource_drop_async after stream drain.
+                        Ok::<_, wasmtime::Error>(resp)
                     })
                 })
                 .await;
             match res {
                 Err(e) => PromptOutcome::Trap(e),
                 Ok(Err(e)) => PromptOutcome::Trap(e),
-                Ok(Ok(Err(e))) => PromptOutcome::Wit(e),
-                Ok(Ok(Ok(r))) => PromptOutcome::Done(r),
+                Ok(Ok(Err(e))) => PromptOutcome::Trap(e),
+                Ok(Ok(Ok(Err(e)))) => PromptOutcome::Wit(e),
+                Ok(Ok(Ok(Ok(r)))) => PromptOutcome::Done(r),
             }
         };
         let cancel_arm = async move {
@@ -790,6 +821,99 @@ impl layer_agent::HostSession for HostState {
     ) -> wasmtime::Result<()> {
         let _ = self.take_downstream_session(rep.rep());
         Ok(())
+    }
+}
+
+impl layer_agent::HostPromptTurn for HostState {
+    async fn drop(
+        &mut self,
+        _rep: wasmtime::component::Resource<layer_agent::PromptTurn>,
+    ) -> wasmtime::Result<()> {
+        Ok(())
+    }
+
+    async fn updates(
+        &mut self,
+        _self_: wasmtime::component::Resource<layer_agent::PromptTurn>,
+    ) -> wasmtime::component::StreamReader<crate::yosh::acp::prompts::SessionUpdate> {
+        unimplemented!("phase 3: layer_agent::HostPromptTurn::updates")
+    }
+}
+
+impl layer_agent::HostPromptTurnWithStore for HasSelf<HostState> {
+    fn response<T: Send>(
+        _accessor: &wasmtime::component::Accessor<T, Self>,
+        _self_: wasmtime::component::Resource<layer_agent::PromptTurn>,
+    ) -> impl ::core::future::Future<Output = Result<PromptResponse, Error>> + Send {
+        async move {
+            Err(translate::internal_error(
+                "phase 3: layer_agent::HostPromptTurnWithStore::response",
+            ))
+        }
+    }
+}
+
+impl crate::yosh::acp::client::HostTerminal for HostState {
+    async fn new(
+        &mut self,
+        _req: crate::yosh::acp::terminals::CreateTerminalRequest,
+    ) -> wasmtime::component::Resource<crate::yosh::acp::client::Terminal> {
+        unimplemented!("phase 2: client::HostTerminal::new")
+    }
+
+    async fn drop(
+        &mut self,
+        _rep: wasmtime::component::Resource<crate::yosh::acp::client::Terminal>,
+    ) -> wasmtime::Result<()> {
+        Ok(())
+    }
+
+    async fn output(
+        &mut self,
+        _self_: wasmtime::component::Resource<crate::yosh::acp::client::Terminal>,
+    ) -> wasmtime::component::StreamReader<u8> {
+        unimplemented!("phase 2: client::HostTerminal::output")
+    }
+}
+
+impl crate::yosh::acp::client::HostTerminalWithStore for HasSelf<HostState> {
+    fn wait_for_exit<T: Send>(
+        _accessor: &wasmtime::component::Accessor<T, Self>,
+        _self_: wasmtime::component::Resource<crate::yosh::acp::client::Terminal>,
+    ) -> impl ::core::future::Future<
+        Output = Result<crate::yosh::acp::terminals::TerminalExitStatus, Error>,
+    > + Send {
+        async move {
+            Err(translate::internal_error(
+                "phase 2: client::HostTerminalWithStore::wait_for_exit",
+            ))
+        }
+    }
+}
+
+impl crate::yosh::acp::tools::HostToolCall for HostState {
+    async fn new(
+        &mut self,
+        _initial: crate::yosh::acp::tools::ToolCallInit,
+    ) -> wasmtime::component::Resource<crate::yosh::acp::tools::ToolCall> {
+        unimplemented!("phase 4: tools::HostToolCall::new")
+    }
+
+    async fn drop(
+        &mut self,
+        _rep: wasmtime::component::Resource<crate::yosh::acp::tools::ToolCall>,
+    ) -> wasmtime::Result<()> {
+        Ok(())
+    }
+}
+
+impl crate::yosh::acp::tools::HostToolCallWithStore for HasSelf<HostState> {
+    fn update<T: Send>(
+        _accessor: &wasmtime::component::Accessor<T, Self>,
+        _self_: wasmtime::component::Resource<crate::yosh::acp::tools::ToolCall>,
+        _patch: crate::yosh::acp::tools::ToolCallPatch,
+    ) -> impl ::core::future::Future<Output = ()> + Send {
+        async move { unimplemented!("phase 4: tools::HostToolCallWithStore::update") }
     }
 }
 
@@ -968,93 +1092,22 @@ impl layer_agent::HostWithStore for HasSelf<HostState> {
     }
 }
 
-/// Host-side `session.cancel` method for the layer-imported `agent.session`
-/// resource. Looks up the downstream `ResourceAny` stashed under the
-/// layer's rep, then invokes the downstream stage's exported
-/// `session.cancel` method on it. Pushes/pops the downstream stage idx
-/// around the call so nested host imports route correctly.
+/// Host-side glue for the layer-imported `agent.session` resource.
+/// `set-mode` and `select-model` forward to the downstream stashed
+/// resource; `prompt` returns a (phase-3 stub) prompt-turn resource
+/// that the host wires when streams are real.
 impl layer_agent::HostSessionWithStore for HasSelf<HostState> {
-    fn cancel<T: Send>(
-        accessor: &wasmtime::component::Accessor<T, Self>,
-        self_: wasmtime::component::Resource<layer_agent::Session>,
-    ) -> impl ::core::future::Future<Output = ()> + Send {
-        // Snapshot the downstream stage's bindings + the stashed
-        // `ResourceAny` corresponding to `self_`. Done inside
-        // `accessor.with` so the borrow on `HostState` ends before the
-        // first await.
-        let downstream = accessor.with(|mut a| {
-            let state = a.get();
-            let stage = state.current_stage();
-            let idx = stage.downstream_idx?;
-            let bindings = state.stages[idx].bindings.clone()?;
-            let any = state.downstream_sessions.get(&self_.rep()).copied()?;
-            Some((idx, bindings, any))
-        });
-        async move {
-            let Some((idx, bindings, any)) = downstream else {
-                tracing::warn!("layer called `session.cancel` but no downstream session is mapped");
-                return;
-            };
-            let res = downstream_call(accessor, idx, || async {
-                match &*bindings {
-                    Bindings::Provider(b) => {
-                        b.yosh_acp_agent()
-                            .session()
-                            .call_cancel(accessor, any)
-                            .await
-                    }
-                    Bindings::Layer(b) => {
-                        b.yosh_acp_agent()
-                            .session()
-                            .call_cancel(accessor, any)
-                            .await
-                    }
-                }
-            })
-            .await;
-            if let Err(trap) = res {
-                tracing::warn!(error = %trap, "downstream `session.cancel` trapped");
-            }
-        }
-    }
-
     fn prompt<T: Send>(
-        accessor: &wasmtime::component::Accessor<T, Self>,
-        self_: wasmtime::component::Resource<layer_agent::Session>,
-        prompt: Vec<crate::yosh::acp::content::ContentBlock>,
-    ) -> impl ::core::future::Future<Output = Result<PromptResponse, Error>> + Send {
-        let downstream = accessor.with(|mut a| {
-            let state = a.get();
-            let stage = state.current_stage();
-            let idx = stage.downstream_idx?;
-            let bindings = state.stages[idx].bindings.clone()?;
-            let any = state.downstream_sessions.get(&self_.rep()).copied()?;
-            Some((idx, bindings, any))
-        });
+        _accessor: &wasmtime::component::Accessor<T, Self>,
+        _self_: wasmtime::component::Resource<layer_agent::Session>,
+        _prompt: Vec<crate::yosh::acp::content::ContentBlock>,
+    ) -> impl ::core::future::Future<
+        Output = wasmtime::component::Resource<layer_agent::PromptTurn>,
+    > + Send {
         async move {
-            let Some((idx, bindings, any)) = downstream else {
-                return Err(translate::internal_error(
-                    "layer called `session.prompt` but no downstream session is mapped",
-                ));
-            };
-            let res = downstream_call(accessor, idx, || async {
-                match &*bindings {
-                    Bindings::Provider(b) => {
-                        b.yosh_acp_agent()
-                            .session()
-                            .call_prompt(accessor, any, prompt)
-                            .await
-                    }
-                    Bindings::Layer(b) => {
-                        b.yosh_acp_agent()
-                            .session()
-                            .call_prompt(accessor, any, prompt)
-                            .await
-                    }
-                }
-            })
-            .await;
-            flatten_downstream("session.prompt", res)
+            unimplemented!(
+                "phase 3: layer_agent::HostSessionWithStore::prompt forwards downstream prompt-turn"
+            )
         }
     }
 
