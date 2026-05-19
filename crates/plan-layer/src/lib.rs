@@ -36,9 +36,10 @@ use acp_wasm_sys::layer::yosh::acp::init::{
 };
 use acp_wasm_sys::layer::yosh::acp::prompts::{PromptRequest, PromptResponse, SessionUpdate};
 use acp_wasm_sys::layer::yosh::acp::sessions::{
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse, SessionId,
-    ComponentSource, SessionMode, SessionModeState, SetSessionModeRequest,
+    ComponentSource, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    LoadSessionResponse, NewSessionRequest, NewSessionResponse, ResumeSessionRequest,
+    ResumeSessionResponse, SelectModelRequest, SessionId, SessionMode, SessionModeState,
+    SetSessionModeRequest,
 };
 use acp_wasm_sys::layer::yosh::acp::terminals::{
     CreateTerminalRequest, CreateTerminalResponse, TerminalExitStatus, TerminalId, TerminalOutput,
@@ -249,6 +250,11 @@ impl AgentGuest for Layer {
         // provider-managed mode keeps the semantics predictable.
         set_plan(&req.session_id, false);
         agent::set_session_mode(req).await
+    }
+
+    async fn select_model(req: SelectModelRequest) -> Result<(), Error> {
+        // Models are entirely the provider's concern; forward verbatim.
+        agent::select_model(req).await
     }
 
     async fn prompt(req: PromptRequest) -> Result<PromptResponse, Error> {

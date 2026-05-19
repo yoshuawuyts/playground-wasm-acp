@@ -234,6 +234,47 @@ pub(super) fn handle_set_session_mode(
     Ok(())
 }
 
+/// `session/set_model` — UNSTABLE. Mirrors `handle_set_session_mode`
+/// except it dispatches to the session actor's `select_model` path so
+/// the wasm chain's `select-model` export is invoked.
+pub(super) fn handle_select_model(
+    registry: &SessionRegistry,
+    req: schema::SetSessionModelRequest,
+    responder: Responder<schema::SetSessionModelResponse>,
+    cx: ConnectionTo<Client>,
+) -> Result<(), AcpError> {
+    let session_key = req.session_id.0.to_string();
+    debug!(session = %session_key, "session/set_model");
+
+    let handle = require_session(registry, &session_key)?;
+    let wit_req = translate::select_model_request_schema_to_wit(req);
+
+    cx.spawn(async move {
+        let outcome = match handle.select_model(wit_req).await {
+            Ok(o) => o,
+            Err(_) => {
+                let mut e = AcpError::internal_error();
+                e.message = format!("session actor for {session_key} is gone");
+                return responder.respond_with_error(e);
+            }
+        };
+        match outcome {
+            SetModeOutcome::Done => {
+                let resp = match translate::empty_select_model_response() {
+                    Ok(r) => r,
+                    Err(e) => return responder.respond_with_error(e),
+                };
+                responder.respond(resp)
+            }
+            SetModeOutcome::Wit(e) => responder.respond_with_error(translate::wit_error_to_acp(e)),
+            SetModeOutcome::Trap(e) => {
+                responder.respond_with_error(translate::trap_to_acp("select-model", e))
+            }
+        }
+    })?;
+    Ok(())
+}
+
 /// Spawn: see comment on `handle_set_session_mode`. Prompt is the worst
 /// offender — a single turn can drive many `fs/*` round-trips through the
 /// editor, all of which need the incoming actor free to dequeue replies.

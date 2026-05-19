@@ -27,8 +27,8 @@ use crate::yosh::acp::init::{AuthenticateRequest, InitializeRequest, InitializeR
 use crate::yosh::acp::prompts::{PromptRequest, PromptResponse, SessionUpdate};
 use crate::yosh::acp::sessions::{
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse, SessionId,
-    SetSessionModeRequest,
+    NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse,
+    SelectModelRequest, SessionId, SetSessionModeRequest,
 };
 use crate::yosh::acp::terminals::{
     CreateTerminalRequest, CreateTerminalResponse, TerminalExitStatus, TerminalId, TerminalOutput,
@@ -81,6 +81,10 @@ pub enum Cmd {
     },
     SetSessionMode {
         req: SetSessionModeRequest,
+        reply: Reply<()>,
+    },
+    SelectModel {
+        req: SelectModelRequest,
         reply: Reply<()>,
     },
     Prompt {
@@ -228,6 +232,17 @@ impl AccessorTask<HostState, HasSelf<HostState>> for CmdTask {
                         b.yosh_acp_agent()
                             .call_set_session_mode(accessor, req)
                             .await
+                    }
+                };
+                let _ = reply.send(res);
+            }
+            Cmd::SelectModel { req, reply } => {
+                let res = match &*bindings {
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent().call_select_model(accessor, req).await
+                    }
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_agent().call_select_model(accessor, req).await
                     }
                 };
                 let _ = reply.send(res);
@@ -564,6 +579,12 @@ impl WasmActor {
         call_set_session_mode,
         SetSessionMode,
         SetSessionModeRequest,
+        ()
+    );
+    make_call!(
+        call_select_model,
+        SelectModel,
+        SelectModelRequest,
         ()
     );
     make_call!(call_prompt, Prompt, PromptRequest, PromptResponse);

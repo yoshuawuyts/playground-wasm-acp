@@ -28,8 +28,8 @@ use acp_wasm_sys::layer::yosh::acp::prompts::{
 };
 use acp_wasm_sys::layer::yosh::acp::sessions::{
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse, SessionId,
-    SetSessionModeRequest,
+    NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse,
+    SelectModelRequest, SessionId, SetSessionModeRequest,
 };
 use acp_wasm_sys::layer::yosh::acp::terminals::{
     CreateTerminalRequest, CreateTerminalResponse, TerminalExitStatus, TerminalId, TerminalOutput,
@@ -139,6 +139,10 @@ impl AgentGuest for Layer {
 
     async fn set_session_mode(req: SetSessionModeRequest) -> Result<(), Error> {
         agent::set_session_mode(req).await
+    }
+
+    async fn select_model(req: SelectModelRequest) -> Result<(), Error> {
+        agent::select_model(req).await
     }
 
     async fn prompt(req: PromptRequest) -> Result<PromptResponse, Error> {

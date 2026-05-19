@@ -42,7 +42,7 @@ tokio-util = { version = "0.7", features = ["compat"] }
 tokio-stream = "0.1"
 futures = "0.3"
 futures-concurrency = "7.6"
-agent-client-protocol = "0.11.1"
+agent-client-protocol = { version = "0.11.1", features = ["unstable_session_model"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

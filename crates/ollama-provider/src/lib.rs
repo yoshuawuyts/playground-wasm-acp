@@ -20,9 +20,10 @@ use acp_wasm_sys::provider::yosh::acp::prompts::{
     PromptRequest, PromptResponse, SessionUpdate, StopReason,
 };
 use acp_wasm_sys::provider::yosh::acp::sessions::{
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse, SessionId,
-    ComponentSource, SessionMode, SessionModeState, SetSessionModeRequest,
+    ComponentSource, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    LoadSessionResponse, NewSessionRequest, NewSessionResponse, ResumeSessionRequest,
+    ResumeSessionResponse, SelectModelRequest, SessionId, SessionModel, SessionModelState,
+    SetSessionModeRequest,
 };
 use acp_wasm_sys::provider::yosh::acp::tools::ToolKind;
 
@@ -48,24 +49,22 @@ thread_local! {
 /// it dramatically reduces useless tool-call storms.
 const SYSTEM_PROMPT: &str = "You are a coding assistant connected to the user's editor. You have access to a `read_file` tool that can read source files in the user's project. Only call tools when the user explicitly asks you to read a file, or when reading a specific file is strictly necessary to answer the user's request. For greetings, small talk, or general questions, respond in plain text without calling any tools. Never call `read_file` with an empty path, `/`, `.`, or any directory.";
 
-/// Build the [`SessionModeState`] for a freshly created or loaded session.
+/// Build the [`SessionModelState`] for a freshly created or loaded session.
 ///
-/// Lists the locally installed Ollama models and exposes them as session
-/// modes (one mode per model). The current mode defaults to
-/// `preferred_model` when present in the list, otherwise `default_model()`,
-/// otherwise the first model returned by Ollama.
+/// Lists the locally installed Ollama models and exposes them via
+/// ACP's (unstable) `session/models` capability. The current model
+/// defaults to `preferred_model` when present in the list, otherwise
+/// `default_model()`, otherwise the first model returned by Ollama.
 ///
-/// If Ollama is unreachable or returns no models, falls back to a single
-/// mode for `default_model()` so session creation still succeeds; the
-/// failure is logged to stderr.
-fn build_modes_state_from_listed(
+/// If Ollama is unreachable or returns no models, falls back to a
+/// single entry for `default_model()` so session creation still
+/// succeeds; the failure is logged to stderr.
+fn build_models_state_from_listed(
     listed: Vec<String>,
     preferred_model: Option<&str>,
-) -> (SessionModeState, String) {
+) -> (SessionModelState, String) {
     let default = ollama::default_model();
 
-    // Pick the current mode: prefer the caller's hint, then OLLAMA_MODEL,
-    // then the first available.
     let pick = |want: &str| listed.iter().any(|m| m == want);
     let current = preferred_model
         .filter(|m| pick(m))
@@ -79,9 +78,9 @@ fn build_modes_state_from_listed(
         })
         .unwrap_or_else(|| listed[0].clone());
 
-    let available_modes = listed
+    let available_models = listed
         .into_iter()
-        .map(|name| SessionMode {
+        .map(|name| SessionModel {
             id: name.clone(),
             name,
             description: None,
@@ -92,15 +91,15 @@ fn build_modes_state_from_listed(
         .collect();
 
     (
-        SessionModeState {
-            current_mode_id: current.clone(),
-            available_modes,
+        SessionModelState {
+            current_model_id: current.clone(),
+            available_models,
         },
         current,
     )
 }
 
-async fn build_modes_state(preferred_model: Option<&str>) -> (SessionModeState, String) {
+async fn build_models_state(preferred_model: Option<&str>) -> (SessionModelState, String) {
     let default = ollama::default_model();
     let listed = match ollama::list_models().await {
         Ok(models) if !models.is_empty() => models,
@@ -113,7 +112,7 @@ async fn build_modes_state(preferred_model: Option<&str>) -> (SessionModeState, 
             vec![default.clone()]
         }
     };
-    build_modes_state_from_listed(listed, preferred_model)
+    build_models_state_from_listed(listed, preferred_model)
 }
 
 fn next_session_id() -> String {
@@ -202,7 +201,7 @@ impl Guest for Agent {
 
     async fn new_session(req: NewSessionRequest) -> Result<NewSessionResponse, Error> {
         let id = next_session_id();
-        let (modes, current_model) = build_modes_state(None).await;
+        let (models, current_model) = build_models_state(None).await;
         SESSIONS.with(|s| {
             s.borrow_mut().insert(
                 id.clone(),
@@ -215,7 +214,8 @@ impl Guest for Agent {
         });
         Ok(NewSessionResponse {
             session_id: id,
-            modes: Some(modes),
+            modes: None,
+            models: Some(models),
         })
     }
 
@@ -233,7 +233,7 @@ impl Guest for Agent {
             .map(|s| s.history.clone())
             .unwrap_or_default();
         let preferred = stored.as_ref().map(|s| s.model.clone());
-        let (modes, current_model) = build_modes_state(preferred.as_deref()).await;
+        let (models, current_model) = build_models_state(preferred.as_deref()).await;
         for msg in &history {
             let block = ContentBlock::Text(TextContent {
                 text: msg.content.clone(),
@@ -255,7 +255,10 @@ impl Guest for Agent {
                 },
             );
         });
-        Ok(LoadSessionResponse { modes: Some(modes) })
+        Ok(LoadSessionResponse {
+            modes: None,
+            models: Some(models),
+        })
     }
 
     async fn list_sessions(_req: ListSessionsRequest) -> Result<ListSessionsResponse, Error> {
@@ -278,7 +281,7 @@ impl Guest for Agent {
             .map(|s| s.history.clone())
             .unwrap_or_default();
         let preferred = stored.as_ref().map(|s| s.model.clone());
-        let (modes, current_model) = build_modes_state(preferred.as_deref()).await;
+        let (models, current_model) = build_models_state(preferred.as_deref()).await;
         SESSIONS.with(|s| {
             s.borrow_mut().insert(
                 req.session_id,
@@ -289,7 +292,10 @@ impl Guest for Agent {
                 },
             );
         });
-        Ok(ResumeSessionResponse { modes: Some(modes) })
+        Ok(ResumeSessionResponse {
+            modes: None,
+            models: Some(models),
+        })
     }
 
     async fn close_session(_session_id: SessionId) -> Result<(), Error> {
@@ -299,27 +305,32 @@ impl Guest for Agent {
         ))
     }
 
-    async fn set_session_mode(req: SetSessionModeRequest) -> Result<(), Error> {
-        let SetSessionModeRequest {
+    async fn set_session_mode(_req: SetSessionModeRequest) -> Result<(), Error> {
+        // Provider advertises no modes; the slot is reserved for layers
+        // (e.g. `plan-layer`) to manage. Anything reaching the provider
+        // is therefore an unknown mode id.
+        Err(err(
+            ErrorCode::InvalidParams,
+            "ollama provider does not advertise any modes",
+        ))
+    }
+
+    async fn select_model(req: SelectModelRequest) -> Result<(), Error> {
+        let SelectModelRequest {
             session_id,
-            mode_id,
+            model_id,
         } = req;
-        let switched = SESSIONS.with(|s| {
+        SESSIONS.with(|s| {
             let mut sessions = s.borrow_mut();
             match sessions.get_mut(&session_id) {
                 Some(session) => {
-                    session.model = mode_id.clone();
+                    session.model = model_id;
                     Ok(())
                 }
                 None => Err(format!("unknown session id: {session_id}")),
             }
-        });
-        switched.map_err(|e| err(ErrorCode::InvalidParams, &e))?;
-        // Notify the client that the active mode changed. Per the ACP
-        // spec, the agent SHOULD emit `current-mode-update` so the editor
-        // can reflect the new selection in its picker.
-        client::update_session(session_id, SessionUpdate::CurrentModeUpdate(mode_id)).await;
-        Ok(())
+        })
+        .map_err(|e| err(ErrorCode::InvalidParams, &e))
     }
 
     async fn prompt(req: PromptRequest) -> Result<PromptResponse, Error> {

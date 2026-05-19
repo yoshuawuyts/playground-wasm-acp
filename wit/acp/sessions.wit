@@ -13,6 +13,11 @@ interface sessions {
     /// Unique identifier for a session mode.
     type session-mode-id = string;
 
+    /// Unique identifier for a session model. **UNSTABLE** — mirrors
+    /// the unstable `session/set_model` capability in upstream ACP.
+    /// Selectable independently of `session-mode`.
+    type session-model-id = string;
+
     // ------------------------------------------------------------------
     // Common helpers
     // ------------------------------------------------------------------
@@ -137,6 +142,44 @@ interface sessions {
     }
 
     // ------------------------------------------------------------------
+    // Session models (UNSTABLE)
+    //
+    // Mirrors the unstable `session/set_model` capability in upstream
+    // ACP. Models are orthogonal to modes: a session has one active
+    // mode (how the agent behaves) AND one active model (which LLM
+    // backs it).
+    // ------------------------------------------------------------------
+
+    /// A selectable model for a session. **UNSTABLE**.
+    record session-model {
+        /// Stable identifier (e.g. `"llama3.2:8b"`, `"gpt-4o"`).
+        id: session-model-id,
+        /// Human-readable name.
+        name: string,
+        /// Optional longer description.
+        description: option<string>,
+        /// Which component contributed this model.
+        provided-by: component-source,
+    }
+
+    /// The set of models available for a session and which one is
+    /// active. **UNSTABLE**.
+    record session-model-state {
+        /// The currently active model.
+        current-model-id: session-model-id,
+        /// All models the agent can run for this session.
+        available-models: list<session-model>,
+    }
+
+    /// Parameters to `select-model`. **UNSTABLE**.
+    record select-model-request {
+        /// The session whose model is being changed.
+        session-id: session-id,
+        /// The model to switch to. MUST be one of `available-models`.
+        model-id: session-model-id,
+    }
+
+    // ------------------------------------------------------------------
     // New / load
     //
     // See: https://agentclientprotocol.com/protocol/session-setup
@@ -156,6 +199,9 @@ interface sessions {
         session-id: session-id,
         /// Modes the agent can operate in for this session, if any.
         modes: option<session-mode-state>,
+        /// Models the agent can run for this session, if any.
+        /// **UNSTABLE**.
+        models: option<session-model-state>,
     }
 
     /// Parameters to `load-session` (only valid if
@@ -173,6 +219,9 @@ interface sessions {
     record load-session-response {
         /// Modes the agent can operate in for this session, if any.
         modes: option<session-mode-state>,
+        /// Models the agent can run for this session, if any.
+        /// **UNSTABLE**.
+        models: option<session-model-state>,
     }
 
     // ------------------------------------------------------------------
@@ -224,6 +273,9 @@ interface sessions {
     record resume-session-response {
         /// Modes the agent can operate in for this session, if any.
         modes: option<session-mode-state>,
+        /// Models the agent can run for this session, if any.
+        /// **UNSTABLE**.
+        models: option<session-model-state>,
     }
 
     /// Update to a session's metadata, pushed by the agent. Only included

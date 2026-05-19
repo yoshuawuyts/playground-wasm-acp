@@ -23,8 +23,9 @@ use crate::yosh::acp::init::{
 use crate::yosh::acp::prompts::{PromptRequest, PromptResponse, SessionUpdate, StopReason};
 use crate::yosh::acp::sessions::{
     EnvVar, HttpHeader, LoadSessionRequest, LoadSessionResponse, McpServer, McpServerHttp,
-    McpServerSse, McpServerStdio, NewSessionRequest, NewSessionResponse, SessionId, SessionMode,
-    SessionModeId, SessionModeState, SetSessionModeRequest,
+    McpServerSse, McpServerStdio, NewSessionRequest, NewSessionResponse, SelectModelRequest,
+    SessionId, SessionMode, SessionModeId, SessionModeState, SessionModel, SessionModelState,
+    SetSessionModeRequest,
 };
 use crate::yosh::acp::tools::{
     ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
@@ -197,6 +198,9 @@ pub fn new_session_response_wit_to_schema(
     if let Some(modes) = resp.modes {
         json["modes"] = session_mode_state_to_json(modes, component_id);
     }
+    if let Some(models) = resp.models {
+        json["models"] = session_model_state_to_json(models);
+    }
     synth("new-session response", json)
 }
 
@@ -223,6 +227,9 @@ pub fn load_session_response_wit_to_schema(
     if let Some(modes) = resp.modes {
         json["modes"] = session_mode_state_to_json(modes, component_id);
     }
+    if let Some(models) = resp.models {
+        json["models"] = session_model_state_to_json(models);
+    }
     synth("load-session response", json)
 }
 
@@ -243,6 +250,56 @@ pub fn set_session_mode_request_schema_to_wit(
 /// type is `non_exhaustive`.
 pub fn empty_set_session_mode_response() -> Result<schema::SetSessionModeResponse, AcpError> {
     synth("set-session-mode response", serde_json::json!({}))
+}
+
+// -----------------------------------------------------------------------------
+// Session models (UNSTABLE — gated behind `unstable_session_model` on the
+// `agent-client-protocol` crate)
+// -----------------------------------------------------------------------------
+
+pub fn select_model_request_schema_to_wit(
+    req: schema::SetSessionModelRequest,
+) -> SelectModelRequest {
+    SelectModelRequest {
+        session_id: req.session_id.0.to_string(),
+        model_id: req.model_id.0.to_string(),
+    }
+}
+
+pub fn empty_select_model_response() -> Result<schema::SetSessionModelResponse, AcpError> {
+    synth("select-model response", serde_json::json!({}))
+}
+
+fn session_model_state_to_json(state: SessionModelState) -> serde_json::Value {
+    let SessionModelState {
+        current_model_id,
+        available_models,
+    } = state;
+    serde_json::json!({
+        "currentModelId": current_model_id,
+        "availableModels": available_models
+            .into_iter()
+            .map(session_model_to_json)
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn session_model_to_json(model: SessionModel) -> serde_json::Value {
+    let SessionModel {
+        id,
+        name,
+        description,
+        provided_by,
+    } = model;
+    let mut entry = serde_json::json!({
+        "modelId": id,
+        "name": name,
+        "providedBy": { "componentId": provided_by.component_id },
+    });
+    if let Some(d) = description {
+        entry["description"] = serde_json::Value::String(d);
+    }
+    entry
 }
 
 fn session_mode_state_to_json(state: SessionModeState, component_id: &str) -> serde_json::Value {

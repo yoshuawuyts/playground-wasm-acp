@@ -39,8 +39,8 @@ use crate::yosh::acp::init::{AuthenticateRequest, InitializeRequest, InitializeR
 use crate::yosh::acp::prompts::{PromptRequest, PromptResponse};
 use crate::yosh::acp::sessions::{
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse, SessionId,
-    SetSessionModeRequest,
+    NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse,
+    SelectModelRequest, SessionId, SetSessionModeRequest,
 };
 use crate::{Layer, Provider};
 
@@ -405,6 +405,10 @@ enum Message {
         req: SetSessionModeRequest,
         reply: oneshot::Sender<SetModeOutcome>,
     },
+    SelectModel {
+        req: SelectModelRequest,
+        reply: oneshot::Sender<SetModeOutcome>,
+    },
 }
 
 pub enum SetModeOutcome {
@@ -436,6 +440,18 @@ impl SessionHandle {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Message::SetMode { req, reply: tx })
+            .await
+            .map_err(|_| SessionError::ChannelClosed)?;
+        rx.await.map_err(|_| SessionError::ChannelClosed)
+    }
+
+    pub async fn select_model(
+        &self,
+        req: SelectModelRequest,
+    ) -> Result<SetModeOutcome, SessionError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Message::SelectModel { req, reply: tx })
             .await
             .map_err(|_| SessionError::ChannelClosed)?;
         rx.await.map_err(|_| SessionError::ChannelClosed)
@@ -509,6 +525,16 @@ impl SessionActor {
                     };
                     if reply.send(outcome).is_err() {
                         warn!("set-mode caller dropped before response was sent");
+                    }
+                }
+                Message::SelectModel { req, reply } => {
+                    let outcome = match self.chain.head.call_select_model(req).await {
+                        Err(e) => SetModeOutcome::Trap(e),
+                        Ok(Err(e)) => SetModeOutcome::Wit(e),
+                        Ok(Ok(())) => SetModeOutcome::Done,
+                    };
+                    if reply.send(outcome).is_err() {
+                        warn!("select-model caller dropped before response was sent");
                     }
                 }
             }
@@ -650,6 +676,19 @@ impl layer_agent::HostWithStore for wasmtime::component::HasSelf<HostState> {
                 return no_downstream("set-session-mode");
             };
             flatten_downstream("set-session-mode", ds.call_set_session_mode(req).await)
+        }
+    }
+
+    fn select_model<T: Send>(
+        accessor: &wasmtime::component::Accessor<T, Self>,
+        req: SelectModelRequest,
+    ) -> impl ::core::future::Future<Output = Result<(), Error>> + Send {
+        let ds = accessor.with(|mut a| a.get().downstream.clone());
+        async move {
+            let Some(ds) = ds else {
+                return no_downstream("select-model");
+            };
+            flatten_downstream("select-model", ds.call_select_model(req).await)
         }
     }
 

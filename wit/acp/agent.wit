@@ -14,6 +14,7 @@ interface agent {
         list-sessions-request, list-sessions-response,
         resume-session-request, resume-session-response,
         set-session-mode-request,
+        select-model-request,
     };
     use prompts.{prompt-request, prompt-response};
 
@@ -82,6 +83,11 @@ interface agent {
     ///
     /// See: <https://agentclientprotocol.com/protocol/session-modes>
     set-session-mode: async func(req: set-session-mode-request) -> result<_, error>;
+
+    /// Switch the active model for a session. **UNSTABLE**. Maps to the
+    /// JSON-RPC `session/set_model` method. The `model-id` MUST be one
+    /// of the models returned in `new-session-response.models`.
+    select-model: async func(req: select-model-request) -> result<_, error>;
 
     /// Send a user prompt and run a prompt turn to completion. Maps to the
     /// JSON-RPC `session/prompt` method.
