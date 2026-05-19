@@ -52,7 +52,13 @@ use acp_wasm_sys::layer::yosh::acp::{agent, client};
 struct Layer;
 
 const PLAN_MODE_ID: &str = "plan";
-const DEFAULT_MODE_ID: &str = "default";
+
+/// Id of the host-injected default mode. The host owns this mode
+/// and ensures it's always present; layers like this one don't
+/// synthesize their own "not me" mode. When the user switches to
+/// it, we flip plan off and short-circuit so the request isn't
+/// forwarded to the (mode-less) downstream provider.
+const HOST_DEFAULT_MODE_ID: &str = "default";
 
 /// Per-session record of whether plan mode is currently active. We
 /// only store sessions we've seen; absence means "not plan".
@@ -90,37 +96,24 @@ fn plan_mode() -> SessionMode {
     }
 }
 
-fn default_mode() -> SessionMode {
-    SessionMode {
-        id: DEFAULT_MODE_ID.to_string(),
-        name: "Default".to_string(),
-        description: Some("Normal execution: agent may edit files and run tools.".to_string()),
-        provided_by: ComponentSource {
-            component_id: "local:plan-layer".to_string(),
-        },
-    }
-}
-
-/// Inject the `plan` mode into a downstream `modes` field. If the
-/// downstream didn't advertise any modes, synthesize a minimal pair
-/// (`default` + `plan`) and pick `default` as current.
+/// Inject `plan` into the downstream `modes` state, leaving the
+/// notion of "not plan" to whoever else is contributing modes
+/// (typically the host's synthetic `default`). If the downstream
+/// stage advertised no modes at all, we still only contribute
+/// `plan` — the host is responsible for ensuring there's a
+/// non-plan mode available for the user to toggle back to.
 fn inject_plan_mode(modes: Option<SessionModeState>) -> Option<SessionModeState> {
-    match modes {
-        Some(mut state) => {
-            if !state
-                .available_modes
-                .iter()
-                .any(|m| m.id == PLAN_MODE_ID)
-            {
-                state.available_modes.push(plan_mode());
-            }
-            Some(state)
-        }
-        None => Some(SessionModeState {
-            current_mode_id: DEFAULT_MODE_ID.to_string(),
-            available_modes: vec![default_mode(), plan_mode()],
-        }),
+    let mut state = modes.unwrap_or(SessionModeState {
+        // Empty placeholder; the host will fill in a current id when
+        // it appends its `default` mode. Use the plan id as a
+        // last-resort fallback so the field is never literally empty.
+        current_mode_id: PLAN_MODE_ID.to_string(),
+        available_modes: Vec::new(),
+    });
+    if !state.available_modes.iter().any(|m| m.id == PLAN_MODE_ID) {
+        state.available_modes.push(plan_mode());
     }
+    Some(state)
 }
 
 /// True for tool kinds that mutate state or run code. Used to gate
@@ -224,9 +217,12 @@ impl AgentGuest for Layer {
     }
 
     async fn set_session_mode(req: SetSessionModeRequest) -> Result<(), Error> {
-        // Modes we manage locally: short-circuit so the downstream
-        // (which doesn't know about them) is never asked. Notify the
-        // client of the new active mode.
+        // `plan` is ours: toggle plan-mode state and notify the
+        // client. The host-injected `default` is the canonical
+        // "disengage plan" id; recognise it here and short-circuit
+        // so the request never reaches the provider (which doesn't
+        // advertise any modes). Anything else: turn plan off and
+        // forward downstream.
         if req.mode_id == PLAN_MODE_ID {
             set_plan(&req.session_id, true);
             client::update_session(
@@ -236,18 +232,15 @@ impl AgentGuest for Layer {
             .await;
             return Ok(());
         }
-        if req.mode_id == DEFAULT_MODE_ID {
+        if req.mode_id == HOST_DEFAULT_MODE_ID {
             set_plan(&req.session_id, false);
             client::update_session(
                 req.session_id.clone(),
-                SessionUpdate::CurrentModeUpdate(DEFAULT_MODE_ID.to_string()),
+                SessionUpdate::CurrentModeUpdate(HOST_DEFAULT_MODE_ID.to_string()),
             )
             .await;
             return Ok(());
         }
-        // Anything else: forward downstream (it's a mode the provider
-        // advertised). Leaving plan mode off if the user moves to a
-        // provider-managed mode keeps the semantics predictable.
         set_plan(&req.session_id, false);
         agent::set_session_mode(req).await
     }

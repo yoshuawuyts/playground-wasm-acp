@@ -22,10 +22,10 @@ use crate::yosh::acp::init::{
 };
 use crate::yosh::acp::prompts::{PromptRequest, PromptResponse, SessionUpdate, StopReason};
 use crate::yosh::acp::sessions::{
-    EnvVar, HttpHeader, LoadSessionRequest, LoadSessionResponse, McpServer, McpServerHttp,
-    McpServerSse, McpServerStdio, NewSessionRequest, NewSessionResponse, SelectModelRequest,
-    SessionId, SessionMode, SessionModeId, SessionModeState, SessionModel, SessionModelState,
-    SetSessionModeRequest,
+    ComponentSource, EnvVar, HttpHeader, LoadSessionRequest, LoadSessionResponse, McpServer,
+    McpServerHttp, McpServerSse, McpServerStdio, NewSessionRequest, NewSessionResponse,
+    SelectModelRequest, SessionId, SessionMode, SessionModeId, SessionModeState, SessionModel,
+    SessionModelState, SetSessionModeRequest,
 };
 use crate::yosh::acp::tools::{
     ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
@@ -195,7 +195,8 @@ pub fn new_session_response_wit_to_schema(
     // schema::NewSessionResponse is `non_exhaustive`. Roundtrip via JSON to
     // construct it without depending on the (unstable) field set.
     let mut json = serde_json::json!({ "sessionId": resp.session_id });
-    if let Some(modes) = resp.modes {
+    let modes = ensure_host_default_mode(resp.modes);
+    if let Some(modes) = modes {
         json["modes"] = session_mode_state_to_json(modes, component_id);
     }
     if let Some(models) = resp.models {
@@ -224,7 +225,8 @@ pub fn load_session_response_wit_to_schema(
     component_id: &str,
 ) -> Result<schema::LoadSessionResponse, AcpError> {
     let mut json = serde_json::json!({});
-    if let Some(modes) = resp.modes {
+    let modes = ensure_host_default_mode(resp.modes);
+    if let Some(modes) = modes {
         json["modes"] = session_mode_state_to_json(modes, component_id);
     }
     if let Some(models) = resp.models {
@@ -291,10 +293,13 @@ fn session_model_to_json(model: SessionModel) -> serde_json::Value {
         description,
         provided_by,
     } = model;
+    // Upstream ACP's `ModelInfo` doesn't carry provenance, so bake the
+    // contributing component's id into the display name. Round-trip
+    // through `synth` would otherwise drop any extra fields.
+    let display = format!("{name} ({})", provided_by.component_id);
     let mut entry = serde_json::json!({
         "modelId": id,
-        "name": name,
-        "providedBy": { "componentId": provided_by.component_id },
+        "name": display,
     });
     if let Some(d) = description {
         entry["description"] = serde_json::Value::String(d);
@@ -316,6 +321,55 @@ fn session_mode_state_to_json(state: SessionModeState, component_id: &str) -> se
     })
 }
 
+/// Stable id for the host-injected "default" mode. Always present in
+/// every session so the user has something to switch back to when a
+/// layer-injected mode (e.g. `plan`) needs to be toggled off.
+pub const HOST_DEFAULT_MODE_ID: &str = "default";
+
+/// Ensure the outbound mode state contains a host-owned `default`
+/// mode and uses it as the current mode if the chain didn't pick
+/// one. Layers (e.g. `plan-layer`) deliberately don't synthesize a
+/// "not-me" mode; this is where it comes from instead.
+fn ensure_host_default_mode(modes: Option<SessionModeState>) -> Option<SessionModeState> {
+    let mut state = modes.unwrap_or(SessionModeState {
+        current_mode_id: HOST_DEFAULT_MODE_ID.to_string(),
+        available_modes: Vec::new(),
+    });
+    let has_default = state
+        .available_modes
+        .iter()
+        .any(|m| m.id == HOST_DEFAULT_MODE_ID);
+    if !has_default {
+        state.available_modes.insert(
+            0,
+            SessionMode {
+                id: HOST_DEFAULT_MODE_ID.to_string(),
+                name: "Default".to_string(),
+                description: Some(
+                    "Normal execution. Selectable to disengage any layer-injected mode such as \
+                     plan."
+                        .to_string(),
+                ),
+                provided_by: ComponentSource {
+                    component_id: "local:host".to_string(),
+                },
+            },
+        );
+    }
+    // If the chain picked a current mode that nothing advertises,
+    // fall back to the host default. This happens e.g. when the
+    // plan-layer was the only contributor and used the plan id as
+    // its placeholder current mode.
+    let current_exists = state
+        .available_modes
+        .iter()
+        .any(|m| m.id == state.current_mode_id);
+    if !current_exists {
+        state.current_mode_id = HOST_DEFAULT_MODE_ID.to_string();
+    }
+    Some(state)
+}
+
 fn session_mode_to_json(mode: SessionMode, _component_id: &str) -> serde_json::Value {
     let SessionMode {
         id,
@@ -323,14 +377,18 @@ fn session_mode_to_json(mode: SessionMode, _component_id: &str) -> serde_json::V
         description,
         provided_by,
     } = mode;
-    // The component that contributed this mode is now carried
-    // explicitly via `provided-by` on the WIT record; no host-side
-    // name mangling needed. Pass `name` through verbatim and emit
-    // `providedBy` as structured metadata for the editor.
+    // Upstream ACP's `SessionMode` doesn't carry provenance, so bake
+    // the contributing component's id into the display name \u2014 except
+    // for the host's own synthetic modes, which would otherwise read
+    // as e.g. "Default (local:host)" and just look like noise.
+    let display = if provided_by.component_id == "local:host" {
+        name
+    } else {
+        format!("{name} ({})", provided_by.component_id)
+    };
     let mut entry = serde_json::json!({
         "id": id,
-        "name": name,
-        "providedBy": { "componentId": provided_by.component_id },
+        "name": display,
     });
     if let Some(d) = description {
         entry["description"] = serde_json::Value::String(d);
