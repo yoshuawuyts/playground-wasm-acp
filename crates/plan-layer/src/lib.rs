@@ -169,7 +169,10 @@ impl AgentGuest for Layer {
         resp.modes = inject_plan_mode(resp.modes);
         eprintln!(
             "plan-layer: new_session injecting; total modes={} session={}",
-            resp.modes.as_ref().map(|s| s.available_modes.len()).unwrap_or(0),
+            resp.modes
+                .as_ref()
+                .map(|s| s.available_modes.len())
+                .unwrap_or(0),
             resp.session_id,
         );
         set_plan(&resp.session_id, false);
@@ -187,7 +190,10 @@ impl AgentGuest for Layer {
         resp.modes = inject_plan_mode(resp.modes);
         eprintln!(
             "plan-layer: load_session injecting; total modes={}",
-            resp.modes.as_ref().map(|s| s.available_modes.len()).unwrap_or(0),
+            resp.modes
+                .as_ref()
+                .map(|s| s.available_modes.len())
+                .unwrap_or(0),
         );
         set_plan(&sid, false);
         Ok(resp)
