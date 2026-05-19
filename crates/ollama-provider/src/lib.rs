@@ -320,17 +320,18 @@ impl Guest for Agent {
             session_id,
             model_id,
         } = req;
-        SESSIONS.with(|s| {
-            let mut sessions = s.borrow_mut();
-            match sessions.get_mut(&session_id) {
-                Some(session) => {
-                    session.model = model_id;
-                    Ok(())
+        SESSIONS
+            .with(|s| {
+                let mut sessions = s.borrow_mut();
+                match sessions.get_mut(&session_id) {
+                    Some(session) => {
+                        session.model = model_id;
+                        Ok(())
+                    }
+                    None => Err(format!("unknown session id: {session_id}")),
                 }
-                None => Err(format!("unknown session id: {session_id}")),
-            }
-        })
-        .map_err(|e| err(ErrorCode::InvalidParams, &e))
+            })
+            .map_err(|e| err(ErrorCode::InvalidParams, &e))
     }
 
     async fn prompt(req: PromptRequest) -> Result<PromptResponse, Error> {

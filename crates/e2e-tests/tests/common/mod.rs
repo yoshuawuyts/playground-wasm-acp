@@ -132,8 +132,9 @@ struct SequencedResponder {
 impl Respond for SequencedResponder {
     fn respond(&self, _req: &Request) -> ResponseTemplate {
         let mut g = self.templates.lock().unwrap();
-        g.pop_front()
-            .unwrap_or_else(|| ResponseTemplate::new(500).set_body_string("no more scripted responses"))
+        g.pop_front().unwrap_or_else(|| {
+            ResponseTemplate::new(500).set_body_string("no more scripted responses")
+        })
     }
 }
 

@@ -127,6 +127,13 @@ impl SessionFactory {
         &self.provider.component_id
     }
 
+    /// Shared wasmtime [`Engine`]. Exposed so the bridge can validate
+    /// newly installed components against the host's ACP world without
+    /// having to spin up a fresh engine.
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
     /// Build a chain with `/data` preopened to a project-scoped subdir.
     pub async fn instantiate_for_project(&self, cwd: &std::path::Path) -> Result<ChainHandle> {
         let project_id = project_id_from_cwd(cwd);

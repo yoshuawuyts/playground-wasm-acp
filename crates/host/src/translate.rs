@@ -446,6 +446,54 @@ pub fn empty_authenticate_response() -> Result<schema::AuthenticateResponse, Acp
     synth("authenticate response", serde_json::json!({}))
 }
 
+/// JSON shape advertised for the host-side `/install` slash command.
+/// Centralised so both [`session_update_wit_to_schema`] (injection into
+/// chain-emitted updates) and [`synthetic_install_command_update`]
+/// (host-emitted update for chains that never advertise commands)
+/// agree on description and hint.
+fn install_command_json() -> serde_json::Value {
+    serde_json::json!({
+        "name": "install",
+        "description": "Install a wasm component plugin by WIT name (e.g. `wasi:clocks@0.2.0`).",
+        "input": { "hint": "<namespace>:<package>[@version]" },
+    })
+}
+
+/// Synthetic `available_commands_update` notification advertising
+/// just the host-side `/install` command. Sent on every `session/new`
+/// and `session/load` so `/install` shows up even when no layer ever
+/// emits an `available-commands-update`.
+pub fn synthetic_install_command_update(session_id: &str) -> Option<schema::SessionNotification> {
+    let upd: schema::SessionUpdate = serde_json::from_value(serde_json::json!({
+        "sessionUpdate": "available_commands_update",
+        "availableCommands": [install_command_json()],
+    }))
+    .ok()?;
+    let sid = schema::SessionId::from(session_id.to_string());
+    Some(schema::SessionNotification::new(sid, upd))
+}
+
+/// `PromptResponse` returned by the host-side `/install` command:
+/// always `end_turn` regardless of success (the outcome is reported as
+/// a streamed agent chunk).
+pub fn install_command_response() -> Result<schema::PromptResponse, AcpError> {
+    prompt_response_wit_to_schema(PromptResponse {
+        stop_reason: StopReason::EndTurn,
+    })
+}
+
+/// Build an `agent_message_chunk` text notification for streaming
+/// `/install` progress to the editor.
+pub fn install_progress_chunk(session_id: &str, text: &str) -> Option<schema::SessionNotification> {
+    let block = schema::ContentBlock::Text(schema::TextContent::new(text.to_string()));
+    let chunk = schema::ContentChunk::new(block);
+    let upd = schema::SessionUpdate::AgentMessageChunk(chunk);
+    Some(schema::SessionNotification::new(
+        schema::SessionId::from(session_id.to_string()),
+        upd,
+    ))
+}
+
 // -----------------------------------------------------------------------------
 // Session updates (wasm → editor)
 // -----------------------------------------------------------------------------
@@ -498,7 +546,7 @@ pub fn session_update_wit_to_schema(
             None
         }
         SessionUpdate::AvailableCommandsUpdate(cmds) => {
-            let cmds_json: Vec<serde_json::Value> = cmds
+            let mut cmds_json: Vec<serde_json::Value> = cmds
                 .into_iter()
                 .map(|c| {
                     let mut v = serde_json::json!({
@@ -511,6 +559,16 @@ pub fn session_update_wit_to_schema(
                     v
                 })
                 .collect();
+            // Inject the host-side `/install` command if the chain
+            // didn't already advertise one. The host intercepts
+            // `/install <wit-name>` in `handle_prompt` before
+            // forwarding into the chain.
+            if !cmds_json
+                .iter()
+                .any(|c| c.get("name").and_then(|n| n.as_str()) == Some("install"))
+            {
+                cmds_json.push(install_command_json());
+            }
             let json = serde_json::json!({
                 "sessionUpdate": "available_commands_update",
                 "availableCommands": cmds_json,

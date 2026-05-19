@@ -40,7 +40,9 @@ async fn prompt_with_tool_call_round_trip() {
         .await
         .unwrap();
 
-    host.request("initialize", initialize_params()).await.unwrap();
+    host.request("initialize", initialize_params())
+        .await
+        .unwrap();
     let new_resp = host
         .request("session/new", new_session_params(dir.path()))
         .await
@@ -64,7 +66,10 @@ async fn prompt_with_tool_call_round_trip() {
         .await
         .unwrap();
 
-    let (req_id, params) = host.wait_inbound_request("fs/read_text_file").await.unwrap();
+    let (req_id, params) = host
+        .wait_inbound_request("fs/read_text_file")
+        .await
+        .unwrap();
     assert!(
         params
             .get("path")
@@ -121,7 +126,9 @@ async fn prompt_with_tool_call_relative_path() {
         .await
         .unwrap();
 
-    host.request("initialize", initialize_params()).await.unwrap();
+    host.request("initialize", initialize_params())
+        .await
+        .unwrap();
     let new_resp = host
         .request("session/new", new_session_params(dir.path()))
         .await
@@ -143,7 +150,10 @@ async fn prompt_with_tool_call_relative_path() {
         .await
         .unwrap();
 
-    let (req_id, params) = host.wait_inbound_request("fs/read_text_file").await.unwrap();
+    let (req_id, params) = host
+        .wait_inbound_request("fs/read_text_file")
+        .await
+        .unwrap();
     let path = params
         .get("path")
         .and_then(Value::as_str)
@@ -200,7 +210,9 @@ async fn prompt_with_tool_call_fs_error() {
         .await
         .unwrap();
 
-    host.request("initialize", initialize_params()).await.unwrap();
+    host.request("initialize", initialize_params())
+        .await
+        .unwrap();
     let new_resp = host
         .request("session/new", new_session_params(dir.path()))
         .await
@@ -222,7 +234,10 @@ async fn prompt_with_tool_call_fs_error() {
         .await
         .unwrap();
 
-    let (req_id, _params) = host.wait_inbound_request("fs/read_text_file").await.unwrap();
+    let (req_id, _params) = host
+        .wait_inbound_request("fs/read_text_file")
+        .await
+        .unwrap();
     // Simulate the editor responding with a JSON-RPC error.
     let err_resp = json!({
         "jsonrpc": "2.0",

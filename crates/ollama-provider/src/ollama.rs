@@ -296,7 +296,10 @@ where
             }
         }
     }
-    Ok(ChatTurn { content, tool_calls })
+    Ok(ChatTurn {
+        content,
+        tool_calls,
+    })
 }
 
 // -----------------------------------------------------------------------------

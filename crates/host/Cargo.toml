@@ -25,6 +25,8 @@ serde_json = { workspace = true }
 toml = "0.8"
 base64 = "0.22"
 anyhow = "1.0"
+component-package-manager = { workspace = true }
+dirs = "5"
 
 [dev-dependencies]
 tempfile = "3"

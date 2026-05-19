@@ -18,6 +18,7 @@ use tracing::debug;
 
 use super::gate::NotificationGate;
 use super::require_session;
+use crate::install;
 use crate::translate;
 use crate::wasm::{PromptOutcome, SessionActor, SessionFactory, SessionRegistry, SetModeOutcome};
 
@@ -178,6 +179,19 @@ fn flush_held_notifications(
         // 200ms is comfortably above the inter-task scheduling latency
         // we've observed in Zed and small enough to feel instantaneous.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // Advertise the host-side `/install` command. Sent unconditionally
+        // so it shows up even when no layer ever emits an
+        // `available-commands-update`. Chain-emitted updates have
+        // `/install` appended in `translate::session_update_wit_to_schema`,
+        // so a later chain update won't drop it.
+        if let Some(notif) = translate::synthetic_install_command_update(&session_id) {
+            if let Ok(json) = serde_json::to_string(&notif) {
+                tracing::info!(payload = %json, "→ wire: synthetic /install advertisement");
+            }
+            if let Err(e) = cx_inner.send_notification(notif) {
+                tracing::warn!(error = ?e, "failed to send /install advertisement");
+            }
+        }
         for notif in gate.open_session(&session_id) {
             if let Ok(json) = serde_json::to_string(&notif) {
                 tracing::info!(payload = %json, "→ wire: flushed session/update");
@@ -279,6 +293,7 @@ pub(super) fn handle_select_model(
 /// offender — a single turn can drive many `fs/*` round-trips through the
 /// editor, all of which need the incoming actor free to dequeue replies.
 pub(super) fn handle_prompt(
+    factory: &Arc<SessionFactory>,
     registry: &SessionRegistry,
     req: schema::PromptRequest,
     responder: Responder<schema::PromptResponse>,
@@ -288,6 +303,15 @@ pub(super) fn handle_prompt(
     debug!(session = %session_key, "session/prompt");
     if let Ok(payload) = serde_json::to_string(&req) {
         tracing::info!(session = %session_key, payload = %payload, "← wire: session/prompt");
+    }
+
+    // Host-side `/install <wit-name>` interception. Runs entirely in
+    // the host (not in the wasm chain) because the package manager
+    // can't reach the OCI registry from inside the sandbox in this
+    // design. On match we stream progress as agent message chunks and
+    // resolve the prompt with `stop_reason = end_turn`.
+    if let Some(arg) = parse_install_command(&req.prompt) {
+        return handle_install_command(factory.clone(), session_key, arg, responder, cx);
     }
 
     let handle = require_session(registry, &session_key)?;
@@ -396,5 +420,103 @@ fn warn_if_unlikely_workspace(cwd: &std::path::Path) {
              relative paths may not resolve to anything useful",
             MARKERS.join(", ")
         );
+    }
+}
+
+// -----------------------------------------------------------------------------
+// `/install` host-side slash command
+// -----------------------------------------------------------------------------
+
+/// Parse `/install <wit-name>` out of the prompt's first text block.
+/// Returns the trimmed argument on a match, `None` otherwise. We don't
+/// attempt to handle commands embedded mid-prompt — the editor sends
+/// slash commands as the entire first text block.
+fn parse_install_command(prompt: &[schema::ContentBlock]) -> Option<String> {
+    let first = prompt.iter().find_map(|b| match b {
+        schema::ContentBlock::Text(t) => Some(t.text.as_str()),
+        _ => None,
+    })?;
+    let trimmed = first.trim();
+    let rest = trimmed.strip_prefix("/install")?;
+    // Require a space (or end-of-string for the empty-arg error path).
+    let arg = rest.trim();
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some(arg.to_string())
+}
+
+/// Run a `/install <arg>` command host-side. Streams progress as
+/// `agent_message_chunk` notifications; resolves the prompt with
+/// `stop_reason = end_turn` regardless of success or failure (the
+/// outcome is surfaced as text in the chat, not as an RPC error).
+fn handle_install_command(
+    factory: Arc<SessionFactory>,
+    session_key: String,
+    arg: String,
+    responder: Responder<schema::PromptResponse>,
+    cx: ConnectionTo<Client>,
+) -> Result<(), AcpError> {
+    cx.clone().spawn(async move {
+        let intro = format!("Installing `{arg}`…\n");
+        send_agent_chunk(&cx, &session_key, &intro);
+
+        let result = if arg.is_empty() {
+            Err(anyhow::anyhow!(
+                "missing argument; usage: `/install <namespace>:<package>[@version]`"
+            ))
+        } else {
+            run_install(&factory, &arg).await
+        };
+
+        let msg = match result {
+            Ok(installed) => format!("Installed `{}`.", installed.wit_name),
+            Err(e) => format!("Install failed: {e:#}"),
+        };
+        send_agent_chunk(&cx, &session_key, &msg);
+
+        let resp = match translate::install_command_response() {
+            Ok(r) => r,
+            Err(e) => return responder.respond_with_error(e),
+        };
+        responder.respond(resp)
+    })?;
+    Ok(())
+}
+
+/// Install a WIT-named component and validate that it implements the
+/// host's currently supported `yosh:acp` world. On validation failure
+/// the just-vendored `.wasm` file is removed so a subsequent `/install`
+/// of the same name re-fetches it (in case the package gets rebuilt
+/// upstream against the right WIT version).
+async fn run_install(
+    factory: &SessionFactory,
+    arg: &str,
+) -> anyhow::Result<install::InstalledComponent> {
+    let installed = install::install_wit(arg).await?;
+    let component = match wasmtime::component::Component::from_file(factory.engine(), &installed.path) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&installed.path).await;
+            return Err(anyhow::Error::from(e).context("loading installed component"));
+        }
+    };
+    if let Err(e) = crate::classify_acp_component(factory.engine(), &component) {
+        let _ = tokio::fs::remove_file(&installed.path).await;
+        return Err(e);
+    }
+    Ok(installed)
+}
+
+/// Send a one-shot `agent_message_chunk` text update for `session_key`.
+/// Errors are logged and swallowed — the user-visible failure path is
+/// the eventual `PromptResponse`.
+fn send_agent_chunk(cx: &ConnectionTo<Client>, session_key: &str, text: &str) {
+    let Some(notif) = translate::install_progress_chunk(session_key, text) else {
+        tracing::warn!("failed to build /install progress chunk");
+        return;
+    };
+    if let Err(e) = cx.send_notification(notif) {
+        tracing::warn!(error = ?e, "failed to send /install progress chunk");
     }
 }

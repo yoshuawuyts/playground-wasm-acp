@@ -184,10 +184,8 @@ async fn read_file_run(session_id: &str, args: &Value) -> ToolOutcome {
     let absolute_for_loc = absolute.clone();
     match client::read_text_file(req).await {
         Ok(resp) => ToolOutcome::ok(resp.content).with_location(absolute_for_loc),
-        Err(e) => {
-            ToolOutcome::fail(format!("read_text_file({absolute}): {}", e.message))
-                .with_location(absolute_for_loc)
-        }
+        Err(e) => ToolOutcome::fail(format!("read_text_file({absolute}): {}", e.message))
+            .with_location(absolute_for_loc),
     }
 }
 

@@ -45,7 +45,10 @@ shared = { value = "for-layer" }
         .await
         .unwrap();
 
-    let resp = host.request("initialize", initialize_params()).await.unwrap();
+    let resp = host
+        .request("initialize", initialize_params())
+        .await
+        .unwrap();
     assert!(resp.is_object(), "expected object response, got: {resp}");
     assert!(
         resp.get("protocolVersion").is_some(),

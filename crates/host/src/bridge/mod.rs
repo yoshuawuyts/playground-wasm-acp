@@ -73,6 +73,7 @@ pub async fn run(
     let registry_load = registry.clone();
     let registry_set_mode = registry.clone();
     let registry_select_model = registry.clone();
+    let factory_prompt = factory.clone();
     let registry_prompt = registry.clone();
     let registry_cancel = registry.clone();
     let gate_new = gate.clone();
@@ -136,7 +137,7 @@ pub async fn run(
         )
         .on_receive_request(
             async move |req, responder, cx| {
-                handlers::handle_prompt(&registry_prompt, req, responder, cx)
+                handlers::handle_prompt(&factory_prompt, &registry_prompt, req, responder, cx)
             },
             agent_client_protocol::on_receive_request!(),
         )

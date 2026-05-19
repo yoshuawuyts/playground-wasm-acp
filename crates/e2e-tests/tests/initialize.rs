@@ -20,12 +20,12 @@ async fn initialize_handshake() {
         .await
         .unwrap();
 
-    let resp = host.request("initialize", initialize_params()).await.unwrap();
+    let resp = host
+        .request("initialize", initialize_params())
+        .await
+        .unwrap();
     // Response shape: a JSON object with at least a `protocolVersion`.
-    assert!(
-        resp.is_object(),
-        "expected object response, got: {resp}"
-    );
+    assert!(resp.is_object(), "expected object response, got: {resp}");
     assert!(
         resp.get("protocolVersion").is_some(),
         "missing protocolVersion in: {resp}"

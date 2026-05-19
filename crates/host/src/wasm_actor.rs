@@ -241,9 +241,7 @@ impl AccessorTask<HostState, HasSelf<HostState>> for CmdTask {
                     Bindings::Provider(b) => {
                         b.yosh_acp_agent().call_select_model(accessor, req).await
                     }
-                    Bindings::Layer(b) => {
-                        b.yosh_acp_agent().call_select_model(accessor, req).await
-                    }
+                    Bindings::Layer(b) => b.yosh_acp_agent().call_select_model(accessor, req).await,
                 };
                 let _ = reply.send(res);
             }
@@ -581,12 +579,7 @@ impl WasmActor {
         SetSessionModeRequest,
         ()
     );
-    make_call!(
-        call_select_model,
-        SelectModel,
-        SelectModelRequest,
-        ()
-    );
+    make_call!(call_select_model, SelectModel, SelectModelRequest, ());
     make_call!(call_prompt, Prompt, PromptRequest, PromptResponse);
     make_call_session!(call_close_session, CloseSession, ());
 

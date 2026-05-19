@@ -21,6 +21,7 @@ use wasmtime::{Config, Engine};
 
 mod bridge;
 mod client_impl;
+mod install;
 mod secrets;
 mod secrets_impl;
 mod state;
@@ -89,24 +90,28 @@ use crate::wasm::{SessionFactory, SessionRegistry, Stage, StageKind};
 
 #[derive(Parser)]
 struct Args {
-    /// Path to the terminal ACP **provider** wasm component (the bottom of
-    /// the chain). Required.
+    /// Path or WIT name of the terminal ACP **provider** wasm component
+    /// (the bottom of the chain). Required.
     ///
-    /// Accepts either the legacy positional path (`host my-agent.wasm`)
-    /// or the explicit `--provider` flag. The flag takes precedence.
-    #[arg(long, value_name = "PATH")]
-    provider: Option<PathBuf>,
+    /// Accepts either a filesystem path (`./my-agent.wasm`) or a
+    /// WIT-style package name (`namespace:package[@version]`) — the
+    /// latter is resolved against the local component cache, installing
+    /// from the registry on first use. `--provider` takes precedence
+    /// over the legacy positional argument.
+    #[arg(long, value_name = "PATH|WIT_NAME")]
+    provider: Option<String>,
 
     /// Legacy positional alias for `--provider`. Retained so existing
     /// invocations keep working unchanged.
-    wasm_path: Option<PathBuf>,
+    wasm_path: Option<String>,
 
-    /// Path to a **layer** wasm component to wrap the provider. May be
-    /// passed multiple times; layers are applied editor-side → provider-
-    /// side in the order given (the first `--layer` is the outermost
-    /// stage closest to the host).
-    #[arg(long = "layer", value_name = "PATH")]
-    layers: Vec<PathBuf>,
+    /// Path or WIT name of a **layer** wasm component to wrap the
+    /// provider. May be passed multiple times; layers are applied
+    /// editor-side → provider-side in the order given (the first
+    /// `--layer` is the outermost stage closest to the host).
+    /// Same syntax as `--provider`.
+    #[arg(long = "layer", value_name = "PATH|WIT_NAME")]
+    layers: Vec<String>,
 
     /// Optional path to a file to mirror logs into. The same events that
     /// go to stderr are appended to this file (no ANSI colors). Useful
@@ -170,33 +175,17 @@ fn main() -> Result<()> {
     config.wasm_features(wasmtime::WasmFeatures::CM_ASYNC_STACKFUL, true);
     let engine = Engine::new(&config)?;
 
-    // Resolve provider path: `--provider` takes precedence, fall back to
+    // Resolve provider arg: `--provider` takes precedence, fall back to
     // the legacy positional argument.
-    let provider_path = args
+    let provider_arg = args
         .provider
         .clone()
         .or_else(|| args.wasm_path.clone())
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "missing provider wasm component: pass `--provider <path>` or as positional arg"
+                "missing provider wasm component: pass `--provider <path|wit-name>` or as positional arg"
             )
         })?;
-
-    let provider = load_stage(&engine, &provider_path, StageKind::Provider)?;
-    info!(
-        provider = %provider.component_id,
-        layer_count = args.layers.len(),
-        "chain configuration",
-    );
-
-    let layers: Vec<Stage> = args
-        .layers
-        .iter()
-        .map(|p| load_stage(&engine, p, StageKind::Layer))
-        .collect::<Result<_>>()?;
-    for (idx, stage) in layers.iter().enumerate() {
-        info!(idx, layer = %stage.component_id, "loaded layer");
-    }
 
     let data_root = init_data_root()?;
 
@@ -217,6 +206,29 @@ fn main() -> Result<()> {
 
     let local = LocalSet::new();
     local.block_on(&runtime, async move {
+        // Resolve provider/layer args (filesystem paths pass through;
+        // WIT names install-on-miss against the component cache).
+        let provider_path = install::resolve(&provider_arg)
+            .await
+            .with_context(|| format!("resolving provider `{provider_arg}`"))?;
+        let provider = load_stage(&engine, &provider_path, StageKind::Provider)?;
+        info!(
+            provider = %provider.component_id,
+            layer_count = args.layers.len(),
+            "chain configuration",
+        );
+
+        let mut layers: Vec<Stage> = Vec::with_capacity(args.layers.len());
+        for arg in &args.layers {
+            let p = install::resolve(arg)
+                .await
+                .with_context(|| format!("resolving layer `{arg}`"))?;
+            layers.push(load_stage(&engine, &p, StageKind::Layer)?);
+        }
+        for (idx, stage) in layers.iter().enumerate() {
+            info!(idx, layer = %stage.component_id, "loaded layer");
+        }
+
         let (outbound_tx, outbound_rx) = mpsc::channel(64);
         let factory = Arc::new(SessionFactory::new(
             engine,
@@ -255,6 +267,62 @@ fn load_stage(engine: &Engine, path: &std::path::Path, kind: StageKind) -> Resul
     })
 }
 
+/// ACP WIT package version this host was built against. The on-disk WIT
+/// currently declares `package yosh:acp;` with no version pin, so we
+/// accept components whose `yosh:acp/*` exports carry no `@version`
+/// segment. Bump this when the WIT picks up an explicit version.
+pub(crate) const EXPECTED_ACP_VERSION: Option<&str> = None;
+
+/// Inspect a component's exports to decide whether it's a provider or
+/// a layer (only layers export `yosh:acp/client`) and to verify the
+/// ACP version it was built against matches the host's. Returns the
+/// detected [`StageKind`] on success.
+///
+/// Versioning rule: every `yosh:acp/<iface>` export must carry the
+/// version segment in [`EXPECTED_ACP_VERSION`] (currently `None`,
+/// i.e. unversioned). Any version mismatch is rejected up front rather
+/// than failing later with an obscure linker error.
+pub(crate) fn classify_acp_component(engine: &Engine, component: &Component) -> Result<StageKind> {
+    let ty = component.component_type();
+    let mut exports_agent = false;
+    let mut exports_client = false;
+    for (name, _) in ty.exports(engine) {
+        let Some(rest) = name.strip_prefix("yosh:acp/") else {
+            continue;
+        };
+        // Split `<iface>` from optional `@<version>`.
+        let (iface, version) = match rest.split_once('@') {
+            Some((i, v)) => (i, Some(v)),
+            None => (rest, None),
+        };
+        if version != EXPECTED_ACP_VERSION {
+            anyhow::bail!(
+                "component exports `yosh:acp/{iface}` at version {actual} but this host \
+                 supports ACP {expected}; rebuild the component against the matching \
+                 WIT definition",
+                actual = version.map_or("<unversioned>".to_string(), |v| format!("`{v}`")),
+                expected = EXPECTED_ACP_VERSION
+                    .map_or("<unversioned>".to_string(), |v| format!("`{v}`")),
+            );
+        }
+        match iface {
+            "agent" => exports_agent = true,
+            "client" => exports_client = true,
+            _ => {}
+        }
+    }
+    if !exports_agent {
+        anyhow::bail!(
+            "component does not export `yosh:acp/agent`; not a yosh:acp plugin"
+        );
+    }
+    Ok(if exports_client {
+        StageKind::Layer
+    } else {
+        StageKind::Provider
+    })
+}
+
 /// Reject components whose `agent` import status doesn't match the world
 /// they were passed as. Imports are versioned (`yosh:acp/agent@…`),
 /// so we match on the unversioned prefix to stay forward-compatible with
@@ -265,16 +333,13 @@ fn load_stage(engine: &Engine, path: &std::path::Path, kind: StageKind) -> Resul
 /// import names and may also surface the world's exported interface
 /// types as imports, which would confuse a naive check.
 fn validate_imports(engine: &Engine, component: &Component, kind: StageKind) -> Result<()> {
-    let ty = component.component_type();
-    let exports_client = ty
-        .exports(engine)
-        .any(|(name, _)| name.starts_with("yosh:acp/client"));
-    match (kind, exports_client) {
-        (StageKind::Provider, true) => anyhow::bail!(
+    let detected = classify_acp_component(engine, component)?;
+    match (kind, detected) {
+        (StageKind::Provider, StageKind::Layer) => anyhow::bail!(
             "component exports `yosh:acp/client` (it is a layer); \
              pass it via `--layer` rather than `--provider`",
         ),
-        (StageKind::Layer, false) => anyhow::bail!(
+        (StageKind::Layer, StageKind::Provider) => anyhow::bail!(
             "component does not export `yosh:acp/client` (it is a provider); \
              pass it via `--provider` rather than `--layer`",
         ),

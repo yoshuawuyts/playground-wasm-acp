@@ -36,7 +36,9 @@ async fn shout_toggles_layer_uppercase() {
         .await
         .unwrap();
 
-    host.request("initialize", initialize_params()).await.unwrap();
+    host.request("initialize", initialize_params())
+        .await
+        .unwrap();
 
     // Drive `session/new` *manually* with a chosen id so we can observe
     // the on-wire order of the response and the
@@ -110,7 +112,9 @@ async fn shout_toggles_layer_uppercase() {
         "method": "session/prompt",
         "params": prompt_text_params(&session_id, "/shout"),
     });
-    host.raw_write(&serde_json::to_string(&req).unwrap()).await.unwrap();
+    host.raw_write(&serde_json::to_string(&req).unwrap())
+        .await
+        .unwrap();
     let mut saw_ack = false;
     loop {
         let msg = host.recv_any().await.unwrap();
@@ -133,7 +137,9 @@ async fn shout_toggles_layer_uppercase() {
         "method": "session/prompt",
         "params": prompt_text_params(&session_id, "say hi"),
     });
-    host.raw_write(&serde_json::to_string(&req).unwrap()).await.unwrap();
+    host.raw_write(&serde_json::to_string(&req).unwrap())
+        .await
+        .unwrap();
 
     let mut saw_uppercased = false;
     let mut saw_lowercased = false;
@@ -142,7 +148,9 @@ async fn shout_toggles_layer_uppercase() {
         // Inspect only the text of agent_message_chunk updates so we
         // don't get false positives from session ids, method names, etc.
         if msg.get("method").and_then(Value::as_str) == Some("session/update")
-            && msg.pointer("/params/update/sessionUpdate").and_then(Value::as_str)
+            && msg
+                .pointer("/params/update/sessionUpdate")
+                .and_then(Value::as_str)
                 == Some("agent_message_chunk")
             && let Some(text) = msg
                 .pointer("/params/update/content/text")
