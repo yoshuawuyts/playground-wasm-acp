@@ -20,12 +20,12 @@ use crate::yosh::acp::init::{
     AuthenticateRequest, ClientCapabilities, FsCapabilities, ImplementationInfo, InitializeRequest,
     InitializeResponse,
 };
-use crate::yosh::acp::prompts::{PromptRequest, PromptResponse, SessionUpdate, StopReason};
+use crate::yosh::acp::prompts::{PromptResponse, SessionUpdate, StopReason};
 use crate::yosh::acp::sessions::{
     ComponentSource, EnvVar, HttpHeader, LoadSessionRequest, LoadSessionResponse, McpServer,
     McpServerHttp, McpServerSse, McpServerStdio, NewSessionRequest, NewSessionResponse,
-    SelectModelRequest, SessionId, SessionMode, SessionModeId, SessionModeState, SessionModel,
-    SessionModelState, SetSessionModeRequest,
+    SessionId, SessionMode, SessionModeId, SessionModeState, SessionModel,
+    SessionModelState,
 };
 use crate::yosh::acp::tools::{
     ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
@@ -239,15 +239,6 @@ pub fn load_session_response_wit_to_schema(
 // Session modes
 // -----------------------------------------------------------------------------
 
-pub fn set_session_mode_request_schema_to_wit(
-    req: schema::SetSessionModeRequest,
-) -> SetSessionModeRequest {
-    SetSessionModeRequest {
-        session_id: req.session_id.0.to_string(),
-        mode_id: req.mode_id.0.to_string(),
-    }
-}
-
 /// Empty `SetSessionModeResponse`. Constructed via JSON because the schema
 /// type is `non_exhaustive`.
 pub fn empty_set_session_mode_response() -> Result<schema::SetSessionModeResponse, AcpError> {
@@ -258,15 +249,6 @@ pub fn empty_set_session_mode_response() -> Result<schema::SetSessionModeRespons
 // Session models (UNSTABLE — gated behind `unstable_session_model` on the
 // `agent-client-protocol` crate)
 // -----------------------------------------------------------------------------
-
-pub fn select_model_request_schema_to_wit(
-    req: schema::SetSessionModelRequest,
-) -> SelectModelRequest {
-    SelectModelRequest {
-        session_id: req.session_id.0.to_string(),
-        model_id: req.model_id.0.to_string(),
-    }
-}
 
 pub fn empty_select_model_response() -> Result<schema::SetSessionModelResponse, AcpError> {
     synth("select-model response", serde_json::json!({}))
@@ -403,17 +385,6 @@ const _: fn(SessionModeId) = |_| {};
 // -----------------------------------------------------------------------------
 // Prompt
 // -----------------------------------------------------------------------------
-
-pub fn prompt_request_schema_to_wit(req: schema::PromptRequest) -> PromptRequest {
-    PromptRequest {
-        session_id: req.session_id.0.to_string(),
-        prompt: req
-            .prompt
-            .into_iter()
-            .filter_map(content_block_schema_to_wit)
-            .collect(),
-    }
-}
 
 pub fn prompt_response_wit_to_schema(
     resp: PromptResponse,
@@ -660,7 +631,7 @@ pub fn session_update_wit_to_schema(
 // Content blocks (text-only for MVP; non-text variants are dropped)
 // -----------------------------------------------------------------------------
 
-fn content_block_schema_to_wit(block: schema::ContentBlock) -> Option<ContentBlock> {
+pub fn content_block_schema_to_wit(block: schema::ContentBlock) -> Option<ContentBlock> {
     Some(match block {
         schema::ContentBlock::Text(t) => ContentBlock::Text(TextContent { text: t.text }),
         // Non-text variants ignored for MVP; the wasm guest only handles text.

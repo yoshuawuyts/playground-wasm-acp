@@ -13,6 +13,13 @@ world provider {
     import terminals;
     import tools;
     import prompts;
+    // The `agent` interface defines the `session` resource that
+    // `new-session` etc. return. wit-bindgen emits an import for the
+    // resource's destructor (so the guest can drop its own owned
+    // resource handles internally); the import here registers that
+    // entry point in the host linker. The provider has no downstream
+    // to forward to — the host's linker impl is a noop drop.
+    import agent;
     import filesystem;
     import client;
     import wasmcloud:secrets/store@0.1.0-draft;

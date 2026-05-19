@@ -146,7 +146,10 @@ pub async fn install_wit_with_progress(
     };
     let vendor_dir = vendor_dir_for(&qualified)?;
 
-    report(format!("Pulling `{qualified}` from {}…", reference.registry()));
+    report(format!(
+        "Pulling `{qualified}` from {}…",
+        reference.registry()
+    ));
     let install = if let Some(tx) = progress.clone() {
         // Forward the package manager's own ProgressEvents as
         // human-readable strings on the same channel.

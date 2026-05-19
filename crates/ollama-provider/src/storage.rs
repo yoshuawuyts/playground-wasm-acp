@@ -44,7 +44,7 @@ fn path_for(session_id: &str) -> Option<PathBuf> {
 /// Older session files written before the model picker existed contained a
 /// bare `Vec<Message>`; [`load`] handles both shapes via [`OnDisk`] below.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Session {
+pub struct SessionState {
     pub history: Vec<Message>,
     pub model: String,
     /// Absolute working directory the editor sent on `session/new` /
@@ -61,13 +61,13 @@ pub struct Session {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum OnDisk {
-    Tagged(Session),
+    Tagged(SessionState),
     Legacy(Vec<Message>),
 }
 
 /// Read a session from disk. Returns `Ok(None)` if the file doesn't exist.
 /// Legacy files (bare arrays) load with `model` set to `default_model`.
-pub fn load(session_id: &str, default_model: &str) -> Result<Option<Session>, String> {
+pub fn load(session_id: &str, default_model: &str) -> Result<Option<SessionState>, String> {
     let Some(path) = path_for(session_id) else {
         return Err(format!("invalid session id: {session_id:?}"));
     };
@@ -77,7 +77,7 @@ pub fn load(session_id: &str, default_model: &str) -> Result<Option<Session>, St
                 .map_err(|e| format!("decode {}: {e}", path.display()))?;
             let session = match parsed {
                 OnDisk::Tagged(s) => s,
-                OnDisk::Legacy(history) => Session {
+                OnDisk::Legacy(history) => SessionState {
                     history,
                     model: default_model.to_string(),
                     cwd: String::new(),
@@ -92,7 +92,7 @@ pub fn load(session_id: &str, default_model: &str) -> Result<Option<Session>, St
 
 /// Persist a session to disk. Creates the `sessions/` subdir if missing
 /// and overwrites any existing file.
-pub fn save(session_id: &str, session: &Session) -> Result<(), String> {
+pub fn save(session_id: &str, session: &SessionState) -> Result<(), String> {
     let Some(path) = path_for(session_id) else {
         return Err(format!("invalid session id: {session_id:?}"));
     };

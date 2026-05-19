@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use acp_wasm_sys::layer::exports::yosh::acp::agent::Guest as AgentGuest;
+use acp_wasm_sys::layer::exports::yosh::acp::agent::{Guest as AgentGuest, GuestSession, Session};
 use acp_wasm_sys::layer::exports::yosh::acp::client::Guest as ClientGuest;
 use acp_wasm_sys::layer::yosh::acp::errors::{Error, ErrorCode};
 use acp_wasm_sys::layer::yosh::acp::filesystem::{
@@ -34,12 +34,12 @@ use acp_wasm_sys::layer::yosh::acp::filesystem::{
 use acp_wasm_sys::layer::yosh::acp::init::{
     AuthenticateRequest, InitializeRequest, InitializeResponse,
 };
-use acp_wasm_sys::layer::yosh::acp::prompts::{PromptRequest, PromptResponse, SessionUpdate};
+use acp_wasm_sys::layer::yosh::acp::prompts::{PromptResponse, SessionUpdate};
 use acp_wasm_sys::layer::yosh::acp::sessions::{
     ComponentSource, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, NewSessionRequest, NewSessionResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SelectModelRequest, SessionId, SessionMode, SessionModeState,
-    SetSessionModeRequest,
+    ResumeSessionResponse, SessionId, SessionMode, SessionModeId, SessionModeState,
+    SessionModelId,
 };
 use acp_wasm_sys::layer::yosh::acp::terminals::{
     CreateTerminalRequest, CreateTerminalResponse, TerminalExitStatus, TerminalId, TerminalOutput,
@@ -50,6 +50,71 @@ use acp_wasm_sys::layer::yosh::acp::tools::{
 use acp_wasm_sys::layer::yosh::acp::{agent, client};
 
 struct Layer;
+
+/// Layer-side session resource. Wraps the downstream stage's owned
+/// session handle so dropping the upstream resource cascades the close
+/// downstream, and tracks plan-mode state alongside it.
+pub struct PlanSession {
+    session_id: String,
+    /// Owned import-side resource handle for the downstream session.
+    /// Used by [`GuestSession::cancel`] to forward to the next stage.
+    downstream: agent::Session,
+}
+
+impl Drop for PlanSession {
+    fn drop(&mut self) {
+        with_state(|m| {
+            m.remove(self.session_id.as_str());
+        });
+    }
+}
+
+impl GuestSession for PlanSession {
+    async fn cancel(&self) {
+        self.downstream.cancel().await;
+    }
+
+    async fn prompt(
+        &self,
+        prompt: Vec<acp_wasm_sys::layer::yosh::acp::content::ContentBlock>,
+    ) -> Result<PromptResponse, Error> {
+        self.downstream.prompt(prompt).await
+    }
+
+    async fn set_mode(&self, mode_id: SessionModeId) -> Result<(), Error> {
+        // `plan` is ours: toggle plan-mode state and notify the
+        // client. The host-injected `default` is the canonical
+        // "disengage plan" id; recognise it here and short-circuit
+        // so the request never reaches the provider (which doesn't
+        // advertise any modes). Anything else: turn plan off and
+        // forward downstream.
+        if mode_id == PLAN_MODE_ID {
+            set_plan(&self.session_id, true);
+            client::update_session(
+                self.session_id.clone(),
+                SessionUpdate::CurrentModeUpdate(PLAN_MODE_ID.to_string()),
+            )
+            .await;
+            return Ok(());
+        }
+        if mode_id == HOST_DEFAULT_MODE_ID {
+            set_plan(&self.session_id, false);
+            client::update_session(
+                self.session_id.clone(),
+                SessionUpdate::CurrentModeUpdate(HOST_DEFAULT_MODE_ID.to_string()),
+            )
+            .await;
+            return Ok(());
+        }
+        set_plan(&self.session_id, false);
+        self.downstream.set_mode(mode_id).await
+    }
+
+    async fn select_model(&self, model_id: SessionModelId) -> Result<(), Error> {
+        // Models are entirely the provider's concern; forward verbatim.
+        self.downstream.select_model(model_id).await
+    }
+}
 
 const PLAN_MODE_ID: &str = "plan";
 
@@ -152,6 +217,8 @@ fn synth_reject(req: &RequestPermissionRequest) -> RequestPermissionResponse {
 // -----------------------------------------------------------------------------
 
 impl AgentGuest for Layer {
+    type Session = PlanSession;
+
     async fn initialize(req: InitializeRequest) -> Result<InitializeResponse, Error> {
         agent::initialize(req).await
     }
@@ -160,8 +227,8 @@ impl AgentGuest for Layer {
         agent::authenticate(req).await
     }
 
-    async fn new_session(req: NewSessionRequest) -> Result<NewSessionResponse, Error> {
-        let mut resp = agent::new_session(req).await?;
+    async fn new_session(req: NewSessionRequest) -> Result<(Session, NewSessionResponse), Error> {
+        let (ds_session, mut resp) = agent::new_session(req).await?;
         eprintln!(
             "plan-layer: new_session downstream returned modes={:?}",
             resp.modes.as_ref().map(|s| s.available_modes.len())
@@ -176,12 +243,18 @@ impl AgentGuest for Layer {
             resp.session_id,
         );
         set_plan(&resp.session_id, false);
-        Ok(resp)
+        let session = Session::new(PlanSession {
+            session_id: resp.session_id.clone(),
+            downstream: ds_session,
+        });
+        Ok((session, resp))
     }
 
-    async fn load_session(req: LoadSessionRequest) -> Result<LoadSessionResponse, Error> {
+    async fn load_session(
+        req: LoadSessionRequest,
+    ) -> Result<(Session, LoadSessionResponse), Error> {
         let sid = req.session_id.clone();
-        let mut resp = agent::load_session(req).await?;
+        let (ds_session, mut resp) = agent::load_session(req).await?;
         eprintln!(
             "plan-layer: load_session downstream returned modes={:?} session={}",
             resp.modes.as_ref().map(|s| s.available_modes.len()),
@@ -196,72 +269,33 @@ impl AgentGuest for Layer {
                 .unwrap_or(0),
         );
         set_plan(&sid, false);
-        Ok(resp)
+        let session = Session::new(PlanSession {
+            session_id: sid,
+            downstream: ds_session,
+        });
+        Ok((session, resp))
     }
 
     async fn list_sessions(req: ListSessionsRequest) -> Result<ListSessionsResponse, Error> {
         agent::list_sessions(req).await
     }
 
-    async fn resume_session(req: ResumeSessionRequest) -> Result<ResumeSessionResponse, Error> {
+    async fn resume_session(
+        req: ResumeSessionRequest,
+    ) -> Result<(Session, ResumeSessionResponse), Error> {
         let sid = req.session_id.clone();
-        let mut resp = agent::resume_session(req).await?;
+        let (ds_session, mut resp) = agent::resume_session(req).await?;
         resp.modes = inject_plan_mode(resp.modes);
         // Resume doesn't replay history; leave plan state as-is if we
         // already know about this session, else assume off.
         with_state(|m| {
-            m.entry(sid.to_string()).or_insert(false);
+            m.entry(sid.clone()).or_insert(false);
         });
-        Ok(resp)
-    }
-
-    async fn close_session(session_id: SessionId) -> Result<(), Error> {
-        with_state(|m| {
-            m.remove(session_id.as_str());
+        let session = Session::new(PlanSession {
+            session_id: sid,
+            downstream: ds_session,
         });
-        agent::close_session(session_id).await
-    }
-
-    async fn set_session_mode(req: SetSessionModeRequest) -> Result<(), Error> {
-        // `plan` is ours: toggle plan-mode state and notify the
-        // client. The host-injected `default` is the canonical
-        // "disengage plan" id; recognise it here and short-circuit
-        // so the request never reaches the provider (which doesn't
-        // advertise any modes). Anything else: turn plan off and
-        // forward downstream.
-        if req.mode_id == PLAN_MODE_ID {
-            set_plan(&req.session_id, true);
-            client::update_session(
-                req.session_id.clone(),
-                SessionUpdate::CurrentModeUpdate(PLAN_MODE_ID.to_string()),
-            )
-            .await;
-            return Ok(());
-        }
-        if req.mode_id == HOST_DEFAULT_MODE_ID {
-            set_plan(&req.session_id, false);
-            client::update_session(
-                req.session_id.clone(),
-                SessionUpdate::CurrentModeUpdate(HOST_DEFAULT_MODE_ID.to_string()),
-            )
-            .await;
-            return Ok(());
-        }
-        set_plan(&req.session_id, false);
-        agent::set_session_mode(req).await
-    }
-
-    async fn select_model(req: SelectModelRequest) -> Result<(), Error> {
-        // Models are entirely the provider's concern; forward verbatim.
-        agent::select_model(req).await
-    }
-
-    async fn prompt(req: PromptRequest) -> Result<PromptResponse, Error> {
-        agent::prompt(req).await
-    }
-
-    async fn cancel(session_id: SessionId) {
-        agent::cancel(session_id).await;
+        Ok((session, resp))
     }
 }
 

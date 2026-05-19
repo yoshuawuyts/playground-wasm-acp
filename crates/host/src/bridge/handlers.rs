@@ -20,7 +20,7 @@ use super::gate::NotificationGate;
 use super::require_session;
 use crate::install;
 use crate::translate;
-use crate::wasm::{PromptOutcome, SessionActor, SessionFactory, SessionRegistry, SetModeOutcome};
+use crate::wasm::{PromptOutcome, SessionFactory, SessionRegistry, SetModeOutcome};
 
 pub(super) async fn handle_initialize(
     factory: &SessionFactory,
@@ -28,7 +28,7 @@ pub(super) async fn handle_initialize(
     responder: Responder<schema::InitializeResponse>,
 ) -> Result<(), AcpError> {
     // Throwaway instance: `initialize` carries no session state.
-    let chain = factory
+    let session = factory
         .instantiate()
         .await
         .map_err(|e| translate::anyhow_to_acp("initialize: instantiate", e))?;
@@ -39,8 +39,7 @@ pub(super) async fn handle_initialize(
         "editor capabilities"
     );
     let wit_req = translate::init_request_schema_to_wit(req);
-    let result = chain
-        .head
+    let result = session
         .call_initialize(wit_req)
         .await
         .map_err(|e| translate::trap_to_acp("initialize", e))?;
@@ -55,13 +54,12 @@ pub(super) async fn handle_authenticate(
 ) -> Result<(), AcpError> {
     // Throwaway instance: `authenticate` is stateless; the host doesn't
     // carry credentials between calls.
-    let chain = factory
+    let session = factory
         .instantiate()
         .await
         .map_err(|e| translate::anyhow_to_acp("authenticate: instantiate", e))?;
     let wit_req = translate::authenticate_request_schema_to_wit(req);
-    let result = chain
-        .head
+    let result = session
         .call_authenticate(wit_req)
         .await
         .map_err(|e| translate::trap_to_acp("authenticate", e))?;
@@ -90,22 +88,19 @@ pub(super) async fn handle_new_session(
     }
     resolve_workspace_cwd(&mut req.cwd);
     warn_if_unlikely_workspace(&req.cwd);
-    let chain = factory
+    let session = factory
         .instantiate_for_project(&req.cwd)
         .await
         .map_err(|e| translate::anyhow_to_acp("new-session: instantiate", e))?;
     let wit_req = translate::new_session_request_schema_to_wit(req);
-    let result = chain
-        .head
+    let result = session
         .call_new_session(wit_req)
         .await
         .map_err(|e| translate::trap_to_acp("new-session", e))?;
     let resp = result.map_err(translate::wit_error_to_acp)?;
     debug!(session = %resp.session_id, "session/new");
     let session_id = resp.session_id.clone();
-    let (actor, handle) = SessionActor::new(chain, 8, registry.clone());
-    tokio::task::spawn_local(actor.run());
-    registry.insert(session_id.clone(), handle);
+    registry.insert(session_id.clone(), session);
     let schema_resp = translate::new_session_response_wit_to_schema(resp, factory.component_id())?;
     if let Ok(payload) = serde_json::to_string(&schema_resp) {
         tracing::info!(payload = %payload, "→ wire: session/new response");
@@ -131,20 +126,17 @@ pub(super) async fn handle_load_session(
     let session_key = req.session_id.0.to_string();
     debug!(session = %session_key, "session/load");
     warn_if_unlikely_workspace(&req.cwd);
-    let chain = factory
+    let session = factory
         .instantiate_for_project(&req.cwd)
         .await
         .map_err(|e| translate::anyhow_to_acp("load-session: instantiate", e))?;
     let wit_req = translate::load_session_request_schema_to_wit(req);
-    let result = chain
-        .head
+    let result = session
         .call_load_session(wit_req)
         .await
         .map_err(|e| translate::trap_to_acp("load-session", e))?;
     let resp = result.map_err(translate::wit_error_to_acp)?;
-    let (actor, handle) = SessionActor::new(chain, 8, registry.clone());
-    tokio::task::spawn_local(actor.run());
-    registry.insert(session_key.clone(), handle);
+    registry.insert(session_key.clone(), session);
     responder.respond(translate::load_session_response_wit_to_schema(
         resp,
         factory.component_id(),
@@ -220,17 +212,10 @@ pub(super) fn handle_set_session_mode(
     debug!(session = %session_key, "session/set_mode");
 
     let handle = require_session(registry, &session_key)?;
-    let wit_req = translate::set_session_mode_request_schema_to_wit(req);
+    let mode_id = req.mode_id.0.to_string();
 
     cx.spawn(async move {
-        let outcome = match handle.set_mode(wit_req).await {
-            Ok(o) => o,
-            Err(_) => {
-                let mut e = AcpError::internal_error();
-                e.message = format!("session actor for {session_key} is gone");
-                return responder.respond_with_error(e);
-            }
-        };
+        let outcome = handle.set_mode(mode_id).await;
         match outcome {
             SetModeOutcome::Done => {
                 let resp = match translate::empty_set_session_mode_response() {
@@ -261,17 +246,10 @@ pub(super) fn handle_select_model(
     debug!(session = %session_key, "session/set_model");
 
     let handle = require_session(registry, &session_key)?;
-    let wit_req = translate::select_model_request_schema_to_wit(req);
+    let model_id = req.model_id.0.to_string();
 
     cx.spawn(async move {
-        let outcome = match handle.select_model(wit_req).await {
-            Ok(o) => o,
-            Err(_) => {
-                let mut e = AcpError::internal_error();
-                e.message = format!("session actor for {session_key} is gone");
-                return responder.respond_with_error(e);
-            }
-        };
+        let outcome = handle.select_model(model_id).await;
         match outcome {
             SetModeOutcome::Done => {
                 let resp = match translate::empty_select_model_response() {
@@ -315,17 +293,14 @@ pub(super) fn handle_prompt(
     }
 
     let handle = require_session(registry, &session_key)?;
-    let wit_req = translate::prompt_request_schema_to_wit(req);
+    let wit_prompt: Vec<_> = req
+        .prompt
+        .into_iter()
+        .filter_map(translate::content_block_schema_to_wit)
+        .collect();
 
     cx.spawn(async move {
-        let outcome = match handle.prompt(wit_req).await {
-            Ok(o) => o,
-            Err(_) => {
-                let mut e = AcpError::internal_error();
-                e.message = format!("session actor for {session_key} is gone");
-                return responder.respond_with_error(e);
-            }
-        };
+        let outcome = handle.prompt(wit_prompt).await;
         let resp = match outcome {
             PromptOutcome::Done(r) => match translate::prompt_response_wit_to_schema(r) {
                 Ok(r) => r,

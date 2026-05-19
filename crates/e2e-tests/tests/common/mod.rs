@@ -153,6 +153,12 @@ impl OllamaMock {
         format!("{}/api/chat", self.server.uri())
     }
 
+    /// Expose the underlying [`MockServer`] so tests can mount custom
+    /// `Mock`s (e.g. with `set_delay`).
+    pub fn server(&self) -> &MockServer {
+        &self.server
+    }
+
     /// Stub `GET /api/tags` to return the given model names.
     pub async fn expect_tags(&self, models: &[&str]) {
         let body = json!({

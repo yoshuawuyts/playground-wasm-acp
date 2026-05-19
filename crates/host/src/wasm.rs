@@ -1,21 +1,32 @@
-//! Wasm instance lifecycle and per-session actors.
+//! Wasm chain lifecycle and per-session ownership.
 //!
-//! Each ACP session is owned by a [`SessionActor`] — a `!Send` task hosted
-//! on the top-level `LocalSet` (see [`crate::main`]). The actor owns its
-//! [`ChainHandle`] outright; no shared mutable state. The bridge talks to
-//! it through a [`SessionHandle`].
+//! Every ACP session owns one [`Session`]: a single
+//! [`Store<HostState>`] hosting *all* chain stages (the provider plus
+//! any layers). A [`tokio::sync::Mutex`] around the store serialises
+//! top-level entry points per session — matching the previous
+//! actor-based ordering — while concurrency *within* a single
+//! `run_concurrent` call is provided by wasmtime's async component
+//! model.
 //!
-//! A chain is a vector of [`crate::wasm_actor::WasmActor`]s — one per
-//! stage. Each actor runs a persistent `Store::run_concurrent` event loop
-//! that pulls [`crate::wasm_actor::Cmd`]s off its channel and dispatches
-//! them via `accessor.spawn` so calls execute concurrently inside one
-//! store. The chain head is the outermost stage (the one the bridge
-//! talks to); each stage's host state holds a strong handle to the next
-//! stage and a weak handle to the previous one.
+//! Calls into the chain head are direct:
 //!
-//! Stateless calls (`initialize`, `authenticate`) bypass the registry:
-//! the bridge spins up a throwaway chain via [`SessionFactory`], uses it
-//! once, and drops it.
+//! ```ignore
+//! store.lock().await.run_concurrent(async |a| {
+//!     a.with(|x| x.get().push_stage(head_idx));
+//!     let res = head_bindings.yosh_acp_agent().call_X(a, req).await;
+//!     a.with(|x| x.get().pop_stage());
+//!     res
+//! }).await
+//! ```
+//!
+//! Layers' `agent` imports forward downstream by directly invoking the
+//! next stage's bindings on the same store (no mpsc, no oneshot — see
+//! [`layer_agent::HostWithStore`] below). Same for client-direction
+//! upstream forwarding (see [`crate::client_impl`]).
+//!
+//! Stateless calls (`initialize`, `authenticate`) build a throwaway
+//! `Session` via [`SessionFactory::instantiate`], use it once, and drop
+//! it.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,24 +34,19 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use futures_concurrency::future::Race;
-use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::JoinHandle;
-use tracing::warn;
-use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
+use tokio::sync::{mpsc, watch};
+use wasmtime::component::{Component, HasSelf, Linker, ResourceAny, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 use wasmtime_wasi_http::WasiHttpCtx;
 
 use crate::secrets::SecretsRegistry;
-use crate::state::{ClientSink, DownstreamHandle, HostState, OutboundEvent};
-use crate::wasm_actor::{Bindings, WasmActor};
+use crate::state::{Bindings, ClientSink, HostState, OutboundEvent, StageData, StageKind};
 use crate::yosh::acp::errors::Error;
 use crate::yosh::acp::init::{AuthenticateRequest, InitializeRequest, InitializeResponse};
-use crate::yosh::acp::prompts::{PromptRequest, PromptResponse};
+use crate::yosh::acp::prompts::PromptResponse;
 use crate::yosh::acp::sessions::{
-    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse,
-    SelectModelRequest, SessionId, SetSessionModeRequest,
+    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
 };
 use crate::{Layer, Provider};
 
@@ -49,39 +55,16 @@ use crate::{Layer, Provider};
 // -----------------------------------------------------------------------------
 
 /// One stage in the routing chain: a pre-loaded wasm `Component` plus the
-/// component id used to scope its `/data` preopen.
+/// stable component id used to scope its `/data` preopen and secret
+/// lookups.
 #[derive(Clone)]
 pub struct Stage {
     pub component: Component,
     pub component_id: String,
 }
 
-/// Chain of [`WasmActor`]s. The head is the outermost stage; the join
-/// handles are the per-stage actor tasks. Dropping the `ChainHandle`
-/// closes every stage's command channel (no other senders remain), which
-/// causes each actor loop to exit and the join handles to complete.
-pub struct ChainHandle {
-    pub head: WasmActor,
-    /// Kept for supervision; the actor tasks are detached otherwise.
-    /// Aborted when the chain is dropped (each loop also exits cleanly
-    /// when its channel closes).
-    _joins: Vec<JoinHandle<wasmtime::Result<()>>>,
-}
-
-impl Drop for ChainHandle {
-    fn drop(&mut self) {
-        // The channels close once `head` (and the per-stage HostStates,
-        // which hold the back-references) drop, so the loops exit on
-        // their own. Aborting is a belt-and-braces guard against a
-        // wedged store.
-        for j in &self._joins {
-            j.abort();
-        }
-    }
-}
-
-/// Produces fresh wasm chains on demand. Cheap: instantiation from
-/// pre-loaded `Component`s is microseconds per stage.
+/// Produces fresh single-store chains on demand. Cheap: instantiation
+/// from pre-loaded `Component`s is microseconds per stage.
 pub struct SessionFactory {
     engine: Engine,
     /// Terminal provider stage. Always the bottom of the chain.
@@ -113,13 +96,9 @@ impl SessionFactory {
         }
     }
 
-    /// Build a chain with no `/data` preopen. Used for stateless calls.
-    pub async fn instantiate(&self) -> Result<ChainHandle> {
+    /// Build a session with no `/data` preopen. Used for stateless calls.
+    pub async fn instantiate(&self) -> Result<Session> {
         self.instantiate_chain(None).await
-    }
-
-    fn outbound_sink(&self) -> ClientSink {
-        ClientSink::Outbound(self.outbound.clone())
     }
 
     /// Component id used by the bridge to label session modes.
@@ -127,178 +106,164 @@ impl SessionFactory {
         &self.provider.component_id
     }
 
-    /// Shared wasmtime [`Engine`]. Exposed so the bridge can validate
-    /// newly installed components against the host's ACP world without
-    /// having to spin up a fresh engine.
+    /// Shared wasmtime [`Engine`].
     pub fn engine(&self) -> &Engine {
         &self.engine
     }
 
-    /// Build a chain with `/data` preopened to a project-scoped subdir.
-    pub async fn instantiate_for_project(&self, cwd: &std::path::Path) -> Result<ChainHandle> {
+    /// Build a chain with `/data` preopened to a project-scoped subdir
+    /// (provider-scoped only — layers do not get distinct preopens).
+    pub async fn instantiate_for_project(&self, cwd: &std::path::Path) -> Result<Session> {
         let project_id = project_id_from_cwd(cwd);
         let project_dir = self.data_root.join(&project_id);
         update_project_meta(&project_dir, cwd);
         self.instantiate_chain(Some(&project_dir)).await
     }
 
-    /// Build the chain bottom-up:
+    /// Build the chain into a single shared store.
     ///
-    /// 1. Allocate a [`WasmActor`] channel pair per stage so every stage
-    ///    knows its own and its neighbours' handles before any wasm code
-    ///    runs.
-    /// 2. Build each stage's `Store` + `HostState` with the correct
-    ///    neighbour handles wired in from the start (downstream =
-    ///    strong, upstream = weak).
-    /// 3. Spawn each stage's actor loop on the tokio runtime.
+    /// Wiring (indices into `HostState::stages`):
+    /// - `0` = provider (bottom).
+    /// - `1..=layers.len()` = layers, bottom-up (`stages.last()` is the
+    ///   chain head — the outermost layer or the provider when no
+    ///   layers are configured).
     ///
-    /// The outermost layer's `client_sink` stays as `Outbound` (events
-    /// flow to the bridge); inner stages' sinks are `Upstream(weak)` so
-    /// outbound client calls re-enter the upper layer's exported
-    /// `client` interface.
-    async fn instantiate_chain(
-        &self,
-        project_dir: Option<&std::path::Path>,
-    ) -> Result<ChainHandle> {
-        // Stage 0: provider (bottom). Stage `1..=layers.len()`: layers,
-        // listed bottom-up. So `actors[0]` is the provider, `actors.last()`
-        // is the chain head.
-        let mut actors: Vec<WasmActor> = Vec::with_capacity(self.layers.len() + 1);
-        let mut receivers: Vec<mpsc::Receiver<crate::wasm_actor::Cmd>> =
-            Vec::with_capacity(self.layers.len() + 1);
-        for _ in 0..self.layers.len() + 1 {
-            let (a, rx) = WasmActor::channel();
-            actors.push(a);
-            receivers.push(rx);
-        }
+    /// The provider stage's `downstream_idx = None`; each layer's
+    /// `downstream_idx = Some(i - 1)`. Sinks: the outermost stage's
+    /// sink is `Outbound`; every other stage's sink is
+    /// `Upstream(i + 1)` (one step closer to the editor).
+    async fn instantiate_chain(&self, project_dir: Option<&std::path::Path>) -> Result<Session> {
+        let stage_count = self.layers.len() + 1;
+        let head_idx = stage_count - 1;
 
-        let mut joins: Vec<JoinHandle<wasmtime::Result<()>>> =
-            Vec::with_capacity(self.layers.len() + 1);
-
-        // Build provider stage.
-        {
-            let provider_data = stage_data_dir(project_dir, &self.provider.component_id)?;
-            // If there are layers, the provider's upstream is the
-            // first layer (`actors[1]`); otherwise it talks straight
-            // to the bridge.
-            let client_sink = if self.layers.is_empty() {
-                self.outbound_sink()
+        // Pre-allocate stage metadata with bindings=None.
+        let mut stages: Vec<StageData> = Vec::with_capacity(stage_count);
+        // Stage 0: provider.
+        stages.push(StageData {
+            kind: StageKind::Provider,
+            component_id: self.provider.component_id.clone(),
+            bindings: None,
+            sink: if self.layers.is_empty() {
+                ClientSink::Outbound(self.outbound.clone())
             } else {
-                ClientSink::Upstream(actors[1].downgrade())
-            };
-            let (store, bindings) = build_stage(
-                &self.engine,
-                &self.provider.component,
-                StageKind::Provider,
-                client_sink,
-                provider_data.as_deref(),
-                None,
-                &self.provider.component_id,
-                self.secrets.clone(),
-            )
-            .await?;
-            let rx = receivers.remove(0); // own provider rx
-            joins.push(WasmActor::spawn_loop(store, bindings, rx));
-        }
-
-        // Build each layer, bottom-up. Layers are stored editor-side →
-        // provider-side, so `self.layers.last()` sits directly above the
-        // provider. We iterate in reverse so we visit innermost first
-        // (stage_idx = 1), matching the actor index layout above.
-        for (i, stage) in self.layers.iter().rev().enumerate() {
-            let stage_idx = i + 1; // 1..=layers.len()
-            let data = stage_data_dir(project_dir, &stage.component_id)?;
-            let downstream: DownstreamHandle = actors[stage_idx - 1].clone();
-            // The outermost layer is the last visited (stage_idx ==
-            // layers.len()) and routes client events outward; every
-            // other layer routes them up into the next layer.
-            let client_sink = if stage_idx == self.layers.len() {
-                self.outbound_sink()
+                ClientSink::Upstream(1)
+            },
+            downstream_idx: None,
+        });
+        // Layers, bottom-up.
+        for (i, layer) in self.layers.iter().rev().enumerate() {
+            let idx = i + 1;
+            let sink = if idx == stage_count - 1 {
+                ClientSink::Outbound(self.outbound.clone())
             } else {
-                ClientSink::Upstream(actors[stage_idx + 1].downgrade())
+                ClientSink::Upstream(idx + 1)
             };
-            let (store, bindings) = build_stage(
-                &self.engine,
-                &stage.component,
-                StageKind::Layer,
-                client_sink,
-                data.as_deref(),
-                Some(downstream),
-                &stage.component_id,
-                self.secrets.clone(),
-            )
-            .await?;
-            // We pop the front of `receivers` each iteration; provider
-            // already removed its own. After the loop `receivers` is
-            // empty.
-            let rx = receivers.remove(0);
-            joins.push(WasmActor::spawn_loop(store, bindings, rx));
+            stages.push(StageData {
+                kind: StageKind::Layer,
+                component_id: layer.component_id.clone(),
+                bindings: None,
+                sink,
+                downstream_idx: Some(idx - 1),
+            });
         }
 
-        let head = actors.pop().expect("at least one stage");
-        Ok(ChainHandle {
-            head,
-            _joins: joins,
-        })
+        // Single WasiCtx for the whole session — layers do not want
+        // distinct preopens. The `/data` preopen is provider-scoped.
+        let provider_data = stage_data_dir(project_dir, &self.provider.component_id)?;
+        let mut wasi = WasiCtxBuilder::new();
+        wasi.stderr(crate::wasi_log::TracingStream::new("stderr"))
+            .stdout(crate::wasi_log::TracingStream::new("stdout"))
+            .inherit_network()
+            .inherit_env();
+        if let Some(dir) = provider_data.as_deref() {
+            wasi.preopened_dir(dir, "/data", DirPerms::all(), FilePerms::all())?;
+        }
+
+        let state = HostState {
+            wasi: wasi.build(),
+            http: WasiHttpCtx::new(),
+            table: ResourceTable::new(),
+            stages,
+            stage_stack: Vec::with_capacity(4),
+            secrets: self.secrets.clone(),
+            downstream_sessions: std::collections::HashMap::new(),
+            next_downstream_rep: 1,
+        };
+        let mut store = Store::new(&self.engine, state);
+
+        // Shared linker for every stage. Crucially, this gives every
+        // component instance the *same* resource type identity for
+        // `yosh:acp/agent/session`, so a `ResourceAny` returned from
+        // the provider's `new-session` export can be lifted into the
+        // layer's imported `session` slot via `try_into_resource`
+        // without a "resource type mismatch" trap.
+        let mut linker: Linker<HostState> = Linker::new(&self.engine);
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+        wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
+        wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
+        // `Layer::add_to_linker` is a superset of `Provider::add_to_linker`
+        // (both worlds now import the same set since the provider also
+        // imports `agent` for the `session` resource's destructor), so
+        // calling it once suffices for either component shape.
+        Layer::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |s| s)?;
+
+        // Instantiate each stage's component against the shared linker.
+        for idx in 0..stage_count {
+            let kind = store.data().stages[idx].kind;
+            let component = if idx == 0 {
+                &self.provider.component
+            } else {
+                // `stages[1]` is the bottom-most layer (last in
+                // `self.layers`, since we iterated `rev()` above).
+                &self.layers[self.layers.len() - idx].component
+            };
+            let bindings = match kind {
+                StageKind::Provider => Bindings::Provider(
+                    Provider::instantiate_async(&mut store, component, &linker).await?,
+                ),
+                StageKind::Layer => {
+                    Bindings::Layer(Layer::instantiate_async(&mut store, component, &linker).await?)
+                }
+            };
+            store.data_mut().stages[idx].bindings = Some(Arc::new(bindings));
+        }
+
+        debug_assert_chain_wiring(store.data());
+
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        Ok(Session::new(store, head_idx, cancel_tx))
     }
 }
 
-/// Build a wasm component instance for one stage: configure WASI,
-/// instantiate against the appropriate world's linker, and return the
-/// store + bindings ready to be handed to a [`WasmActor`] loop.
-#[allow(clippy::too_many_arguments)]
-async fn build_stage(
-    engine: &Engine,
-    component: &Component,
-    kind: StageKind,
-    client_sink: ClientSink,
-    data_dir: Option<&std::path::Path>,
-    downstream: Option<DownstreamHandle>,
-    component_id: &str,
-    secrets: Arc<SecretsRegistry>,
-) -> Result<(Store<HostState>, Bindings)> {
-    let mut linker: Linker<HostState> = Linker::new(engine);
-    wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
-    wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
-    wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
-
-    let mut wasi = WasiCtxBuilder::new();
-    wasi.stderr(crate::wasi_log::TracingStream::new("stderr"))
-        .stdout(crate::wasi_log::TracingStream::new("stdout"))
-        .inherit_network()
-        .inherit_env();
-    if let Some(dir) = data_dir {
-        wasi.preopened_dir(dir, "/data", DirPerms::all(), FilePerms::all())?;
+/// Sanity-check the chain wiring after `instantiate_chain` populates
+/// stages. Catches indexing typos at build time instead of as confusing
+/// test failures later.
+fn debug_assert_chain_wiring(state: &HostState) {
+    if !cfg!(debug_assertions) {
+        return;
     }
-    let state = HostState {
-        wasi: wasi.build(),
-        http: WasiHttpCtx::new(),
-        table: ResourceTable::new(),
-        client_sink,
-        downstream,
-        component_id: component_id.to_string(),
-        secrets,
-    };
-    let mut store = Store::new(engine, state);
-
-    let bindings = match kind {
-        StageKind::Provider => {
-            Provider::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |s| s)?;
-            Bindings::Provider(Provider::instantiate_async(&mut store, component, &linker).await?)
+    let mut outbound_count = 0;
+    for (i, s) in state.stages.iter().enumerate() {
+        assert!(s.bindings.is_some(), "stage {i} bindings missing");
+        match &s.sink {
+            ClientSink::Outbound(_) => outbound_count += 1,
+            ClientSink::Upstream(parent) => assert!(
+                *parent < state.stages.len(),
+                "stage {i} upstream points out of range"
+            ),
         }
-        StageKind::Layer => {
-            Layer::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |s| s)?;
-            Bindings::Layer(Layer::instantiate_async(&mut store, component, &linker).await?)
+        match s.kind {
+            StageKind::Provider => assert!(s.downstream_idx.is_none()),
+            StageKind::Layer => {
+                let d = s.downstream_idx.expect("layer downstream_idx");
+                assert!(d < state.stages.len());
+            }
         }
-    };
-    Ok((store, bindings))
-}
-
-/// Which world to instantiate a stage as.
-#[derive(Copy, Clone, Debug)]
-pub enum StageKind {
-    Provider,
-    Layer,
+    }
+    assert_eq!(
+        outbound_count, 1,
+        "exactly one stage must have Outbound sink"
+    );
 }
 
 /// Compute `<project_dir>/<component_id>/` (creating the directory) when a
@@ -355,11 +320,340 @@ fn project_id_from_cwd(cwd: &std::path::Path) -> String {
 }
 
 // -----------------------------------------------------------------------------
+// Session — direct-linked chain
+// -----------------------------------------------------------------------------
+
+/// Outcome of a `prompt` call (matches the previous actor's API so the
+/// bridge handler is unchanged).
+pub enum PromptOutcome {
+    Done(PromptResponse),
+    Cancelled,
+    Wit(Error),
+    Trap(wasmtime::Error),
+}
+
+pub enum SetModeOutcome {
+    Done,
+    Wit(Error),
+    Trap(wasmtime::Error),
+}
+
+/// One ACP session: a shared store hosting every chain stage, plus the
+/// head index and a cancel watch. Cheap to clone (it's an `Arc`).
+#[derive(Clone)]
+pub struct Session {
+    inner: Arc<SessionInner>,
+}
+
+struct SessionInner {
+    /// `tokio::sync::Mutex` so top-level entry points serialise per
+    /// session without blocking the runtime worker thread.
+    store: tokio::sync::Mutex<Store<HostState>>,
+    head_idx: usize,
+    cancel: watch::Sender<bool>,
+    /// Owned chain-head `session` resource handle, populated after
+    /// `new-session` / `load-session` / `resume-session`. Held inside
+    /// the `Store`, so it (and any downstream resources transitively
+    /// owned by guest-side wrappers like `LayerSession.downstream`)
+    /// are cleaned up when this `SessionInner` drops: `Store::drop`
+    /// walks the resource table firing every wasm-side destructor.
+    head_session: Mutex<Option<ResourceAny>>,
+}
+
+impl Session {
+    fn new(store: Store<HostState>, head_idx: usize, cancel: watch::Sender<bool>) -> Self {
+        Self {
+            inner: Arc::new(SessionInner {
+                store: tokio::sync::Mutex::new(store),
+                head_idx,
+                cancel,
+                head_session: Mutex::new(None),
+            }),
+        }
+    }
+
+    pub fn cancel(&self) {
+        let _ = self.inner.cancel.send(true);
+    }
+
+    /// Run `body` inside `store.run_concurrent`, pushing/popping the
+    /// chain-head stage idx around it.
+    async fn run_head<F, R>(&self, body: F) -> wasmtime::Result<R>
+    where
+        F: for<'a> FnOnce(
+                &'a wasmtime::component::Accessor<HostState, HasSelf<HostState>>,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = R> + Send + 'a>>
+            + Send,
+        R: Send,
+    {
+        let head_idx = self.inner.head_idx;
+        let mut store = self.inner.store.lock().await;
+        store
+            .run_concurrent(async move |a| {
+                a.with(|mut x| x.get().push_stage(head_idx));
+                let r = body(a).await;
+                a.with(|mut x| x.get().pop_stage());
+                r
+            })
+            .await
+    }
+
+    pub async fn call_initialize(
+        &self,
+        req: InitializeRequest,
+    ) -> wasmtime::Result<Result<InitializeResponse, Error>> {
+        let head_idx = self.inner.head_idx;
+        self.run_head(|a| {
+            Box::pin(async move {
+                let bindings = a
+                    .with(|mut x| x.get().stages[head_idx].bindings.clone())
+                    .expect("head bindings filled");
+                match &*bindings {
+                    Bindings::Provider(b) => b.yosh_acp_agent().call_initialize(a, req).await,
+                    Bindings::Layer(b) => b.yosh_acp_agent().call_initialize(a, req).await,
+                }
+            })
+        })
+        .await?
+    }
+
+    pub async fn call_authenticate(
+        &self,
+        req: AuthenticateRequest,
+    ) -> wasmtime::Result<Result<(), Error>> {
+        let head_idx = self.inner.head_idx;
+        self.run_head(|a| {
+            Box::pin(async move {
+                let bindings = a
+                    .with(|mut x| x.get().stages[head_idx].bindings.clone())
+                    .expect("head bindings filled");
+                match &*bindings {
+                    Bindings::Provider(b) => b.yosh_acp_agent().call_authenticate(a, req).await,
+                    Bindings::Layer(b) => b.yosh_acp_agent().call_authenticate(a, req).await,
+                }
+            })
+        })
+        .await?
+    }
+
+    pub async fn call_new_session(
+        &self,
+        req: NewSessionRequest,
+    ) -> wasmtime::Result<Result<NewSessionResponse, Error>> {
+        let head_idx = self.inner.head_idx;
+        let inner = self.inner.clone();
+        self.run_head(|a| {
+            Box::pin(async move {
+                let bindings = a
+                    .with(|mut x| x.get().stages[head_idx].bindings.clone())
+                    .expect("head bindings filled");
+                let raw = match &*bindings {
+                    Bindings::Provider(b) => b.yosh_acp_agent().call_new_session(a, req).await,
+                    Bindings::Layer(b) => b.yosh_acp_agent().call_new_session(a, req).await,
+                };
+                raw.map(|r| {
+                    r.map(|(resource, resp)| {
+                        *inner.head_session.lock().unwrap() = Some(resource);
+                        resp
+                    })
+                })
+            })
+        })
+        .await?
+    }
+
+    pub async fn call_load_session(
+        &self,
+        req: LoadSessionRequest,
+    ) -> wasmtime::Result<Result<LoadSessionResponse, Error>> {
+        let head_idx = self.inner.head_idx;
+        let inner = self.inner.clone();
+        self.run_head(|a| {
+            Box::pin(async move {
+                let bindings = a
+                    .with(|mut x| x.get().stages[head_idx].bindings.clone())
+                    .expect("head bindings filled");
+                let raw = match &*bindings {
+                    Bindings::Provider(b) => b.yosh_acp_agent().call_load_session(a, req).await,
+                    Bindings::Layer(b) => b.yosh_acp_agent().call_load_session(a, req).await,
+                };
+                raw.map(|r| {
+                    r.map(|(resource, resp)| {
+                        *inner.head_session.lock().unwrap() = Some(resource);
+                        resp
+                    })
+                })
+            })
+        })
+        .await?
+    }
+
+    pub async fn set_mode(
+        &self,
+        mode_id: crate::yosh::acp::sessions::SessionModeId,
+    ) -> SetModeOutcome {
+        let head_idx = self.inner.head_idx;
+        let head_session = match *self.inner.head_session.lock().unwrap() {
+            Some(any) => any,
+            None => {
+                return SetModeOutcome::Trap(wasmtime::Error::msg(
+                    "set-mode called before new-session",
+                ));
+            }
+        };
+        let res = self
+            .run_head(|a| {
+                Box::pin(async move {
+                    let bindings = a
+                        .with(|mut x| x.get().stages[head_idx].bindings.clone())
+                        .expect("head bindings filled");
+                    match &*bindings {
+                        Bindings::Provider(b) => {
+                            b.yosh_acp_agent()
+                                .session()
+                                .call_set_mode(a, head_session, mode_id)
+                                .await
+                        }
+                        Bindings::Layer(b) => {
+                            b.yosh_acp_agent()
+                                .session()
+                                .call_set_mode(a, head_session, mode_id)
+                                .await
+                        }
+                    }
+                })
+            })
+            .await;
+        match res {
+            Err(e) => SetModeOutcome::Trap(e),
+            Ok(Err(e)) => SetModeOutcome::Trap(e),
+            Ok(Ok(Err(e))) => SetModeOutcome::Wit(e),
+            Ok(Ok(Ok(()))) => SetModeOutcome::Done,
+        }
+    }
+
+    pub async fn select_model(
+        &self,
+        model_id: crate::yosh::acp::sessions::SessionModelId,
+    ) -> SetModeOutcome {
+        let head_idx = self.inner.head_idx;
+        let head_session = match *self.inner.head_session.lock().unwrap() {
+            Some(any) => any,
+            None => {
+                return SetModeOutcome::Trap(wasmtime::Error::msg(
+                    "select-model called before new-session",
+                ));
+            }
+        };
+        let res = self
+            .run_head(|a| {
+                Box::pin(async move {
+                    let bindings = a
+                        .with(|mut x| x.get().stages[head_idx].bindings.clone())
+                        .expect("head bindings filled");
+                    match &*bindings {
+                        Bindings::Provider(b) => {
+                            b.yosh_acp_agent()
+                                .session()
+                                .call_select_model(a, head_session, model_id)
+                                .await
+                        }
+                        Bindings::Layer(b) => {
+                            b.yosh_acp_agent()
+                                .session()
+                                .call_select_model(a, head_session, model_id)
+                                .await
+                        }
+                    }
+                })
+            })
+            .await;
+        match res {
+            Err(e) => SetModeOutcome::Trap(e),
+            Ok(Err(e)) => SetModeOutcome::Trap(e),
+            Ok(Ok(Err(e))) => SetModeOutcome::Wit(e),
+            Ok(Ok(Ok(()))) => SetModeOutcome::Done,
+        }
+    }
+
+    /// Race the chain-head `prompt` call against the cancel watch.
+    /// Dropping the prompt future on cancel releases the store lock and
+    /// wasmtime cancels any in-flight component tasks.
+    pub async fn prompt(
+        &self,
+        prompt: Vec<crate::yosh::acp::content::ContentBlock>,
+    ) -> PromptOutcome {
+        let _ = self.inner.cancel.send_replace(false);
+        let mut cancel_rx = self.inner.cancel.subscribe();
+        cancel_rx.mark_unchanged();
+
+        let head_idx = self.inner.head_idx;
+        let head_session = match *self.inner.head_session.lock().unwrap() {
+            Some(any) => any,
+            None => {
+                return PromptOutcome::Trap(wasmtime::Error::msg(
+                    "prompt called before new-session",
+                ));
+            }
+        };
+        let this = self.clone();
+        let prompt_arm = async move {
+            let res = this
+                .run_head(|a| {
+                    Box::pin(async move {
+                        let bindings = a
+                            .with(|mut x| x.get().stages[head_idx].bindings.clone())
+                            .expect("head bindings filled");
+                        match &*bindings {
+                            Bindings::Provider(b) => {
+                                b.yosh_acp_agent()
+                                    .session()
+                                    .call_prompt(a, head_session, prompt)
+                                    .await
+                            }
+                            Bindings::Layer(b) => {
+                                b.yosh_acp_agent()
+                                    .session()
+                                    .call_prompt(a, head_session, prompt)
+                                    .await
+                            }
+                        }
+                    })
+                })
+                .await;
+            match res {
+                Err(e) => PromptOutcome::Trap(e),
+                Ok(Err(e)) => PromptOutcome::Trap(e),
+                Ok(Ok(Err(e))) => PromptOutcome::Wit(e),
+                Ok(Ok(Ok(r))) => PromptOutcome::Done(r),
+            }
+        };
+        let cancel_arm = async move {
+            let _ = cancel_rx.changed().await;
+            PromptOutcome::Cancelled
+        };
+        (cancel_arm, prompt_arm).race().await
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Registry
 // -----------------------------------------------------------------------------
 
 pub struct SessionRegistry {
-    sessions: Mutex<HashMap<String, SessionHandle>>,
+    // KNOWN LIMITATION: entries are inserted by `session/new` and
+    // `session/load` handlers but never removed — the upstream ACP
+    // protocol at this version has no `session/close` notification
+    // from the editor, and we removed our WIT `close-session` in
+    // favor of the now-resource-based lifecycle. As a result the map
+    // grows monotonically for the lifetime of the host process.
+    // Each entry holds an `Arc<SessionInner>` (one `Store`, a few
+    // `tokio::sync` primitives) which is bounded but not negligible
+    // for hosts churning many sessions. Real fix: either route a
+    // host-side timeout / explicit `/close` command through here, or
+    // wait for ACP to add an editor-driven close signal.
+    sessions: Mutex<HashMap<String, Session>>,
 }
 
 impl SessionRegistry {
@@ -369,202 +663,66 @@ impl SessionRegistry {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, SessionHandle>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Session>> {
         self.sessions.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub fn insert(&self, id: String, handle: SessionHandle) {
-        self.lock().insert(id, handle);
+    pub fn insert(&self, id: String, session: Session) {
+        self.lock().insert(id, session);
     }
 
-    pub fn get(&self, id: &str) -> Option<SessionHandle> {
+    pub fn get(&self, id: &str) -> Option<Session> {
         self.lock().get(id).cloned()
     }
 
     #[allow(dead_code)]
-    pub fn remove(&self, id: &str) -> Option<SessionHandle> {
+    pub fn remove(&self, id: &str) -> Option<Session> {
         self.lock().remove(id)
     }
 }
 
 // -----------------------------------------------------------------------------
-// Session actor
-// -----------------------------------------------------------------------------
-
-pub enum PromptOutcome {
-    Done(PromptResponse),
-    Cancelled,
-    Wit(Error),
-    Trap(wasmtime::Error),
-}
-
-#[derive(Debug)]
-pub enum SessionError {
-    ChannelClosed,
-}
-
-enum Message {
-    Prompt {
-        req: PromptRequest,
-        reply: oneshot::Sender<PromptOutcome>,
-    },
-    SetMode {
-        req: SetSessionModeRequest,
-        reply: oneshot::Sender<SetModeOutcome>,
-    },
-    SelectModel {
-        req: SelectModelRequest,
-        reply: oneshot::Sender<SetModeOutcome>,
-    },
-}
-
-pub enum SetModeOutcome {
-    Done,
-    Wit(Error),
-    Trap(wasmtime::Error),
-}
-
-#[derive(Clone)]
-pub struct SessionHandle {
-    tx: mpsc::Sender<Message>,
-    cancel: watch::Sender<bool>,
-}
-
-impl SessionHandle {
-    pub async fn prompt(&self, req: PromptRequest) -> Result<PromptOutcome, SessionError> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(Message::Prompt { req, reply: tx })
-            .await
-            .map_err(|_| SessionError::ChannelClosed)?;
-        rx.await.map_err(|_| SessionError::ChannelClosed)
-    }
-
-    pub async fn set_mode(
-        &self,
-        req: SetSessionModeRequest,
-    ) -> Result<SetModeOutcome, SessionError> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(Message::SetMode { req, reply: tx })
-            .await
-            .map_err(|_| SessionError::ChannelClosed)?;
-        rx.await.map_err(|_| SessionError::ChannelClosed)
-    }
-
-    pub async fn select_model(
-        &self,
-        req: SelectModelRequest,
-    ) -> Result<SetModeOutcome, SessionError> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(Message::SelectModel { req, reply: tx })
-            .await
-            .map_err(|_| SessionError::ChannelClosed)?;
-        rx.await.map_err(|_| SessionError::ChannelClosed)
-    }
-
-    pub fn cancel(&self) {
-        let _ = self.cancel.send(true);
-    }
-}
-
-/// Per-session actor. Owns the [`ChainHandle`] (so the chain stays alive
-/// for the session's lifetime) and serializes prompts / set-mode messages
-/// onto its single wasm chain head.
-pub struct SessionActor {
-    rx: mpsc::Receiver<Message>,
-    cancel: watch::Receiver<bool>,
-    chain: ChainHandle,
-    #[allow(dead_code)]
-    peers: Arc<SessionRegistry>,
-}
-
-impl SessionActor {
-    pub fn new(
-        chain: ChainHandle,
-        capacity: usize,
-        peers: Arc<SessionRegistry>,
-    ) -> (Self, SessionHandle) {
-        let (tx, rx) = mpsc::channel(capacity);
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        (
-            Self {
-                rx,
-                cancel: cancel_rx,
-                chain,
-                peers,
-            },
-            SessionHandle {
-                tx,
-                cancel: cancel_tx,
-            },
-        )
-    }
-
-    pub async fn run(mut self) {
-        while let Some(msg) = self.rx.recv().await {
-            match msg {
-                Message::Prompt { req, reply } => {
-                    self.cancel.mark_unchanged();
-                    let head = self.chain.head.clone();
-                    let prompt_arm = async {
-                        match head.call_prompt(req).await {
-                            Err(e) => PromptOutcome::Trap(e),
-                            Ok(Err(e)) => PromptOutcome::Wit(e),
-                            Ok(Ok(resp)) => PromptOutcome::Done(resp),
-                        }
-                    };
-                    let cancel_arm = async {
-                        let _ = self.cancel.changed().await;
-                        PromptOutcome::Cancelled
-                    };
-                    let outcome = (cancel_arm, prompt_arm).race().await;
-                    if reply.send(outcome).is_err() {
-                        warn!("prompt caller dropped before response was sent");
-                    }
-                }
-                Message::SetMode { req, reply } => {
-                    let outcome = match self.chain.head.call_set_session_mode(req).await {
-                        Err(e) => SetModeOutcome::Trap(e),
-                        Ok(Err(e)) => SetModeOutcome::Wit(e),
-                        Ok(Ok(())) => SetModeOutcome::Done,
-                    };
-                    if reply.send(outcome).is_err() {
-                        warn!("set-mode caller dropped before response was sent");
-                    }
-                }
-                Message::SelectModel { req, reply } => {
-                    let outcome = match self.chain.head.call_select_model(req).await {
-                        Err(e) => SetModeOutcome::Trap(e),
-                        Ok(Err(e)) => SetModeOutcome::Wit(e),
-                        Ok(Ok(())) => SetModeOutcome::Done,
-                    };
-                    if reply.send(outcome).is_err() {
-                        warn!("select-model caller dropped before response was sent");
-                    }
-                }
-            }
-        }
-    }
-}
-
-// -----------------------------------------------------------------------------
-// agent::Host impl — forwards a layer's imported `agent` to its downstream
+// agent::Host (layer's imported `agent`) — forwards to downstream stage
 // -----------------------------------------------------------------------------
 //
-// The `layer` world imports the `agent` interface; bindgen turns that into
-// a `crate::layer_agent::Host` trait. Each method clones the downstream
-// [`WasmActor`] handle out of host state and sends a `Cmd` on its
-// channel, awaiting the reply. No locks, no nested `run_concurrent`.
+// A layer's `agent` import lands on this trait. The impl reads the
+// currently executing stage's `downstream_idx` and calls the downstream
+// stage's exported `agent` directly on the shared store — no mpsc, no
+// oneshot. Push/pop the stage stack around the call so the linker's
+// host getter returns the correct stage for any nested host imports.
 
 use crate::layer_agent;
 use crate::translate;
+use crate::yosh::acp::sessions::{
+    ListSessionsRequest, ListSessionsResponse, ResumeSessionRequest, ResumeSessionResponse,
+};
+
+/// Stash a downstream `ResourceAny` (returned from the next stage's
+/// exported `agent.session`) in `HostState` and mint a fresh typed
+/// `Resource<layer_agent::Session>` whose `rep` is the stash key.
+///
+/// Cross-instance resource transfer trips wasmtime's resource
+/// type-identity check — even with a shared linker, the provider's
+/// export-side `Session` type identity differs from the layer's
+/// import-side `Session`. The indirection here keeps the downstream
+/// resource alive (held by the host) while presenting the layer with
+/// a freshly-typed handle owned by its own instance.
+fn stash_layer_session(
+    accessor: &wasmtime::component::Accessor<impl Send, HasSelf<HostState>>,
+    any: ResourceAny,
+) -> wasmtime::component::Resource<layer_agent::Session> {
+    let rep = accessor.with(|mut a| a.get().stash_downstream_session(any));
+    wasmtime::component::Resource::new_own(rep)
+}
 
 fn no_downstream<T>(method: &'static str) -> Result<T, Error> {
-    Err(translate::internal_error(&format!(
+    Err(no_downstream_err(method))
+}
+
+fn no_downstream_err(method: &'static str) -> Error {
+    translate::internal_error(&format!(
         "layer called `agent.{method}` but no downstream is configured"
-    )))
+    ))
 }
 
 fn flatten_downstream<T>(
@@ -579,19 +737,82 @@ fn flatten_downstream<T>(
     }
 }
 
+/// Resolve the downstream stage's bindings + idx for a layer's import.
+/// Returns `None` if there's no downstream (host bug — providers don't
+/// import `agent`).
+fn downstream(
+    accessor: &wasmtime::component::Accessor<impl Send, HasSelf<HostState>>,
+) -> Option<(usize, Arc<Bindings>)> {
+    accessor.with(|mut a| {
+        let state = a.get();
+        let stage = state.current_stage();
+        let idx = stage.downstream_idx?;
+        let bindings = state.stages[idx]
+            .bindings
+            .clone()
+            .expect("downstream bindings filled");
+        Some((idx, bindings))
+    })
+}
+
+async fn downstream_call<R, F, Fut>(
+    accessor: &wasmtime::component::Accessor<impl Send, HasSelf<HostState>>,
+    idx: usize,
+    f: F,
+) -> R
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = R>,
+{
+    accessor.with(|mut a| a.get().push_stage(idx));
+    let r = f().await;
+    accessor.with(|mut a| a.get().pop_stage());
+    r
+}
+
 impl layer_agent::Host for HostState {}
 
-impl layer_agent::HostWithStore for wasmtime::component::HasSelf<HostState> {
+/// Host-side `drop` for the layer-imported `agent.session` resource.
+///
+/// Removes the bookkeeping entry from [`HostState::downstream_sessions`].
+/// The stashed `ResourceAny` is then Rust-dropped; the downstream stage's
+/// wasm-side `Drop for ProviderSession`/`PlanSession` fires when the
+/// containing `Store` tears down (i.e. when the host's [`Session`] drops).
+/// In-flight cleanup mid-session isn't possible from here because the
+/// trait method has no `Accessor` to invoke `ResourceAny::resource_drop_async`
+/// on, but the per-session window matches the chain's lifetime anyway:
+/// the layer's own `Session` resource (and its `downstream` field) only
+/// drop when the chain head drops.
+impl layer_agent::HostSession for HostState {
+    async fn drop(
+        &mut self,
+        rep: wasmtime::component::Resource<layer_agent::Session>,
+    ) -> wasmtime::Result<()> {
+        let _ = self.take_downstream_session(rep.rep());
+        Ok(())
+    }
+}
+
+impl layer_agent::HostWithStore for HasSelf<HostState> {
     fn initialize<T: Send>(
         accessor: &wasmtime::component::Accessor<T, Self>,
         req: InitializeRequest,
     ) -> impl ::core::future::Future<Output = Result<InitializeResponse, Error>> + Send {
-        let ds = accessor.with(|mut a| a.get().downstream.clone());
+        let ds = downstream(accessor);
         async move {
-            let Some(ds) = ds else {
+            let Some((idx, bindings)) = ds else {
                 return no_downstream("initialize");
             };
-            flatten_downstream("initialize", ds.call_initialize(req).await)
+            let res = downstream_call(accessor, idx, || async {
+                match &*bindings {
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent().call_initialize(accessor, req).await
+                    }
+                    Bindings::Layer(b) => b.yosh_acp_agent().call_initialize(accessor, req).await,
+                }
+            })
+            .await;
+            flatten_downstream("initialize", res)
         }
     }
 
@@ -599,38 +820,91 @@ impl layer_agent::HostWithStore for wasmtime::component::HasSelf<HostState> {
         accessor: &wasmtime::component::Accessor<T, Self>,
         req: AuthenticateRequest,
     ) -> impl ::core::future::Future<Output = Result<(), Error>> + Send {
-        let ds = accessor.with(|mut a| a.get().downstream.clone());
+        let ds = downstream(accessor);
         async move {
-            let Some(ds) = ds else {
+            let Some((idx, bindings)) = ds else {
                 return no_downstream("authenticate");
             };
-            flatten_downstream("authenticate", ds.call_authenticate(req).await)
+            let res = downstream_call(accessor, idx, || async {
+                match &*bindings {
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent().call_authenticate(accessor, req).await
+                    }
+                    Bindings::Layer(b) => b.yosh_acp_agent().call_authenticate(accessor, req).await,
+                }
+            })
+            .await;
+            flatten_downstream("authenticate", res)
         }
     }
 
     fn new_session<T: Send>(
         accessor: &wasmtime::component::Accessor<T, Self>,
         req: NewSessionRequest,
-    ) -> impl ::core::future::Future<Output = Result<NewSessionResponse, Error>> + Send {
-        let ds = accessor.with(|mut a| a.get().downstream.clone());
+    ) -> impl ::core::future::Future<
+        Output = Result<
+            (
+                wasmtime::component::Resource<layer_agent::Session>,
+                NewSessionResponse,
+            ),
+            Error,
+        >,
+    > + Send {
+        let ds = downstream(accessor);
         async move {
-            let Some(ds) = ds else {
-                return no_downstream("new-session");
+            let Some((idx, bindings)) = ds else {
+                return Err(no_downstream_err("new-session"));
             };
-            flatten_downstream("new-session", ds.call_new_session(req).await)
+            let res: wasmtime::Result<Result<(ResourceAny, NewSessionResponse), Error>> =
+                downstream_call(accessor, idx, || async {
+                    match &*bindings {
+                        Bindings::Provider(b) => {
+                            b.yosh_acp_agent().call_new_session(accessor, req).await
+                        }
+                        Bindings::Layer(b) => {
+                            b.yosh_acp_agent().call_new_session(accessor, req).await
+                        }
+                    }
+                })
+                .await;
+            let (any, resp) = flatten_downstream("new-session", res)?;
+            let resource = stash_layer_session(accessor, any);
+            Ok((resource, resp))
         }
     }
 
     fn load_session<T: Send>(
         accessor: &wasmtime::component::Accessor<T, Self>,
         req: LoadSessionRequest,
-    ) -> impl ::core::future::Future<Output = Result<LoadSessionResponse, Error>> + Send {
-        let ds = accessor.with(|mut a| a.get().downstream.clone());
+    ) -> impl ::core::future::Future<
+        Output = Result<
+            (
+                wasmtime::component::Resource<layer_agent::Session>,
+                LoadSessionResponse,
+            ),
+            Error,
+        >,
+    > + Send {
+        let ds = downstream(accessor);
         async move {
-            let Some(ds) = ds else {
-                return no_downstream("load-session");
+            let Some((idx, bindings)) = ds else {
+                return Err(no_downstream_err("load-session"));
             };
-            flatten_downstream("load-session", ds.call_load_session(req).await)
+            let res: wasmtime::Result<Result<(ResourceAny, LoadSessionResponse), Error>> =
+                downstream_call(accessor, idx, || async {
+                    match &*bindings {
+                        Bindings::Provider(b) => {
+                            b.yosh_acp_agent().call_load_session(accessor, req).await
+                        }
+                        Bindings::Layer(b) => {
+                            b.yosh_acp_agent().call_load_session(accessor, req).await
+                        }
+                    }
+                })
+                .await;
+            let (any, resp) = flatten_downstream("load-session", res)?;
+            let resource = stash_layer_session(accessor, any);
+            Ok((resource, resp))
         }
     }
 
@@ -638,93 +912,229 @@ impl layer_agent::HostWithStore for wasmtime::component::HasSelf<HostState> {
         accessor: &wasmtime::component::Accessor<T, Self>,
         req: ListSessionsRequest,
     ) -> impl ::core::future::Future<Output = Result<ListSessionsResponse, Error>> + Send {
-        let ds = accessor.with(|mut a| a.get().downstream.clone());
+        let ds = downstream(accessor);
         async move {
-            let Some(ds) = ds else {
+            let Some((idx, bindings)) = ds else {
                 return no_downstream("list-sessions");
             };
-            flatten_downstream("list-sessions", ds.call_list_sessions(req).await)
+            let res = downstream_call(accessor, idx, || async {
+                match &*bindings {
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent().call_list_sessions(accessor, req).await
+                    }
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_agent().call_list_sessions(accessor, req).await
+                    }
+                }
+            })
+            .await;
+            flatten_downstream("list-sessions", res)
         }
     }
 
     fn resume_session<T: Send>(
         accessor: &wasmtime::component::Accessor<T, Self>,
         req: ResumeSessionRequest,
-    ) -> impl ::core::future::Future<Output = Result<ResumeSessionResponse, Error>> + Send {
-        let ds = accessor.with(|mut a| a.get().downstream.clone());
+    ) -> impl ::core::future::Future<
+        Output = Result<
+            (
+                wasmtime::component::Resource<layer_agent::Session>,
+                ResumeSessionResponse,
+            ),
+            Error,
+        >,
+    > + Send {
+        let ds = downstream(accessor);
         async move {
-            let Some(ds) = ds else {
-                return no_downstream("resume-session");
+            let Some((idx, bindings)) = ds else {
+                return Err(no_downstream_err("resume-session"));
             };
-            flatten_downstream("resume-session", ds.call_resume_session(req).await)
+            let res: wasmtime::Result<Result<(ResourceAny, ResumeSessionResponse), Error>> =
+                downstream_call(accessor, idx, || async {
+                    match &*bindings {
+                        Bindings::Provider(b) => {
+                            b.yosh_acp_agent().call_resume_session(accessor, req).await
+                        }
+                        Bindings::Layer(b) => {
+                            b.yosh_acp_agent().call_resume_session(accessor, req).await
+                        }
+                    }
+                })
+                .await;
+            let (any, resp) = flatten_downstream("resume-session", res)?;
+            let resource = stash_layer_session(accessor, any);
+            Ok((resource, resp))
         }
     }
+}
 
-    fn close_session<T: Send>(
+/// Host-side `session.cancel` method for the layer-imported `agent.session`
+/// resource. Looks up the downstream `ResourceAny` stashed under the
+/// layer's rep, then invokes the downstream stage's exported
+/// `session.cancel` method on it. Pushes/pops the downstream stage idx
+/// around the call so nested host imports route correctly.
+impl layer_agent::HostSessionWithStore for HasSelf<HostState> {
+    fn cancel<T: Send>(
         accessor: &wasmtime::component::Accessor<T, Self>,
-        session_id: SessionId,
-    ) -> impl ::core::future::Future<Output = Result<(), Error>> + Send {
-        let ds = accessor.with(|mut a| a.get().downstream.clone());
+        self_: wasmtime::component::Resource<layer_agent::Session>,
+    ) -> impl ::core::future::Future<Output = ()> + Send {
+        // Snapshot the downstream stage's bindings + the stashed
+        // `ResourceAny` corresponding to `self_`. Done inside
+        // `accessor.with` so the borrow on `HostState` ends before the
+        // first await.
+        let downstream = accessor.with(|mut a| {
+            let state = a.get();
+            let stage = state.current_stage();
+            let idx = stage.downstream_idx?;
+            let bindings = state.stages[idx].bindings.clone()?;
+            let any = state.downstream_sessions.get(&self_.rep()).copied()?;
+            Some((idx, bindings, any))
+        });
         async move {
-            let Some(ds) = ds else {
-                return no_downstream("close-session");
+            let Some((idx, bindings, any)) = downstream else {
+                tracing::warn!("layer called `session.cancel` but no downstream session is mapped");
+                return;
             };
-            flatten_downstream("close-session", ds.call_close_session(session_id).await)
-        }
-    }
-
-    fn set_session_mode<T: Send>(
-        accessor: &wasmtime::component::Accessor<T, Self>,
-        req: SetSessionModeRequest,
-    ) -> impl ::core::future::Future<Output = Result<(), Error>> + Send {
-        let ds = accessor.with(|mut a| a.get().downstream.clone());
-        async move {
-            let Some(ds) = ds else {
-                return no_downstream("set-session-mode");
-            };
-            flatten_downstream("set-session-mode", ds.call_set_session_mode(req).await)
-        }
-    }
-
-    fn select_model<T: Send>(
-        accessor: &wasmtime::component::Accessor<T, Self>,
-        req: SelectModelRequest,
-    ) -> impl ::core::future::Future<Output = Result<(), Error>> + Send {
-        let ds = accessor.with(|mut a| a.get().downstream.clone());
-        async move {
-            let Some(ds) = ds else {
-                return no_downstream("select-model");
-            };
-            flatten_downstream("select-model", ds.call_select_model(req).await)
+            let res = downstream_call(accessor, idx, || async {
+                match &*bindings {
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent()
+                            .session()
+                            .call_cancel(accessor, any)
+                            .await
+                    }
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_agent()
+                            .session()
+                            .call_cancel(accessor, any)
+                            .await
+                    }
+                }
+            })
+            .await;
+            if let Err(trap) = res {
+                tracing::warn!(error = %trap, "downstream `session.cancel` trapped");
+            }
         }
     }
 
     fn prompt<T: Send>(
         accessor: &wasmtime::component::Accessor<T, Self>,
-        req: PromptRequest,
+        self_: wasmtime::component::Resource<layer_agent::Session>,
+        prompt: Vec<crate::yosh::acp::content::ContentBlock>,
     ) -> impl ::core::future::Future<Output = Result<PromptResponse, Error>> + Send {
-        let ds = accessor.with(|mut a| a.get().downstream.clone());
+        let downstream = accessor.with(|mut a| {
+            let state = a.get();
+            let stage = state.current_stage();
+            let idx = stage.downstream_idx?;
+            let bindings = state.stages[idx].bindings.clone()?;
+            let any = state.downstream_sessions.get(&self_.rep()).copied()?;
+            Some((idx, bindings, any))
+        });
         async move {
-            let Some(ds) = ds else {
-                return no_downstream("prompt");
+            let Some((idx, bindings, any)) = downstream else {
+                return Err(translate::internal_error(
+                    "layer called `session.prompt` but no downstream session is mapped",
+                ));
             };
-            flatten_downstream("prompt", ds.call_prompt(req).await)
+            let res = downstream_call(accessor, idx, || async {
+                match &*bindings {
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent()
+                            .session()
+                            .call_prompt(accessor, any, prompt)
+                            .await
+                    }
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_agent()
+                            .session()
+                            .call_prompt(accessor, any, prompt)
+                            .await
+                    }
+                }
+            })
+            .await;
+            flatten_downstream("session.prompt", res)
         }
     }
 
-    fn cancel<T: Send>(
+    fn set_mode<T: Send>(
         accessor: &wasmtime::component::Accessor<T, Self>,
-        session_id: SessionId,
-    ) -> impl ::core::future::Future<Output = ()> + Send {
-        let ds = accessor.with(|mut a| a.get().downstream.clone());
+        self_: wasmtime::component::Resource<layer_agent::Session>,
+        mode_id: crate::yosh::acp::sessions::SessionModeId,
+    ) -> impl ::core::future::Future<Output = Result<(), Error>> + Send {
+        let downstream = accessor.with(|mut a| {
+            let state = a.get();
+            let stage = state.current_stage();
+            let idx = stage.downstream_idx?;
+            let bindings = state.stages[idx].bindings.clone()?;
+            let any = state.downstream_sessions.get(&self_.rep()).copied()?;
+            Some((idx, bindings, any))
+        });
         async move {
-            let Some(ds) = ds else {
-                tracing::warn!("layer called `agent.cancel` but no downstream is configured");
-                return;
+            let Some((idx, bindings, any)) = downstream else {
+                return Err(translate::internal_error(
+                    "layer called `session.set-mode` but no downstream session is mapped",
+                ));
             };
-            if let Err(trap) = ds.call_cancel(session_id).await {
-                tracing::warn!(error = %trap, "downstream `cancel` trapped");
-            }
+            let res = downstream_call(accessor, idx, || async {
+                match &*bindings {
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent()
+                            .session()
+                            .call_set_mode(accessor, any, mode_id)
+                            .await
+                    }
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_agent()
+                            .session()
+                            .call_set_mode(accessor, any, mode_id)
+                            .await
+                    }
+                }
+            })
+            .await;
+            flatten_downstream("session.set-mode", res)
+        }
+    }
+
+    fn select_model<T: Send>(
+        accessor: &wasmtime::component::Accessor<T, Self>,
+        self_: wasmtime::component::Resource<layer_agent::Session>,
+        model_id: crate::yosh::acp::sessions::SessionModelId,
+    ) -> impl ::core::future::Future<Output = Result<(), Error>> + Send {
+        let downstream = accessor.with(|mut a| {
+            let state = a.get();
+            let stage = state.current_stage();
+            let idx = stage.downstream_idx?;
+            let bindings = state.stages[idx].bindings.clone()?;
+            let any = state.downstream_sessions.get(&self_.rep()).copied()?;
+            Some((idx, bindings, any))
+        });
+        async move {
+            let Some((idx, bindings, any)) = downstream else {
+                return Err(translate::internal_error(
+                    "layer called `session.select-model` but no downstream session is mapped",
+                ));
+            };
+            let res = downstream_call(accessor, idx, || async {
+                match &*bindings {
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent()
+                            .session()
+                            .call_select_model(accessor, any, model_id)
+                            .await
+                    }
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_agent()
+                            .session()
+                            .call_select_model(accessor, any, model_id)
+                            .await
+                    }
+                }
+            })
+            .await;
+            flatten_downstream("session.select-model", res)
         }
     }
 }

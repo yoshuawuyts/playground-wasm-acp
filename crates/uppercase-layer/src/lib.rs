@@ -13,7 +13,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use acp_wasm_sys::layer::exports::yosh::acp::agent::Guest as AgentGuest;
+use acp_wasm_sys::layer::exports::yosh::acp::agent::{Guest as AgentGuest, GuestSession, Session};
 use acp_wasm_sys::layer::exports::yosh::acp::client::Guest as ClientGuest;
 use acp_wasm_sys::layer::yosh::acp::content::{ContentBlock, TextContent};
 use acp_wasm_sys::layer::yosh::acp::errors::Error;
@@ -24,12 +24,12 @@ use acp_wasm_sys::layer::yosh::acp::init::{
     AuthenticateRequest, InitializeRequest, InitializeResponse,
 };
 use acp_wasm_sys::layer::yosh::acp::prompts::{
-    AvailableCommand, PromptRequest, PromptResponse, SessionUpdate, StopReason,
+    AvailableCommand, PromptResponse, SessionUpdate, StopReason,
 };
 use acp_wasm_sys::layer::yosh::acp::sessions::{
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
     NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse,
-    SelectModelRequest, SessionId, SetSessionModeRequest,
+    SessionId, SessionModeId, SessionModelId,
 };
 use acp_wasm_sys::layer::yosh::acp::terminals::{
     CreateTerminalRequest, CreateTerminalResponse, TerminalExitStatus, TerminalId, TerminalOutput,
@@ -38,6 +38,63 @@ use acp_wasm_sys::layer::yosh::acp::tools::{RequestPermissionRequest, RequestPer
 use acp_wasm_sys::layer::yosh::acp::{agent, client};
 
 struct Layer;
+
+/// Layer-side session resource. Wraps the downstream stage's owned
+/// session handle so that dropping the upstream resource cascades the
+/// close downstream.
+pub struct LayerSession {
+    /// The wire-level session id, used when emitting client-direction
+    /// notifications from within session methods.
+    session_id: String,
+    /// Owned import-side resource handle for the downstream session.
+    /// Used by [`GuestSession`] methods to forward to the next stage.
+    downstream: agent::Session,
+}
+
+impl GuestSession for LayerSession {
+    async fn cancel(&self) {
+        self.downstream.cancel().await;
+    }
+
+    async fn prompt(&self, prompt: Vec<ContentBlock>) -> Result<PromptResponse, Error> {
+        eprintln!("uppercase-layer: prompt enter session={}", self.session_id);
+        // Intercept `/shout` to toggle uppercase rewriting for the
+        // remainder of this session.
+        if is_shout_command(&prompt) {
+            let now_on = !SHOUT_ENABLED.fetch_xor(true, Ordering::Relaxed);
+            let msg = if now_on {
+                "CAPS LOCK ENGAGED!"
+            } else {
+                "no more capsie lock :)"
+            };
+            client::update_session(
+                self.session_id.clone(),
+                SessionUpdate::AgentMessageChunk(ContentBlock::Text(TextContent {
+                    text: msg.to_string(),
+                })),
+            )
+            .await;
+            return Ok(PromptResponse {
+                stop_reason: StopReason::EndTurn,
+            });
+        }
+        eprintln!("uppercase-layer: prompt forwarding downstream");
+        let r = self.downstream.prompt(prompt).await;
+        eprintln!(
+            "uppercase-layer: prompt downstream returned ok={}",
+            r.is_ok()
+        );
+        r
+    }
+
+    async fn set_mode(&self, mode_id: SessionModeId) -> Result<(), Error> {
+        self.downstream.set_mode(mode_id).await
+    }
+
+    async fn select_model(&self, model_id: SessionModelId) -> Result<(), Error> {
+        self.downstream.select_model(model_id).await
+    }
+}
 
 /// Whether agent-emitted text should be shouted (uppercased). Toggled
 /// in-process via the `/shout` slash command; not persisted across
@@ -101,6 +158,8 @@ fn is_shout_command(blocks: &[ContentBlock]) -> bool {
 // -----------------------------------------------------------------------------
 
 impl AgentGuest for Layer {
+    type Session = LayerSession;
+
     async fn initialize(req: InitializeRequest) -> Result<InitializeResponse, Error> {
         agent::initialize(req).await
     }
@@ -109,75 +168,44 @@ impl AgentGuest for Layer {
         agent::authenticate(req).await
     }
 
-    async fn new_session(req: NewSessionRequest) -> Result<NewSessionResponse, Error> {
-        let resp = agent::new_session(req).await?;
+    async fn new_session(req: NewSessionRequest) -> Result<(Session, NewSessionResponse), Error> {
+        let (ds_session, resp) = agent::new_session(req).await?;
         advertise_commands(&resp.session_id).await;
-        Ok(resp)
+        let session = Session::new(LayerSession {
+            session_id: resp.session_id.clone(),
+            downstream: ds_session,
+        });
+        Ok((session, resp))
     }
 
-    async fn load_session(req: LoadSessionRequest) -> Result<LoadSessionResponse, Error> {
+    async fn load_session(
+        req: LoadSessionRequest,
+    ) -> Result<(Session, LoadSessionResponse), Error> {
         let sid = req.session_id.clone();
-        let resp = agent::load_session(req).await?;
+        let (ds_session, resp) = agent::load_session(req).await?;
         advertise_commands(&sid).await;
-        Ok(resp)
+        let session = Session::new(LayerSession {
+            session_id: sid,
+            downstream: ds_session,
+        });
+        Ok((session, resp))
     }
 
     async fn list_sessions(req: ListSessionsRequest) -> Result<ListSessionsResponse, Error> {
         agent::list_sessions(req).await
     }
 
-    async fn resume_session(req: ResumeSessionRequest) -> Result<ResumeSessionResponse, Error> {
+    async fn resume_session(
+        req: ResumeSessionRequest,
+    ) -> Result<(Session, ResumeSessionResponse), Error> {
         let sid = req.session_id.clone();
-        let resp = agent::resume_session(req).await?;
+        let (ds_session, resp) = agent::resume_session(req).await?;
         advertise_commands(&sid).await;
-        Ok(resp)
-    }
-
-    async fn close_session(session_id: SessionId) -> Result<(), Error> {
-        agent::close_session(session_id).await
-    }
-
-    async fn set_session_mode(req: SetSessionModeRequest) -> Result<(), Error> {
-        agent::set_session_mode(req).await
-    }
-
-    async fn select_model(req: SelectModelRequest) -> Result<(), Error> {
-        agent::select_model(req).await
-    }
-
-    async fn prompt(req: PromptRequest) -> Result<PromptResponse, Error> {
-        eprintln!("uppercase-layer: prompt enter session={}", req.session_id);
-        // Intercept `/shout` to toggle uppercase rewriting for the
-        // remainder of this session.
-        if is_shout_command(&req.prompt) {
-            let now_on = !SHOUT_ENABLED.fetch_xor(true, Ordering::Relaxed);
-            let msg = if now_on {
-                "CAPS LOCK ENGAGED!"
-            } else {
-                "no more capsie lock :)"
-            };
-            client::update_session(
-                req.session_id.clone(),
-                SessionUpdate::AgentMessageChunk(ContentBlock::Text(TextContent {
-                    text: msg.to_string(),
-                })),
-            )
-            .await;
-            return Ok(PromptResponse {
-                stop_reason: StopReason::EndTurn,
-            });
-        }
-        eprintln!("uppercase-layer: prompt forwarding downstream");
-        let r = agent::prompt(req).await;
-        eprintln!(
-            "uppercase-layer: prompt downstream returned ok={}",
-            r.is_ok()
-        );
-        r
-    }
-
-    async fn cancel(session_id: SessionId) {
-        agent::cancel(session_id).await;
+        let session = Session::new(LayerSession {
+            session_id: sid,
+            downstream: ds_session,
+        });
+        Ok((session, resp))
     }
 }
 

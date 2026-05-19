@@ -29,7 +29,6 @@ mod translate;
 mod utils;
 mod wasi_log;
 mod wasm;
-mod wasm_actor;
 
 // Generate wasmtime component bindings for both ACP worlds.
 //
@@ -74,6 +73,7 @@ mod layer_bindings {
             "yosh:acp/tools": crate::yosh::acp::tools,
             "yosh:acp/terminals": crate::yosh::acp::terminals,
             "yosh:acp/filesystem": crate::yosh::acp::filesystem,
+            "yosh:acp/agent": crate::yosh::acp::agent,
             "yosh:acp/client": crate::yosh::acp::client,
             "wasmcloud:secrets/store@0.1.0-draft": crate::wasmcloud::secrets::store,
             "wasmcloud:secrets/reveal@0.1.0-draft": crate::wasmcloud::secrets::reveal,
@@ -81,12 +81,18 @@ mod layer_bindings {
     });
 }
 
+/// `Host` trait for the layer's *imported* `agent` interface. Since the
+/// `with:` clause on the layer bindgen shares this interface with the
+/// provider's top-level bindgen (both worlds import `agent` for the
+/// `session` resource's destructor), `crate::layer_agent` and
+/// `crate::yosh::acp::agent` point to the same module. A single
+/// `HostWithStore` impl on `HasSelf<HostState>` therefore satisfies
+/// both worlds' linkers.
+pub use crate::yosh::acp::agent as layer_agent;
 pub use layer_bindings::Layer;
-/// `Host` trait for the layer's *imported* `agent` interface — implemented
-/// on `HostState` in [`crate::wasm`] to forward downstream.
-pub use layer_bindings::yosh::acp::agent as layer_agent;
 
-use crate::wasm::{SessionFactory, SessionRegistry, Stage, StageKind};
+use crate::state::StageKind;
+use crate::wasm::{SessionFactory, SessionRegistry, Stage};
 
 #[derive(Parser)]
 struct Args {
@@ -302,8 +308,7 @@ pub(crate) fn classify_acp_component(engine: &Engine, component: &Component) -> 
             Some((i, v)) => (i, Some(v)),
             None => (rest, None),
         };
-        let version_label =
-            version_str.map_or(" (unversioned)".to_string(), |v| format!("@{v}"));
+        let version_label = version_str.map_or(" (unversioned)".to_string(), |v| format!("@{v}"));
         let parsed = version_str
             .map(semver::Version::parse)
             .transpose()

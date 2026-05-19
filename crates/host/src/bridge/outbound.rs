@@ -27,17 +27,28 @@ pub(super) async fn run_outbound_drain(
 ) -> Result<(), AcpError> {
     while let Some(event) = outbound_rx.recv().await {
         match event {
-            OutboundEvent::SessionUpdate(notif) => {
+            OutboundEvent::SessionUpdate(notif, ack) => {
                 // Hold notifications for sessions whose `session/new`
                 // (or `session/load`) response hasn't been emitted to
                 // the editor yet. Otherwise the editor receives the
                 // notification before learning about the session id
                 // and silently drops it.
+                //
+                // Fire the ack only AFTER the notification is either
+                // forwarded (`cx.send_notification` enqueued) or held
+                // in the gate \u2014 so the wasm-side caller of
+                // `client.update-session` doesn't proceed until the
+                // notification is committed to delivery. This
+                // preserves the notification-before-response ordering
+                // that callers rely on when an import is awaited just
+                // before a method return.
                 if let Some(notif) = gate.admit(notif)
                     && !forward_session_update(&cx, notif)
                 {
+                    let _ = ack.send(());
                     break;
                 }
+                let _ = ack.send(());
             }
             OutboundEvent::ReadTextFile(req, reply) => {
                 forward_read_text_file(&cx, req, reply);

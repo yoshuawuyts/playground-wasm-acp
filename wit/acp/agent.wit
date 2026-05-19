@@ -8,15 +8,58 @@ interface agent {
     use errors.{error};
     use init.{initialize-request, initialize-response, authenticate-request};
     use sessions.{
-        session-id,
+        session-id, session-mode-id, session-model-id,
         new-session-request, new-session-response,
         load-session-request, load-session-response,
         list-sessions-request, list-sessions-response,
         resume-session-request, resume-session-response,
-        set-session-mode-request,
-        select-model-request,
     };
-    use prompts.{prompt-request, prompt-response};
+    use content.{content-block};
+    use prompts.{prompt-response};
+
+    /// Opaque handle to an active session. Returned (as an owned
+    /// resource) from `new-session` / `load-session` / `resume-session`;
+    /// dropping the handle closes the session — there is no separate
+    /// `close-session` method.
+    ///
+    /// The wire-level session identifier is still a string (see
+    /// [`session-id`] in `sessions`); the resource is internal plumbing
+    /// tying per-session lifetime to the chain head's exported resource
+    /// table.
+    resource session {
+        /// Send a user prompt and run a prompt turn to completion.
+        /// Maps to the JSON-RPC `session/prompt` method.
+        ///
+        /// During execution, the agent will:
+        ///   - Stream progress via the client's `update-session`.
+        ///   - Optionally call `request-permission`, `read-text-file`,
+        ///     `write-text-file`, and the terminal methods.
+        ///
+        /// See: <https://agentclientprotocol.com/protocol/prompt-turn>
+        prompt: async func(prompt: list<content-block>) -> result<prompt-response, error>;
+
+        /// Cancel any in-flight prompt turn for this session. Modelled
+        /// in JSON-RPC as the `session/cancel` notification (no
+        /// response). The agent MUST eventually return
+        /// `stop-reason::cancelled` from the in-flight `prompt` call.
+        ///
+        /// See: <https://agentclientprotocol.com/protocol/prompt-turn#cancellation>
+        cancel: async func();
+
+        /// Switch the active mode for this session. Maps to the
+        /// JSON-RPC `session/set_mode` method. The `mode-id` MUST be
+        /// one of the modes returned in `new-session-response.modes`
+        /// or `load-session-response.modes`.
+        ///
+        /// See: <https://agentclientprotocol.com/protocol/session-modes>
+        set-mode: async func(mode-id: session-mode-id) -> result<_, error>;
+
+        /// Switch the active model for this session. **UNSTABLE**.
+        /// Maps to the JSON-RPC `session/set_model` method. The
+        /// `model-id` MUST be one of the models returned in
+        /// `new-session-response.models`.
+        select-model: async func(model-id: session-model-id) -> result<_, error>;
+    }
 
     /// Establish the connection. Negotiate protocol version, exchange
     /// capabilities, and identify implementations. Maps to the JSON-RPC
@@ -37,18 +80,24 @@ interface agent {
     /// Create a fresh conversation session. Must be called after
     /// `initialize`. Maps to the JSON-RPC `session/new` method.
     ///
+    /// Returns an owned [`session`] resource alongside the response
+    /// record. The host (or upstream layer) MUST hold the resource for
+    /// the session's lifetime; dropping it closes the session.
+    ///
     /// See: <https://agentclientprotocol.com/protocol/session-setup#creating-a-session>
-    new-session: async func(req: new-session-request) -> result<new-session-response, error>;
+    new-session: async func(req: new-session-request) -> result<tuple<session, new-session-response>, error>;
 
     /// Resume a previous session. Only available when
     /// `agent-capabilities.load-session` is true. Maps to the JSON-RPC
     /// `session/load` method.
     ///
     /// The agent will replay history via `update-session` notifications on
-    /// the client interface before this call returns.
+    /// the client interface before this call returns. Returns an owned
+    /// [`session`] resource paired with the response; drop the resource
+    /// to close the session.
     ///
     /// See: <https://agentclientprotocol.com/protocol/session-setup#loading-sessions>
-    load-session: async func(req: load-session-request) -> result<load-session-response, error>;
+    load-session: async func(req: load-session-request) -> result<tuple<session, load-session-response>, error>;
 
     /// Discover existing sessions known to the agent. Only available when
     /// `agent-capabilities.session-capabilities.list` is true. Maps to the
@@ -65,46 +114,17 @@ interface agent {
     /// the JSON-RPC `session/resume` method.
     ///
     /// Unlike `load-session`, the agent MUST NOT stream history via
-    /// `update-session` before responding.
+    /// `update-session` before responding. Returns an owned [`session`]
+    /// resource paired with the response; drop it to close.
     ///
     /// See: <https://agentclientprotocol.com/protocol/session-setup#resuming-sessions>
-    resume-session: async func(req: resume-session-request) -> result<resume-session-response, error>;
+    resume-session: async func(req: resume-session-request) -> result<tuple<session, resume-session-response>, error>;
 
-    /// Cancel any ongoing work for a session and free its resources. Only
-    /// available when `agent-capabilities.session-capabilities.close` is
-    /// true. Maps to the JSON-RPC `session/close` method.
-    ///
-    /// See: <https://agentclientprotocol.com/protocol/session-setup#closing-active-sessions>
-    close-session: async func(session-id: session-id) -> result<_, error>;
+    // NOTE: `close-session` was removed. Closing a session is now done by
+    // dropping the owned [`session`] resource returned from `new-session`
+    // / `load-session` / `resume-session`. This matches the JSON-RPC
+    // `session/close` method, which the host bridges by dropping the
+    // host-side resource.
 
-    /// Switch the active mode for a session. Maps to the JSON-RPC
-    /// `session/set_mode` method. The `mode-id` MUST be one of the modes
-    /// returned in `new-session-response.modes` or `load-session-response.modes`.
-    ///
-    /// See: <https://agentclientprotocol.com/protocol/session-modes>
-    set-session-mode: async func(req: set-session-mode-request) -> result<_, error>;
-
-    /// Switch the active model for a session. **UNSTABLE**. Maps to the
-    /// JSON-RPC `session/set_model` method. The `model-id` MUST be one
-    /// of the models returned in `new-session-response.models`.
-    select-model: async func(req: select-model-request) -> result<_, error>;
-
-    /// Send a user prompt and run a prompt turn to completion. Maps to the
-    /// JSON-RPC `session/prompt` method.
-    ///
-    /// During execution, the agent will:
-    ///   - Stream progress via the client's `update-session`.
-    ///   - Optionally call `request-permission`, `read-text-file`,
-    ///     `write-text-file`, and the terminal methods.
-    ///
-    /// See: <https://agentclientprotocol.com/protocol/prompt-turn>
-    prompt: async func(req: prompt-request) -> result<prompt-response, error>;
-
-    /// Cancel an ongoing prompt turn. Modelled in JSON-RPC as the
-    /// `session/cancel` notification (no response). The agent MUST
-    /// eventually return `stop-reason::cancelled` from the in-flight
-    /// `prompt` call.
-    ///
-    /// See: <https://agentclientprotocol.com/protocol/prompt-turn#cancellation>
-    cancel: async func(session-id: session-id);
+    // NOTE: `prompt`, `cancel`, `set-mode`, and `select-model` moved\n    // onto the [`session`] resource above. The wire-level\n    // `session/prompt`, `session/cancel`, `session/set_mode`, and\n    // `session/set_model` JSON-RPC methods are bridged in the host by\n    // looking up the session's resource handle and dispatching to its\n    // method.
 }

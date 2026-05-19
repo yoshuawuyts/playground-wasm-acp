@@ -38,9 +38,12 @@ fn map_error(e: SecretsError) -> WitSecretsError {
 
 impl StoreHost for HostState {
     async fn get(&mut self, key: String) -> Result<Resource<Secret>, WitSecretsError> {
+        // Scope lookups by the *currently executing* stage's component id
+        // (top of [`HostState::stage_stack`]).
+        let component_id = self.current_stage().component_id.clone();
         let value = self
             .secrets
-            .resolve(&self.component_id, &key)
+            .resolve(&component_id, &key)
             .await
             .map_err(map_error)?;
         let entry = self
