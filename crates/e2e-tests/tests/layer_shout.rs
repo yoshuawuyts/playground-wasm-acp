@@ -87,11 +87,15 @@ async fn shout_toggles_layer_uppercase() {
                 .pointer("/params/update/availableCommands")
                 .and_then(Value::as_array)
                 .unwrap();
-            assert!(
-                cmds.iter()
-                    .any(|c| c.get("name").and_then(Value::as_str) == Some("shout")),
-                "expected `/shout` in available_commands: {cmds:?}"
-            );
+            // The host emits a synthetic `/install`-only advertisement
+            // before flushing the layer's own commands update; skip
+            // updates that don't carry `/shout` and keep waiting.
+            let has_shout = cmds
+                .iter()
+                .any(|c| c.get("name").and_then(Value::as_str) == Some("shout"));
+            if !has_shout {
+                continue;
+            }
             saw_commands = true;
             if saw_response {
                 break;

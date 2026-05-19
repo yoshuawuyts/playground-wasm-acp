@@ -482,12 +482,66 @@ pub fn install_command_response() -> Result<schema::PromptResponse, AcpError> {
     })
 }
 
-/// Build an `agent_message_chunk` text notification for streaming
-/// `/install` progress to the editor.
-pub fn install_progress_chunk(session_id: &str, text: &str) -> Option<schema::SessionNotification> {
-    let block = schema::ContentBlock::Text(schema::TextContent::new(text.to_string()));
-    let chunk = schema::ContentChunk::new(block);
-    let upd = schema::SessionUpdate::AgentMessageChunk(chunk);
+// -----------------------------------------------------------------------------
+// `/install` progress as an ACP tool call
+// -----------------------------------------------------------------------------
+//
+// Modeled as a single tool call (kind=fetch) with status transitions
+// and content updates so editors render it as a progress card with a
+// status pill, instead of appending plain lines to the chat transcript.
+
+/// Initial `tool_call` notification: status=in-progress, kind=fetch.
+/// `text` becomes the first content block (subsequent
+/// [`install_tool_call_update`] calls *replace* the content list).
+pub fn install_tool_call_start(
+    session_id: &str,
+    tool_call_id: &str,
+    title: &str,
+    text: &str,
+) -> Option<schema::SessionNotification> {
+    let json = serde_json::json!({
+        "sessionUpdate": "tool_call",
+        "toolCallId": tool_call_id,
+        "title": title,
+        "kind": "fetch",
+        "status": "in_progress",
+        "content": [text_content_item(text)],
+    });
+    build_session_notification(session_id, json)
+}
+
+/// `tool_call_update` notification. `status` is `"in_progress"`,
+/// `"completed"`, or `"failed"`. `text`, when set, replaces the
+/// content list with a single text block.
+pub fn install_tool_call_update(
+    session_id: &str,
+    tool_call_id: &str,
+    status: &str,
+    text: Option<&str>,
+) -> Option<schema::SessionNotification> {
+    let mut json = serde_json::json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": tool_call_id,
+        "status": status,
+    });
+    if let Some(t) = text {
+        json["content"] = serde_json::json!([text_content_item(t)]);
+    }
+    build_session_notification(session_id, json)
+}
+
+fn text_content_item(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "content",
+        "content": { "type": "text", "text": text },
+    })
+}
+
+fn build_session_notification(
+    session_id: &str,
+    update_json: serde_json::Value,
+) -> Option<schema::SessionNotification> {
+    let upd: schema::SessionUpdate = serde_json::from_value(update_json).ok()?;
     Some(schema::SessionNotification::new(
         schema::SessionId::from(session_id.to_string()),
         upd,

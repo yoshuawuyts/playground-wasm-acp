@@ -100,16 +100,39 @@ pub struct InstalledComponent {
 /// its `.wasm` file. Always goes through the package manager: cache
 /// hits are cheap (cacache + reflink) and a no-op on disk.
 pub async fn install_wit(wit_name: &str) -> Result<InstalledComponent> {
+    install_wit_with_progress(wit_name, None).await
+}
+
+/// Like [`install_wit`] but emits coarse phase messages
+/// ("Syncing registry…", "Pulling…", byte counts, …) on `progress`
+/// when set. Used by the host-side `/install` command to drive an
+/// ACP tool-call progress card. Failures on the channel are ignored
+/// so progress reporting never blocks the install itself.
+pub async fn install_wit_with_progress(
+    wit_name: &str,
+    progress: Option<tokio::sync::mpsc::Sender<String>>,
+) -> Result<InstalledComponent> {
     if !looks_like_wit_name(wit_name) {
         return Err(anyhow!(
             "`{wit_name}` is not a WIT-style name (expected `namespace:package[@version]`)"
         ));
     }
+    let report = |msg: String| {
+        if let Some(tx) = progress.as_ref() {
+            let _ = tx.try_send(msg);
+        }
+    };
+
+    report("Opening component cache…".to_string());
     let mgr = manager().await?;
+
+    report("Syncing package index…".to_string());
     // Best-effort: refresh the local known-package index from the
     // meta-registry so freshly published WIT names resolve. Failures
     // are logged but don't block resolution against any cached index.
     sync_registry(&mgr).await;
+
+    report(format!("Resolving `{wit_name}`…"));
     let reference = resolve_wit_name(wit_name, &mgr)
         .await
         .with_context(|| format!("resolving WIT name `{wit_name}`"))?;
@@ -122,10 +145,32 @@ pub async fn install_wit(wit_name: &str) -> Result<InstalledComponent> {
         None => base.to_string(),
     };
     let vendor_dir = vendor_dir_for(&qualified)?;
-    let install = mgr
-        .install(reference, &vendor_dir)
-        .await
-        .with_context(|| format!("installing `{wit_name}`"))?;
+
+    report(format!("Pulling `{qualified}` from {}…", reference.registry()));
+    let install = if let Some(tx) = progress.clone() {
+        // Forward the package manager's own ProgressEvents as
+        // human-readable strings on the same channel.
+        let (pe_tx, mut pe_rx) =
+            tokio::sync::mpsc::channel::<component_package_manager::ProgressEvent>(32);
+        let forward = tokio::spawn(async move {
+            let mut total: Option<u64> = None;
+            while let Some(ev) = pe_rx.recv().await {
+                if let Some(msg) = format_progress(&ev, &mut total) {
+                    let _ = tx.try_send(msg);
+                }
+            }
+        });
+        let result = mgr
+            .install_with_progress(reference, &vendor_dir, &pe_tx)
+            .await;
+        drop(pe_tx);
+        let _ = forward.await;
+        result
+    } else {
+        mgr.install(reference, &vendor_dir).await
+    }
+    .with_context(|| format!("installing `{wit_name}`"))?;
+
     let path = install
         .vendored_files
         .into_iter()
@@ -135,6 +180,63 @@ pub async fn install_wit(wit_name: &str) -> Result<InstalledComponent> {
         wit_name: qualified,
         path,
     })
+}
+
+/// Map a [`component_package_manager::ProgressEvent`] to a one-line
+/// user-facing string. Returns `None` for events that don't merit a
+/// UI update (e.g. fine-grained byte deltas — we throttle those to a
+/// single "downloaded N bytes" line per layer at a time).
+fn format_progress(
+    ev: &component_package_manager::ProgressEvent,
+    total: &mut Option<u64>,
+) -> Option<String> {
+    use component_package_manager::ProgressEvent as P;
+    match ev {
+        P::ManifestFetched { layer_count, .. } => {
+            *total = None;
+            Some(format!("Manifest fetched ({layer_count} layer(s))"))
+        }
+        P::LayerStarted {
+            index,
+            total_bytes,
+            title,
+            ..
+        } => {
+            *total = *total_bytes;
+            let label = title.clone().unwrap_or_else(|| format!("layer {index}"));
+            match total_bytes {
+                Some(n) => Some(format!("Downloading {label} ({})…", human_bytes(*n))),
+                None => Some(format!("Downloading {label}…")),
+            }
+        }
+        P::LayerProgress {
+            bytes_downloaded, ..
+        } => match *total {
+            Some(t) if t > 0 => Some(format!(
+                "Downloaded {} / {}",
+                human_bytes(*bytes_downloaded),
+                human_bytes(t)
+            )),
+            _ => Some(format!("Downloaded {}", human_bytes(*bytes_downloaded))),
+        },
+        P::LayerStored { .. } => Some("Stored layer".to_string()),
+        P::LayerDownloaded { .. } | P::InstallComplete => None,
+    }
+}
+
+fn human_bytes(n: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if n >= GB {
+        format!("{:.2} GB", n as f64 / GB as f64)
+    } else if n >= MB {
+        format!("{:.2} MB", n as f64 / MB as f64)
+    } else if n >= KB {
+        format!("{:.2} KB", n as f64 / KB as f64)
+    } else {
+        format!("{n} B")
+    }
 }
 
 /// Resolve a CLI argument to a wasm component path.

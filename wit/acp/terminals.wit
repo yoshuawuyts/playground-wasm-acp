@@ -1,4 +1,4 @@
-package yosh:acp;
+package yosh:acp@6.0.0;
 
 /// Client-side terminal execution (agent → client).
 ///

@@ -267,22 +267,29 @@ fn load_stage(engine: &Engine, path: &std::path::Path, kind: StageKind) -> Resul
     })
 }
 
-/// ACP WIT package version this host was built against. The on-disk WIT
-/// currently declares `package yosh:acp;` with no version pin, so we
-/// accept components whose `yosh:acp/*` exports carry no `@version`
-/// segment. Bump this when the WIT picks up an explicit version.
-pub(crate) const EXPECTED_ACP_VERSION: Option<&str> = None;
+/// Semver range of `yosh:acp` this host can speak. Components whose
+/// `yosh:acp/*` exports carry a version outside this range are rejected
+/// up front. The version itself comes from the in-tree WIT
+/// (`package yosh:acp@<v>;`); bump both together.
+pub(crate) const EXPECTED_ACP_REQ: &str = "^6.0.0";
 
-/// Inspect a component's exports to decide whether it's a provider or
-/// a layer (only layers export `yosh:acp/client`) and to verify the
-/// ACP version it was built against matches the host's. Returns the
-/// detected [`StageKind`] on success.
+/// Concrete version the host's bindgen was generated against. Used for
+/// user-facing error messages so a mismatched component sees the exact
+/// version the host ships, not just the range.
+pub(crate) const HOST_ACP_VERSION: &str = "6.0.0";
+
+/// Inspect a component's exports and decide which `yosh:acp` world it
+/// implements:
 ///
-/// Versioning rule: every `yosh:acp/<iface>` export must carry the
-/// version segment in [`EXPECTED_ACP_VERSION`] (currently `None`,
-/// i.e. unversioned). Any version mismatch is rejected up front rather
-/// than failing later with an obscure linker error.
+/// - `yosh:acp/provider`: exports `yosh:acp/agent` only.
+/// - `yosh:acp/layer`:    exports `yosh:acp/agent` *and* `yosh:acp/client`.
+///
+/// Any other export shape — wrong package namespace, missing `agent`,
+/// or a version incompatible with [`EXPECTED_ACP_REQ`] — is rejected up
+/// front so the failure isn't deferred to instantiation.
 pub(crate) fn classify_acp_component(engine: &Engine, component: &Component) -> Result<StageKind> {
+    let req = semver::VersionReq::parse(EXPECTED_ACP_REQ)
+        .expect("EXPECTED_ACP_REQ is a hardcoded valid semver req");
     let ty = component.component_type();
     let mut exports_agent = false;
     let mut exports_client = false;
@@ -291,18 +298,32 @@ pub(crate) fn classify_acp_component(engine: &Engine, component: &Component) -> 
             continue;
         };
         // Split `<iface>` from optional `@<version>`.
-        let (iface, version) = match rest.split_once('@') {
+        let (iface, version_str) = match rest.split_once('@') {
             Some((i, v)) => (i, Some(v)),
             None => (rest, None),
         };
-        if version != EXPECTED_ACP_VERSION {
+        let version_label =
+            version_str.map_or(" (unversioned)".to_string(), |v| format!("@{v}"));
+        let parsed = version_str
+            .map(semver::Version::parse)
+            .transpose()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "component exports `yosh:acp/{iface}{version_label}` but the version is \
+                     not valid semver: {e}",
+                )
+            })?;
+        let compatible = match parsed {
+            Some(v) => req.matches(&v),
+            // Unversioned exports are accepted only when the host's
+            // requirement also has no version pin.
+            None => req == semver::VersionReq::STAR,
+        };
+        if !compatible {
             anyhow::bail!(
-                "component exports `yosh:acp/{iface}` at version {actual} but this host \
-                 supports ACP {expected}; rebuild the component against the matching \
-                 WIT definition",
-                actual = version.map_or("<unversioned>".to_string(), |v| format!("`{v}`")),
-                expected = EXPECTED_ACP_VERSION
-                    .map_or("<unversioned>".to_string(), |v| format!("`{v}`")),
+                "component exports `yosh:acp/{iface}{version_label}` but this host requires \
+                 `yosh:acp@{EXPECTED_ACP_REQ}` (built against `yosh:acp@{HOST_ACP_VERSION}`); \
+                 rebuild the component against the matching WIT definition"
             );
         }
         match iface {
@@ -313,7 +334,8 @@ pub(crate) fn classify_acp_component(engine: &Engine, component: &Component) -> 
     }
     if !exports_agent {
         anyhow::bail!(
-            "component does not export `yosh:acp/agent`; not a yosh:acp plugin"
+            "component does not implement the `yosh:acp/provider` or \
+             `yosh:acp/layer` world (host expects `yosh:acp@{EXPECTED_ACP_REQ}`)"
         );
     }
     Ok(if exports_client {
@@ -323,24 +345,19 @@ pub(crate) fn classify_acp_component(engine: &Engine, component: &Component) -> 
     })
 }
 
-/// Reject components whose `agent` import status doesn't match the world
-/// they were passed as. Imports are versioned (`yosh:acp/agent@…`),
-/// so we match on the unversioned prefix to stay forward-compatible with
-/// minor WIT bumps.
-/// Distinguish a `provider` from a `layer` by what they *export*: only
-/// layers export `client`. Both export `agent`. Imports are unreliable
-/// for this — the component-model async ABI synthesises `[export]…`
-/// import names and may also surface the world's exported interface
-/// types as imports, which would confuse a naive check.
+/// Reject components whose detected world (provider vs layer) doesn't
+/// match the CLI flag they were passed under. The classification itself
+/// also catches non-ACP components and ACP version mismatches; see
+/// [`classify_acp_component`].
 fn validate_imports(engine: &Engine, component: &Component, kind: StageKind) -> Result<()> {
     let detected = classify_acp_component(engine, component)?;
     match (kind, detected) {
         (StageKind::Provider, StageKind::Layer) => anyhow::bail!(
-            "component exports `yosh:acp/client` (it is a layer); \
+            "component implements the `yosh:acp/layer` world; \
              pass it via `--layer` rather than `--provider`",
         ),
         (StageKind::Layer, StageKind::Provider) => anyhow::bail!(
-            "component does not export `yosh:acp/client` (it is a provider); \
+            "component implements the `yosh:acp/provider` world; \
              pass it via `--provider` rather than `--layer`",
         ),
         _ => Ok(()),

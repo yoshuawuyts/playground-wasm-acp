@@ -27,6 +27,7 @@ base64 = "0.22"
 anyhow = "1.0"
 component-package-manager = { workspace = true }
 dirs = "5"
+semver = "1"
 
 [dev-dependencies]
 tempfile = "3"

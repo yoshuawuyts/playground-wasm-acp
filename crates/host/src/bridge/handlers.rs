@@ -446,10 +446,10 @@ fn parse_install_command(prompt: &[schema::ContentBlock]) -> Option<String> {
     Some(arg.to_string())
 }
 
-/// Run a `/install <arg>` command host-side. Streams progress as
-/// `agent_message_chunk` notifications; resolves the prompt with
-/// `stop_reason = end_turn` regardless of success or failure (the
-/// outcome is surfaced as text in the chat, not as an RPC error).
+/// Run a `/install <arg>` command host-side. Reports progress as an
+/// ACP `tool_call` with status transitions and content updates so the
+/// editor renders a progress card; resolves the prompt with
+/// `stop_reason = end_turn` regardless of success or failure.
 fn handle_install_command(
     factory: Arc<SessionFactory>,
     session_key: String,
@@ -458,22 +458,61 @@ fn handle_install_command(
     cx: ConnectionTo<Client>,
 ) -> Result<(), AcpError> {
     cx.clone().spawn(async move {
-        let intro = format!("Installing `{arg}`…\n");
-        send_agent_chunk(&cx, &session_key, &intro);
+        let tool_call_id = format!(
+            "install-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let title = if arg.is_empty() {
+            "Install component".to_string()
+        } else {
+            format!("Install `{arg}`")
+        };
+
+        send_tool_call_start(&cx, &session_key, &tool_call_id, &title, "Starting…");
 
         let result = if arg.is_empty() {
             Err(anyhow::anyhow!(
                 "missing argument; usage: `/install <namespace>:<package>[@version]`"
             ))
         } else {
-            run_install(&factory, &arg).await
+            // Channel for phase messages from the install pipeline.
+            // Forwarded as `tool_call_update` notifications until the
+            // install future resolves.
+            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<String>(32);
+            let session_key_for_drain = session_key.clone();
+            let tool_call_id_for_drain = tool_call_id.clone();
+            let cx_for_drain = cx.clone();
+            let drain = tokio::spawn(async move {
+                while let Some(msg) = progress_rx.recv().await {
+                    send_tool_call_progress(
+                        &cx_for_drain,
+                        &session_key_for_drain,
+                        &tool_call_id_for_drain,
+                        &msg,
+                    );
+                }
+            });
+            let res = run_install(&factory, &arg, Some(progress_tx)).await;
+            // `drain` exits once the sender is dropped at the end of
+            // `run_install`. Awaiting it ensures all queued progress
+            // messages are flushed before we send the terminal update.
+            let _ = drain.await;
+            res
         };
 
-        let msg = match result {
-            Ok(installed) => format!("Installed `{}`.", installed.wit_name),
-            Err(e) => format!("Install failed: {e:#}"),
-        };
-        send_agent_chunk(&cx, &session_key, &msg);
+        match &result {
+            Ok(installed) => {
+                let text = format!("Installed `{}`.", installed.wit_name);
+                send_tool_call_finish(&cx, &session_key, &tool_call_id, "completed", &text);
+            }
+            Err(e) => {
+                let text = format!("{e:#}");
+                send_tool_call_finish(&cx, &session_key, &tool_call_id, "failed", &text);
+            }
+        }
 
         let resp = match translate::install_command_response() {
             Ok(r) => r,
@@ -492,15 +531,20 @@ fn handle_install_command(
 async fn run_install(
     factory: &SessionFactory,
     arg: &str,
+    progress: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> anyhow::Result<install::InstalledComponent> {
-    let installed = install::install_wit(arg).await?;
-    let component = match wasmtime::component::Component::from_file(factory.engine(), &installed.path) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&installed.path).await;
-            return Err(anyhow::Error::from(e).context("loading installed component"));
-        }
-    };
+    let installed = install::install_wit_with_progress(arg, progress.clone()).await?;
+    if let Some(tx) = progress.as_ref() {
+        let _ = tx.try_send("Validating component…".to_string());
+    }
+    let component =
+        match wasmtime::component::Component::from_file(factory.engine(), &installed.path) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&installed.path).await;
+                return Err(anyhow::Error::from(e).context("loading installed component"));
+            }
+        };
     if let Err(e) = crate::classify_acp_component(factory.engine(), &component) {
         let _ = tokio::fs::remove_file(&installed.path).await;
         return Err(e);
@@ -508,15 +552,58 @@ async fn run_install(
     Ok(installed)
 }
 
-/// Send a one-shot `agent_message_chunk` text update for `session_key`.
-/// Errors are logged and swallowed — the user-visible failure path is
-/// the eventual `PromptResponse`.
-fn send_agent_chunk(cx: &ConnectionTo<Client>, session_key: &str, text: &str) {
-    let Some(notif) = translate::install_progress_chunk(session_key, text) else {
-        tracing::warn!("failed to build /install progress chunk");
+/// Send the initial `tool_call` notification for an install.
+fn send_tool_call_start(
+    cx: &ConnectionTo<Client>,
+    session_key: &str,
+    tool_call_id: &str,
+    title: &str,
+    text: &str,
+) {
+    let Some(notif) = translate::install_tool_call_start(session_key, tool_call_id, title, text)
+    else {
+        tracing::warn!("failed to build /install tool_call start");
         return;
     };
     if let Err(e) = cx.send_notification(notif) {
-        tracing::warn!(error = ?e, "failed to send /install progress chunk");
+        tracing::warn!(error = ?e, "failed to send /install tool_call start");
+    }
+}
+
+/// Send an in-progress `tool_call_update` with replacement content.
+fn send_tool_call_progress(
+    cx: &ConnectionTo<Client>,
+    session_key: &str,
+    tool_call_id: &str,
+    text: &str,
+) {
+    let Some(notif) =
+        translate::install_tool_call_update(session_key, tool_call_id, "in_progress", Some(text))
+    else {
+        tracing::warn!("failed to build /install tool_call progress update");
+        return;
+    };
+    if let Err(e) = cx.send_notification(notif) {
+        tracing::warn!(error = ?e, "failed to send /install tool_call progress update");
+    }
+}
+
+/// Send a terminal `tool_call_update` (status = `completed` | `failed`)
+/// with the final content text.
+fn send_tool_call_finish(
+    cx: &ConnectionTo<Client>,
+    session_key: &str,
+    tool_call_id: &str,
+    status: &str,
+    text: &str,
+) {
+    let Some(notif) =
+        translate::install_tool_call_update(session_key, tool_call_id, status, Some(text))
+    else {
+        tracing::warn!("failed to build /install tool_call finish update");
+        return;
+    };
+    if let Err(e) = cx.send_notification(notif) {
+        tracing::warn!(error = ?e, "failed to send /install tool_call finish update");
     }
 }
