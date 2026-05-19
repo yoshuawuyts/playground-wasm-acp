@@ -2,7 +2,7 @@
 bindgen: bindgen-provider bindgen-layer
 
 # Build everything: ollama-provider + uppercase-layer wasm components + host binary.
-build: build-provider build-layer build-host
+build: build-provider build-layer build-plan-layer build-host
 
 # Build the ollama-provider wasm component (release).
 build-provider:
@@ -11,6 +11,10 @@ build-provider:
 # Build the uppercase-layer wasm component (release).
 build-layer:
     cargo build -p uppercase-layer --target wasm32-wasip2 --release
+
+# Build the plan-layer wasm component (release).
+build-plan-layer:
+    cargo build -p plan-layer --target wasm32-wasip2 --release
 
 # Build the host binary.
 build-host:

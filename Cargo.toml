@@ -4,6 +4,7 @@ members = [
     "crates/e2e-tests",
     "crates/host",
     "crates/ollama-provider",
+    "crates/plan-layer",
     "crates/uppercase-layer",
 ]
 resolver = "2"
