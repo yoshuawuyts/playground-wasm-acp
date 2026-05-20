@@ -5398,25 +5398,86 @@ pub mod yosh {
                 /// stream ends when the turn finishes (whether normally or by
                 /// cancellation).
                 #[allow(async_fn_in_trait)]
-                pub fn updates(
+                pub async fn updates(
                     &self,
                 ) -> wit_bindgen::rt::async_support::StreamReader<SessionUpdate> {
                     unsafe {
-                        #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "yosh:acp/agent@7.0.0")]
-                        unsafe extern "C" {
-                            #[link_name = "[method]prompt-turn.updates"]
-                            fn wit_import0(_: i32) -> i32;
+                        #[derive(Copy, Clone)]
+                        struct ParamsLower(i32);
+                        unsafe impl Send for ParamsLower {}
+                        use wit_bindgen::rt::async_support::Subtask as _Subtask;
+                        struct _MySubtask<'a> {
+                            _unused: core::marker::PhantomData<&'a ()>,
                         }
-                        #[cfg(not(target_arch = "wasm32"))]
-                        unsafe extern "C" fn wit_import0(_: i32) -> i32 {
-                            unreachable!()
+                        #[allow(unused_parens)]
+                        unsafe impl<'a> _Subtask for _MySubtask<'a> {
+                            type Params = (&'a PromptTurn,);
+                            type Results = wit_bindgen::rt::async_support::StreamReader<
+                                SessionUpdate,
+                            >;
+                            type ParamsLower = ParamsLower;
+                            fn abi_layout(&mut self) -> ::core::alloc::Layout {
+                                unsafe {
+                                    ::core::alloc::Layout::from_size_align_unchecked(4, 4)
+                                }
+                            }
+                            fn results_offset(&mut self) -> usize {
+                                0
+                            }
+                            unsafe fn call_import(
+                                &mut self,
+                                _params: Self::ParamsLower,
+                                _results: *mut u8,
+                            ) -> u32 {
+                                #[cfg(target_arch = "wasm32")]
+                                #[link(wasm_import_module = "yosh:acp/agent@7.0.0")]
+                                unsafe extern "C" {
+                                    #[link_name = "[async-lower][method]prompt-turn.updates"]
+                                    fn call(_: i32, _: *mut u8) -> i32;
+                                }
+                                #[cfg(not(target_arch = "wasm32"))]
+                                unsafe extern "C" fn call(_: i32, _: *mut u8) -> i32 {
+                                    unreachable!()
+                                }
+                                unsafe { call(_params.0, _results) as u32 }
+                            }
+                            unsafe fn params_dealloc_lists(
+                                &mut self,
+                                _params: Self::ParamsLower,
+                            ) {
+                                unsafe {}
+                            }
+                            unsafe fn params_dealloc_lists_and_own(
+                                &mut self,
+                                _params: Self::ParamsLower,
+                            ) {
+                                unsafe {}
+                            }
+                            unsafe fn params_lower(
+                                &mut self,
+                                (_lower0,): Self::Params,
+                                _ptr: *mut u8,
+                            ) -> Self::ParamsLower {
+                                unsafe { ParamsLower((_lower0).handle() as i32) }
+                            }
+                            unsafe fn results_lift(
+                                &mut self,
+                                _ptr: *mut u8,
+                            ) -> Self::Results {
+                                unsafe {
+                                    let l0 = *_ptr.add(0).cast::<i32>();
+                                    wit_bindgen::rt::async_support::StreamReader::new(
+                                        l0 as u32,
+                                        &<SessionUpdate as super::super::super::wit_stream::StreamPayload>::VTABLE,
+                                    )
+                                }
+                            }
                         }
-                        let ret = wit_import0((self).handle() as i32);
-                        wit_bindgen::rt::async_support::StreamReader::new(
-                            ret as u32,
-                            &<SessionUpdate as super::super::super::wit_stream::StreamPayload>::VTABLE,
-                        )
+                        _MySubtask {
+                            _unused: core::marker::PhantomData,
+                        }
+                            .call((self,))
+                            .await
                     }
                 }
             }
@@ -12181,25 +12242,86 @@ pub mod yosh {
                 /// stderr in interleaved order). The stream ends when the
                 /// process exits and any remaining bytes have been flushed.
                 #[allow(async_fn_in_trait)]
-                pub fn output(
+                pub async fn output(
                     &self,
                 ) -> wit_bindgen::rt::async_support::StreamReader<u8> {
                     unsafe {
-                        #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "yosh:acp/client@7.0.0")]
-                        unsafe extern "C" {
-                            #[link_name = "[method]terminal.output"]
-                            fn wit_import0(_: i32) -> i32;
+                        #[derive(Copy, Clone)]
+                        struct ParamsLower(i32);
+                        unsafe impl Send for ParamsLower {}
+                        use wit_bindgen::rt::async_support::Subtask as _Subtask;
+                        struct _MySubtask<'a> {
+                            _unused: core::marker::PhantomData<&'a ()>,
                         }
-                        #[cfg(not(target_arch = "wasm32"))]
-                        unsafe extern "C" fn wit_import0(_: i32) -> i32 {
-                            unreachable!()
+                        #[allow(unused_parens)]
+                        unsafe impl<'a> _Subtask for _MySubtask<'a> {
+                            type Params = (&'a Terminal,);
+                            type Results = wit_bindgen::rt::async_support::StreamReader<
+                                u8,
+                            >;
+                            type ParamsLower = ParamsLower;
+                            fn abi_layout(&mut self) -> ::core::alloc::Layout {
+                                unsafe {
+                                    ::core::alloc::Layout::from_size_align_unchecked(4, 4)
+                                }
+                            }
+                            fn results_offset(&mut self) -> usize {
+                                0
+                            }
+                            unsafe fn call_import(
+                                &mut self,
+                                _params: Self::ParamsLower,
+                                _results: *mut u8,
+                            ) -> u32 {
+                                #[cfg(target_arch = "wasm32")]
+                                #[link(wasm_import_module = "yosh:acp/client@7.0.0")]
+                                unsafe extern "C" {
+                                    #[link_name = "[async-lower][method]terminal.output"]
+                                    fn call(_: i32, _: *mut u8) -> i32;
+                                }
+                                #[cfg(not(target_arch = "wasm32"))]
+                                unsafe extern "C" fn call(_: i32, _: *mut u8) -> i32 {
+                                    unreachable!()
+                                }
+                                unsafe { call(_params.0, _results) as u32 }
+                            }
+                            unsafe fn params_dealloc_lists(
+                                &mut self,
+                                _params: Self::ParamsLower,
+                            ) {
+                                unsafe {}
+                            }
+                            unsafe fn params_dealloc_lists_and_own(
+                                &mut self,
+                                _params: Self::ParamsLower,
+                            ) {
+                                unsafe {}
+                            }
+                            unsafe fn params_lower(
+                                &mut self,
+                                (_lower0,): Self::Params,
+                                _ptr: *mut u8,
+                            ) -> Self::ParamsLower {
+                                unsafe { ParamsLower((_lower0).handle() as i32) }
+                            }
+                            unsafe fn results_lift(
+                                &mut self,
+                                _ptr: *mut u8,
+                            ) -> Self::Results {
+                                unsafe {
+                                    let l0 = *_ptr.add(0).cast::<i32>();
+                                    wit_bindgen::rt::async_support::StreamReader::new(
+                                        l0 as u32,
+                                        &<u8 as super::super::super::wit_stream::StreamPayload>::VTABLE,
+                                    )
+                                }
+                            }
                         }
-                        let ret = wit_import0((self).handle() as i32);
-                        wit_bindgen::rt::async_support::StreamReader::new(
-                            ret as u32,
-                            &<u8 as super::super::super::wit_stream::StreamPayload>::VTABLE,
-                        )
+                        _MySubtask {
+                            _unused: core::marker::PhantomData,
+                        }
+                            .call((self,))
+                            .await
                     }
                 }
             }
@@ -13329,12 +13451,38 @@ pub mod exports {
                 >(arg0: *mut u8) -> i32 {
                     unsafe {
                         #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
-                        let result0 = {
-                            T_::updates(
-                                PromptTurnBorrow::lift(arg0 as u32 as usize).get(),
-                            )
-                        };
-                        (result0).take_handle() as i32
+                        wit_bindgen::rt::async_support::start_task(async move {
+                            let _task_cancel = wit_bindgen::rt::async_support::TaskCancelOnDrop::new();
+                            let result0 = &{
+                                T_::updates(
+                                        PromptTurnBorrow::lift(arg0 as u32 as usize).get(),
+                                    )
+                                    .await
+                            };
+                            #[cfg(target_arch = "wasm32")]
+                            #[link(wasm_import_module = "[export]yosh:acp/agent@7.0.0")]
+                            unsafe extern "C" {
+                                #[link_name = "[task-return][method]prompt-turn.updates"]
+                                fn wit_import1(_: i32);
+                            }
+                            #[cfg(not(target_arch = "wasm32"))]
+                            unsafe extern "C" fn wit_import1(_: i32) {
+                                unreachable!()
+                            }
+                            _task_cancel.forget();
+                            wit_import1((result0).take_handle() as i32);
+                        })
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __callback_method_prompt_turn_updates(
+                    event0: u32,
+                    event1: u32,
+                    event2: u32,
+                ) -> u32 {
+                    unsafe {
+                        wit_bindgen::rt::async_support::callback(event0, event1, event2)
                     }
                 }
                 #[doc(hidden)]
@@ -16310,7 +16458,7 @@ pub mod exports {
                     /// stream ends when the turn finishes (whether normally or by
                     /// cancellation).
                     #[allow(async_fn_in_trait)]
-                    fn updates(
+                    async fn updates(
                         &self,
                     ) -> wit_bindgen::rt::async_support::StreamReader<SessionUpdate>;
                     /// The terminal response for this turn. Resolves once the turn
@@ -16359,12 +16507,18 @@ pub mod exports {
                         $($path_to_types)*::
                         __callback_method_session_select_model(event0, event1, event2) }
                         } #[unsafe (export_name =
-                        "yosh:acp/agent@7.0.0#[method]prompt-turn.updates")] unsafe
-                        extern "C" fn export_method_prompt_turn_updates(arg0 : * mut u8,)
-                        -> i32 { unsafe { $($path_to_types)*::
+                        "[async-lift]yosh:acp/agent@7.0.0#[method]prompt-turn.updates")]
+                        unsafe extern "C" fn export_method_prompt_turn_updates(arg0 : *
+                        mut u8,) -> i32 { unsafe { $($path_to_types)*::
                         _export_method_prompt_turn_updates_cabi::<<$ty as
                         $($path_to_types)*:: Guest >::PromptTurn > (arg0) } } #[unsafe
                         (export_name =
+                        "[callback][async-lift]yosh:acp/agent@7.0.0#[method]prompt-turn.updates")]
+                        unsafe extern "C" fn _callback_method_prompt_turn_updates(event0
+                        : u32, event1 : u32, event2 : u32) -> u32 { unsafe {
+                        $($path_to_types)*::
+                        __callback_method_prompt_turn_updates(event0, event1, event2) } }
+                        #[unsafe (export_name =
                         "[async-lift]yosh:acp/agent@7.0.0#[method]prompt-turn.response")]
                         unsafe extern "C" fn export_method_prompt_turn_response(arg0 : *
                         mut u8,) -> i32 { unsafe { $($path_to_types)*::
@@ -23166,7 +23320,7 @@ prompt-response\x03\0\x20\x04\0\x07session\x03\x01\x04\0\x0bprompt-turn\x03\x01\
 h\"\x01p\x1d\x01i#\x01C\x02\x04self$\x06prompt%\0&\x04\0\x16[method]session.prom\
 pt\x01'\x01j\0\x01\x01\x01C\x02\x04self$\x07mode-id\x09\0(\x04\0\x18[method]sess\
 ion.set-mode\x01)\x01C\x02\x04self$\x08model-id\x0b\0(\x04\0\x1c[method]session.\
-select-model\x01*\x01h#\x01f\x01\x1f\x01@\x01\x04self+\0,\x04\0\x1b[method]promp\
+select-model\x01*\x01h#\x01f\x01\x1f\x01C\x01\x04self+\0,\x04\0\x1b[method]promp\
 t-turn.updates\x01-\x01j\x01!\x01\x01\x01C\x01\x04self+\0.\x04\0\x1c[method]prom\
 pt-turn.response\x01/\x01j\x01\x05\x01\x01\x01C\x01\x03req\x03\00\x04\0\x0ainiti\
 alize\x011\x01C\x01\x03req\x07\0(\x04\0\x0cauthenticate\x012\x01i\"\x01o\x023\x0f\
@@ -23190,7 +23344,7 @@ se\x03\0\x06\x02\x03\x02\x01\"\x04\0\x16read-text-file-request\x03\0\x08\x02\x03
 rite-text-file-request\x03\0\x0c\x02\x03\x02\x01%\x04\0\x17create-terminal-reque\
 st\x03\0\x0e\x02\x03\x02\x01&\x04\0\x14terminal-exit-status\x03\0\x10\x04\0\x08t\
 erminal\x03\x01\x01i\x12\x01@\x01\x03req\x0f\0\x13\x04\0\x15[constructor]termina\
-l\x01\x14\x01h\x12\x01f\x01}\x01@\x01\x04self\x15\0\x16\x04\0\x17[method]termina\
+l\x01\x14\x01h\x12\x01f\x01}\x01C\x01\x04self\x15\0\x16\x04\0\x17[method]termina\
 l.output\x01\x17\x01j\x01\x11\x01\x01\x01C\x01\x04self\x15\0\x18\x04\0\x1e[metho\
 d]terminal.wait-for-exit\x01\x19\x01j\x01\x07\x01\x01\x01C\x01\x03req\x05\0\x1a\x04\
 \0\x12request-permission\x01\x1b\x01j\x01\x0b\x01\x01\x01C\x01\x03req\x09\0\x1c\x04\
@@ -23219,7 +23373,7 @@ nse\x03\0\x20\x04\0\x07session\x03\x01\x04\0\x0bprompt-turn\x03\x01\x01h\"\x01p\
 \x01i#\x01C\x02\x04self$\x06prompt%\0&\x04\0\x16[method]session.prompt\x01'\x01j\
 \0\x01\x01\x01C\x02\x04self$\x07mode-id\x09\0(\x04\0\x18[method]session.set-mode\
 \x01)\x01C\x02\x04self$\x08model-id\x0b\0(\x04\0\x1c[method]session.select-model\
-\x01*\x01h#\x01f\x01\x1f\x01@\x01\x04self+\0,\x04\0\x1b[method]prompt-turn.updat\
+\x01*\x01h#\x01f\x01\x1f\x01C\x01\x04self+\0,\x04\0\x1b[method]prompt-turn.updat\
 es\x01-\x01j\x01!\x01\x01\x01C\x01\x04self+\0.\x04\0\x1c[method]prompt-turn.resp\
 onse\x01/\x01j\x01\x05\x01\x01\x01C\x01\x03req\x03\00\x04\0\x0ainitialize\x011\x01\
 C\x01\x03req\x07\0(\x04\0\x0cauthenticate\x012\x01i\"\x01o\x023\x0f\x01j\x014\x01\
@@ -23368,7 +23522,7 @@ prompt-response\x03\0\x20\x04\0\x07session\x03\x01\x04\0\x0bprompt-turn\x03\x01\
 h\"\x01p\x1d\x01i#\x01C\x02\x04self$\x06prompt%\0&\x04\0\x16[method]session.prom\
 pt\x01'\x01j\0\x01\x01\x01C\x02\x04self$\x07mode-id\x09\0(\x04\0\x18[method]sess\
 ion.set-mode\x01)\x01C\x02\x04self$\x08model-id\x0b\0(\x04\0\x1c[method]session.\
-select-model\x01*\x01h#\x01f\x01\x1f\x01@\x01\x04self+\0,\x04\0\x1b[method]promp\
+select-model\x01*\x01h#\x01f\x01\x1f\x01C\x01\x04self+\0,\x04\0\x1b[method]promp\
 t-turn.updates\x01-\x01j\x01!\x01\x01\x01C\x01\x04self+\0.\x04\0\x1c[method]prom\
 pt-turn.response\x01/\x01j\x01\x05\x01\x01\x01C\x01\x03req\x03\00\x04\0\x0ainiti\
 alize\x011\x01C\x01\x03req\x07\0(\x04\0\x0cauthenticate\x012\x01i\"\x01o\x023\x0f\
@@ -23392,7 +23546,7 @@ se\x03\0\x06\x02\x03\x02\x01\"\x04\0\x16read-text-file-request\x03\0\x08\x02\x03
 rite-text-file-request\x03\0\x0c\x02\x03\x02\x01%\x04\0\x17create-terminal-reque\
 st\x03\0\x0e\x02\x03\x02\x01&\x04\0\x14terminal-exit-status\x03\0\x10\x04\0\x08t\
 erminal\x03\x01\x01i\x12\x01@\x01\x03req\x0f\0\x13\x04\0\x15[constructor]termina\
-l\x01\x14\x01h\x12\x01f\x01}\x01@\x01\x04self\x15\0\x16\x04\0\x17[method]termina\
+l\x01\x14\x01h\x12\x01f\x01}\x01C\x01\x04self\x15\0\x16\x04\0\x17[method]termina\
 l.output\x01\x17\x01j\x01\x11\x01\x01\x01C\x01\x04self\x15\0\x18\x04\0\x1e[metho\
 d]terminal.wait-for-exit\x01\x19\x01j\x01\x07\x01\x01\x01C\x01\x03req\x05\0\x1a\x04\
 \0\x12request-permission\x01\x1b\x01j\x01\x0b\x01\x01\x01C\x01\x03req\x09\0\x1c\x04\

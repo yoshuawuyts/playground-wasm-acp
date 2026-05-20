@@ -581,12 +581,13 @@ impl Session {
     /// Dropping the prompt future on cancel releases the store lock and
     /// wasmtime cancels any in-flight component tasks.
     ///
-    /// Phase 1 streams migration: this still returns the final
-    /// [`PromptOutcome`] but no longer streams updates. The new WIT
-    /// returns a `prompt-turn` resource from `session.prompt`; this
-    /// wrapper calls `prompt`, awaits the resource's `response()` and
-    /// drops it. The streaming `updates()` body is dropped on the floor
-    /// for phase 1; phase 3 wires it to the bridge's outbound drain.
+    /// Phase 3 v1: gets the prompt-turn resource from
+    /// `session.prompt()`, immediately closes its `updates()` stream
+    /// reader (so the guest's `emit_update` writes resolve to
+    /// `StreamResult::Dropped` instead of hanging), and awaits
+    /// `response()`. The body stream is dropped on the floor; phase 3
+    /// v2 implements a `StreamConsumer` that pushes each update onto
+    /// the outbound bridge as a `session/update` notification.
     pub async fn prompt(
         &self,
         prompt: Vec<crate::yosh::acp::content::ContentBlock>,
@@ -612,9 +613,7 @@ impl Session {
                         let bindings = a
                             .with(|mut x| x.get().stages[head_idx].bindings.clone())
                             .expect("head bindings filled");
-                        // session.prompt is now async (returns a
-                        // prompt-turn resource). Call it then
-                        // immediately await its response().
+                        // Construct the prompt-turn resource.
                         let turn = match &*bindings {
                             Bindings::Provider(b) => {
                                 b.yosh_acp_agent()
@@ -629,8 +628,35 @@ impl Session {
                                     .await?
                             }
                         };
-                        // turn is now a ResourceAny for prompt-turn.
-                        // Await its response.
+                        // Drain the updates body. v1: close the reader
+                        // immediately so guest writes resolve to
+                        // `StreamResult::Dropped` rather than blocking
+                        // on backpressure with no reader. v2 wires a
+                        // real `StreamConsumer` that forwards each
+                        // update to the outbound bridge as a
+                        // `session/update` notification.
+                        let mut reader = match &*bindings {
+                            Bindings::Provider(b) => {
+                                b.yosh_acp_agent()
+                                    .prompt_turn()
+                                    .call_updates(a, turn)
+                                    .await?
+                            }
+                            Bindings::Layer(b) => {
+                                b.yosh_acp_agent()
+                                    .prompt_turn()
+                                    .call_updates(a, turn)
+                                    .await?
+                            }
+                        };
+                        // Close the reader. Errors here are reported
+                        // but not fatal; if the reader's already
+                        // closed (e.g. the guest dropped it), that's
+                        // a no-op.
+                        if let Err(e) = reader.close_with(a) {
+                            tracing::debug!(error = %e, "close updates reader");
+                        }
+                        // Await the final response.
                         let resp = match &*bindings {
                             Bindings::Provider(b) => {
                                 b.yosh_acp_agent()
@@ -645,9 +671,12 @@ impl Session {
                                     .await
                             }
                         };
-                        // Drop the resource. Phase 1 stub: this leaks
-                        // until store teardown. Phase 3 will use
-                        // resource_drop_async after stream drain.
+                        // Drop the resource. Phase 3 v1 skips the
+                        // explicit drop — the resource lives until
+                        // the store tears down at session end. Phase
+                        // 5 wires `resource_drop_async` properly so
+                        // turns are recycled mid-session.
+                        let _ = turn;
                         Ok::<_, wasmtime::Error>(resp)
                     })
                 })
@@ -831,16 +860,28 @@ impl layer_agent::HostPromptTurn for HostState {
     ) -> wasmtime::Result<()> {
         Ok(())
     }
-
-    async fn updates(
-        &mut self,
-        _self_: wasmtime::component::Resource<layer_agent::PromptTurn>,
-    ) -> wasmtime::component::StreamReader<crate::yosh::acp::prompts::SessionUpdate> {
-        unimplemented!("phase 3: layer_agent::HostPromptTurn::updates")
-    }
 }
 
 impl layer_agent::HostPromptTurnWithStore for HasSelf<HostState> {
+    fn updates<T: Send>(
+        accessor: &wasmtime::component::Accessor<T, Self>,
+        _self_: wasmtime::component::Resource<layer_agent::PromptTurn>,
+    ) -> impl ::core::future::Future<
+        Output = wasmtime::component::StreamReader<crate::yosh::acp::prompts::SessionUpdate>,
+    > + Send {
+        async move {
+            // Phase 3 stub: empty stream.
+            accessor
+                .with(|mut a| {
+                    wasmtime::component::StreamReader::new(
+                        &mut a,
+                        std::iter::empty::<crate::yosh::acp::prompts::SessionUpdate>(),
+                    )
+                })
+                .expect("empty stream construction")
+        }
+    }
+
     fn response<T: Send>(
         _accessor: &wasmtime::component::Accessor<T, Self>,
         _self_: wasmtime::component::Resource<layer_agent::PromptTurn>,
@@ -853,30 +894,63 @@ impl layer_agent::HostPromptTurnWithStore for HasSelf<HostState> {
     }
 }
 
+/// Host-owned payload for a `client.terminal` resource.
+///
+/// Phase 2: holds the create-terminal-request that constructed it. A
+/// real implementation would also carry editor-side correlation state
+/// (a wire-level `terminal-id` returned from the editor's
+/// `terminal/create` JSON-RPC, plus the process state). For now the
+/// host doesn't actually start a process — `output()` returns an empty
+/// stream and `wait_for_exit()` returns an error.
+pub struct HostTerminalEntry {
+    pub _req: crate::yosh::acp::terminals::CreateTerminalRequest,
+}
+
 impl crate::yosh::acp::client::HostTerminal for HostState {
     async fn new(
         &mut self,
-        _req: crate::yosh::acp::terminals::CreateTerminalRequest,
+        req: crate::yosh::acp::terminals::CreateTerminalRequest,
     ) -> wasmtime::component::Resource<crate::yosh::acp::client::Terminal> {
-        unimplemented!("phase 2: client::HostTerminal::new")
+        // Allocate a slot in the per-store resource table. The rep we
+        // mint here is the table-side rep, retagged under the WIT
+        // `Terminal` resource type (same pattern as
+        // [`crate::secrets_impl::StoreHost::get`]).
+        let entry = self
+            .table
+            .push(HostTerminalEntry { _req: req })
+            .expect("resource table push for client.terminal");
+        wasmtime::component::Resource::new_own(entry.rep())
     }
 
     async fn drop(
         &mut self,
-        _rep: wasmtime::component::Resource<crate::yosh::acp::client::Terminal>,
+        rep: wasmtime::component::Resource<crate::yosh::acp::client::Terminal>,
     ) -> wasmtime::Result<()> {
+        let entry: wasmtime::component::Resource<HostTerminalEntry> =
+            wasmtime::component::Resource::new_own(rep.rep());
+        let _ = self.table.delete(entry);
         Ok(())
-    }
-
-    async fn output(
-        &mut self,
-        _self_: wasmtime::component::Resource<crate::yosh::acp::client::Terminal>,
-    ) -> wasmtime::component::StreamReader<u8> {
-        unimplemented!("phase 2: client::HostTerminal::output")
     }
 }
 
 impl crate::yosh::acp::client::HostTerminalWithStore for HasSelf<HostState> {
+    fn output<T: Send>(
+        accessor: &wasmtime::component::Accessor<T, Self>,
+        _self_: wasmtime::component::Resource<crate::yosh::acp::client::Terminal>,
+    ) -> impl ::core::future::Future<Output = wasmtime::component::StreamReader<u8>> + Send {
+        async move {
+            // Phase 2 placeholder: an immediately-finished empty stream.
+            // Phase 5 wires this to `terminal/output` polling on the
+            // outbound bridge, with the writer pumping bytes from editor
+            // responses until exit.
+            accessor
+                .with(|mut a| {
+                    wasmtime::component::StreamReader::new(&mut a, std::iter::empty::<u8>())
+                })
+                .expect("empty stream construction")
+        }
+    }
+
     fn wait_for_exit<T: Send>(
         _accessor: &wasmtime::component::Accessor<T, Self>,
         _self_: wasmtime::component::Resource<crate::yosh::acp::client::Terminal>,
@@ -885,7 +959,8 @@ impl crate::yosh::acp::client::HostTerminalWithStore for HasSelf<HostState> {
     > + Send {
         async move {
             Err(translate::internal_error(
-                "phase 2: client::HostTerminalWithStore::wait_for_exit",
+                "client.terminal.wait_for_exit not yet implemented; \
+                 no process is spawned by the host stub",
             ))
         }
     }

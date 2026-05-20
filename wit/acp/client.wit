@@ -60,7 +60,7 @@ interface client {
         /// Raw byte stream of the terminal's combined output (stdout +
         /// stderr in interleaved order). The stream ends when the
         /// process exits and any remaining bytes have been flushed.
-        output: func() -> stream<u8>;
+        output: async func() -> stream<u8>;
 
         /// Resolves once the command has exited. Calling this after
         /// drop traps; capture the future before dropping if you need

@@ -115,8 +115,8 @@ pub struct PlanPromptTurn {
 }
 
 impl GuestPromptTurn for PlanPromptTurn {
-    fn updates(&self) -> StreamReader<SessionUpdate> {
-        self.downstream.updates()
+    async fn updates(&self) -> StreamReader<SessionUpdate> {
+        self.downstream.updates().await
     }
 
     async fn response(&self) -> Result<PromptResponse, Error> {
@@ -323,7 +323,7 @@ impl GuestTerminal for PlanTerminal {
         unimplemented!("phase 2: PlanTerminal::new")
     }
 
-    fn output(&self) -> StreamReader<u8> {
+    async fn output(&self) -> StreamReader<u8> {
         let (_w, r) = acp_wasm_sys::layer::wit_stream::new::<u8>();
         r
     }

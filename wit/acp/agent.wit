@@ -74,7 +74,7 @@ interface agent {
         /// agent emits during the turn arrives here in order. The
         /// stream ends when the turn finishes (whether normally or by
         /// cancellation).
-        updates: func() -> stream<session-update>;
+        updates: async func() -> stream<session-update>;
 
         /// The terminal response for this turn. Resolves once the turn
         /// ends. Safe to call before, during, or after consuming the

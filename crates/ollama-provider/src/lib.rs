@@ -51,14 +51,17 @@ impl Drop for ProviderSession {
 
 impl GuestSession for ProviderSession {
     async fn prompt(&self, prompt: Vec<ContentBlock>) -> PromptTurn {
-        // Phase 1 stub: prompt-turn is a thin holder for the session id
-        // and the user-supplied blocks. Real streaming is wired in
-        // phase 3; for now `updates()` returns a never-yielding stream
-        // and `response()` runs the existing `prompt_impl` to completion
-        // with no streamed updates.
+        // Allocate the body stream up front. Both halves go into the
+        // returned prompt-turn resource; `response()` parks the writer
+        // in `ACTIVE_WRITER` while running the prompt loop so
+        // `emit_update` finds it, then drops it to EOF the stream.
+        let (writer, reader) =
+            acp_wasm_sys::provider::wit_stream::new::<SessionUpdate>();
         PromptTurn::new(ProviderPromptTurn {
             session_id: self.id.clone(),
             inputs: std::cell::RefCell::new(Some(prompt)),
+            writer: std::cell::RefCell::new(Some(writer)),
+            reader: std::cell::RefCell::new(Some(reader)),
         })
     }
 
@@ -91,29 +94,50 @@ impl GuestSession for ProviderSession {
 
 /// Stub prompt-turn (phase 1). Wired into the streams + tool-call
 /// machinery in phase 3 / phase 4 of the streams migration plan.
+/// Owned state for a `prompt-turn` resource. Constructed by
+/// [`GuestSession::prompt`]; consumed by either [`updates()`] (which
+/// hands out the reader) or [`response()`] (which runs the prompt
+/// loop while writing updates into the writer). Single-threaded wasm:
+/// the writer is parked in a `thread_local` while `response()` runs so
+/// the inline `emit_update` calls inside `prompt_impl` can find it.
 pub struct ProviderPromptTurn {
     session_id: String,
+    /// Set on construction, taken by `response()`.
     inputs: std::cell::RefCell<Option<Vec<ContentBlock>>>,
+    /// Set on construction, taken by `response()` and parked in
+    /// [`ACTIVE_WRITER`] for `emit_update` to find.
+    writer: std::cell::RefCell<
+        Option<wit_bindgen::rt::async_support::StreamWriter<SessionUpdate>>,
+    >,
+    /// Set on construction, taken by `updates()`.
+    reader: std::cell::RefCell<
+        Option<wit_bindgen::rt::async_support::StreamReader<SessionUpdate>>,
+    >,
+}
+
+// Single-threaded wasm guest: a thread-local cell is enough.
+thread_local! {
+    static ACTIVE_WRITER: std::cell::RefCell<
+        Option<wit_bindgen::rt::async_support::StreamWriter<SessionUpdate>>,
+    > = const { std::cell::RefCell::new(None) };
 }
 
 impl GuestPromptTurn for ProviderPromptTurn {
-    fn updates(
+    async fn updates(
         &self,
     ) -> wit_bindgen::rt::async_support::StreamReader<SessionUpdate> {
-        // Phase 1 stub: hand out a fresh empty stream that we never
-        // write to. The reader will simply end-of-stream when the
-        // writer drops at end of scope. Phase 3 replaces this with a
-        // real producer driven by the prompt loop.
-        let (_writer, reader) =
-            acp_wasm_sys::provider::wit_stream::new::<SessionUpdate>();
-        reader
+        // First call wins. Subsequent calls (or pre-`response()` reads)
+        // get an immediately-EOF empty stream.
+        match self.reader.borrow_mut().take() {
+            Some(r) => r,
+            None => {
+                let (_w, r) = acp_wasm_sys::provider::wit_stream::new::<SessionUpdate>();
+                r
+            }
+        }
     }
 
     async fn response(&self) -> Result<PromptResponse, Error> {
-        // Phase 1 stub: consume the saved inputs and run the existing
-        // prompt impl. Any `SessionUpdate`s the impl tried to emit go
-        // nowhere; this is intentional for the phase-1 "makes it
-        // compile" milestone.
         let inputs = match self.inputs.borrow_mut().take() {
             Some(v) => v,
             None => {
@@ -123,19 +147,39 @@ impl GuestPromptTurn for ProviderPromptTurn {
                 ));
             }
         };
-        prompt_impl(self.session_id.clone(), inputs).await
+        let writer = self.writer.borrow_mut().take();
+        ACTIVE_WRITER.with(|cell| *cell.borrow_mut() = writer);
+        let r = prompt_impl(self.session_id.clone(), inputs).await;
+        // Drop the writer so the host-side reader sees end-of-stream.
+        ACTIVE_WRITER.with(|cell| *cell.borrow_mut() = None);
+        r
     }
 }
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Phase-1 stub: where `emit_update` calls used to go.
-/// Phase 3 wires this to push into the active prompt-turn's stream
-/// writer. For now it's a no-op so tests that read `session/update`
-/// notifications will see nothing — that's expected at this milestone.
-#[allow(dead_code)]
-async fn emit_update(_session_id: String, _update: SessionUpdate) {
-    // intentionally empty
+/// Push a `SessionUpdate` onto the currently-active prompt-turn's
+/// body stream. No-op if nothing is active (e.g. an emit fires
+/// outside a `response()` call — shouldn't happen, but it's safe).
+///
+/// Single-threaded wasm guest: the writer is moved out of
+/// [`ACTIVE_WRITER`] across the `write().await` (we can't hold a
+/// `RefMut` across an await point), then re-parked when the write
+/// completes.
+async fn emit_update(_session_id: String, update: SessionUpdate) {
+    let Some(mut writer) = ACTIVE_WRITER.with(|cell| cell.borrow_mut().take()) else {
+        return;
+    };
+    let (result, _buf) = writer.write(vec![update]).await;
+    // If the host closed the reader, we MUST drop the writer instead
+    // of trying to write again — subsequent writes would trap. Skip
+    // re-parking so future `emit_update` calls find no writer and
+    // no-op.
+    use wit_bindgen::rt::async_support::StreamResult;
+    if matches!(result, StreamResult::Dropped | StreamResult::Cancelled) {
+        return;
+    }
+    ACTIVE_WRITER.with(|cell| *cell.borrow_mut() = Some(writer));
 }
 
 // Wasm components are single-threaded; using thread-local + RefCell avoids

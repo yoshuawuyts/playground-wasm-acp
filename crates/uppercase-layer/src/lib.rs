@@ -102,12 +102,12 @@ pub enum LayerPromptTurn {
 }
 
 impl GuestPromptTurn for LayerPromptTurn {
-    fn updates(&self) -> StreamReader<SessionUpdate> {
+    async fn updates(&self) -> StreamReader<SessionUpdate> {
         match self {
             LayerPromptTurn::Forward { downstream, .. } => {
                 // Phase 1: forward verbatim. Phase 3: map over this
                 // stream to uppercase agent-direction text in flight.
-                downstream.updates()
+                downstream.updates().await
             }
             LayerPromptTurn::ShoutAck { .. } => {
                 // Empty stream — nothing to deliver before the
@@ -263,7 +263,7 @@ impl GuestTerminal for LayerTerminal {
         unimplemented!("phase 2: LayerTerminal::new")
     }
 
-    fn output(&self) -> StreamReader<u8> {
+    async fn output(&self) -> StreamReader<u8> {
         // Phase 2 wires this through to the downstream/host terminal.
         let (_w, r) = acp_wasm_sys::layer::wit_stream::new::<u8>();
         r
