@@ -21,6 +21,7 @@ use wasmtime::{Config, Engine};
 
 mod bridge;
 mod client_impl;
+mod config;
 mod install;
 mod secrets;
 mod secrets_impl;
@@ -92,7 +93,7 @@ pub use crate::yosh::acp::agent as layer_agent;
 pub use layer_bindings::Layer;
 
 use crate::state::StageKind;
-use crate::wasm::{SessionFactory, SessionRegistry, Stage};
+use crate::wasm::{ResolvedMount, ResolvedMountSource, SessionFactory, SessionRegistry, Stage};
 
 #[derive(Parser)]
 struct Args {
@@ -235,6 +236,51 @@ fn main() -> Result<()> {
             info!(idx, layer = %stage.component_id, "loaded layer");
         }
 
+        // Load the global host config (XDG) and resolve filesystem
+        // mounts. A missing config file yields no mounts, preserving the
+        // default `/data`-only behaviour exactly.
+        let host_config = crate::config::Config::load_default()
+            .context("loading host config")?;
+        let mut mounts: Vec<ResolvedMount> = Vec::with_capacity(host_config.mounts.len());
+        for mount in &host_config.mounts {
+            match &mount.source {
+                crate::config::MountSource::Path(path) => {
+                    if !path.is_dir() {
+                        anyhow::bail!(
+                            "mount `{}`: path {} does not exist or is not a directory",
+                            mount.name,
+                            path.display()
+                        );
+                    }
+                    mounts.push(ResolvedMount {
+                        name: mount.name.clone(),
+                        source: ResolvedMountSource::Path(path.clone()),
+                    });
+                    info!(mount = %mount.name, path = %path.display(), "configured host path mount");
+                }
+                crate::config::MountSource::Component(arg) => {
+                    let path = install::resolve(arg)
+                        .await
+                        .with_context(|| format!("resolving mount `{}` component `{arg}`", mount.name))?;
+                    let component = Component::from_file(&engine, &path)
+                        .map_err(anyhow::Error::from)
+                        .with_context(|| format!("loading mount `{}` ({})", mount.name, path.display()))?;
+                    validate_filesystem_export(&engine, &component, &mount.name)?;
+                    let component_id = utils::component_id_from_path(&path)
+                        .context("deriving component id from wasm filename")?;
+                    mounts.push(ResolvedMount {
+                        name: mount.name.clone(),
+                        source: ResolvedMountSource::Component {
+                            component,
+                            component_id,
+                        },
+                    });
+                    info!(mount = %mount.name, component = %arg, "configured component mount");
+                }
+            }
+        }
+        let mounts = Arc::new(mounts);
+
         let (outbound_tx, outbound_rx) = mpsc::channel(64);
         let factory = Arc::new(SessionFactory::new(
             engine,
@@ -243,6 +289,7 @@ fn main() -> Result<()> {
             outbound_tx,
             data_root,
             secrets,
+            mounts,
         ));
         let registry = Arc::new(SessionRegistry::new());
 
@@ -271,6 +318,31 @@ fn load_stage(engine: &Engine, path: &std::path::Path, kind: StageKind) -> Resul
         component,
         component_id,
     })
+}
+
+/// Reject a component intended as a filesystem mount unless it exports
+/// `wasi:filesystem` (the `types` interface, any 0.2.x version). Mirrors
+/// [`classify_acp_component`]'s export inspection so a non-filesystem
+/// component fails at boot with a clear message rather than at
+/// instantiation.
+pub(crate) fn validate_filesystem_export(
+    engine: &Engine,
+    component: &Component,
+    mount_name: &str,
+) -> Result<()> {
+    let ty = component.component_type();
+    let exports_fs = ty.exports(engine).any(|(name, _)| {
+        // Match `wasi:filesystem/types` with or without an `@version`.
+        name == "wasi:filesystem/types"
+            || name.starts_with("wasi:filesystem/types@")
+    });
+    if !exports_fs {
+        anyhow::bail!(
+            "mount `{mount_name}`: component does not export `wasi:filesystem/types`; \
+             a filesystem mount component must export the `wasi:filesystem` interface"
+        );
+    }
+    Ok(())
 }
 
 /// Semver range of `yosh:acp` this host can speak. Components whose
