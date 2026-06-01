@@ -63,6 +63,23 @@ pub struct Stage {
     pub component_id: String,
 }
 
+/// A configured filesystem mount, resolved at boot to a host directory
+/// that is preopened to the chain at `/<name>` alongside the built-in
+/// `/data` preopen.
+#[derive(Clone)]
+pub struct ResolvedMount {
+    /// Single-segment mount name; preopened at `/<name>`.
+    pub name: String,
+    /// Host directory backing the mount.
+    pub host_path: PathBuf,
+}
+
+impl ResolvedMount {
+    fn guest_path(&self) -> String {
+        format!("/{}", self.name)
+    }
+}
+
 /// Produces fresh single-store chains on demand. Cheap: instantiation
 /// from pre-loaded `Component`s is microseconds per stage.
 pub struct SessionFactory {
@@ -75,6 +92,9 @@ pub struct SessionFactory {
     outbound: mpsc::Sender<OutboundEvent>,
     data_root: PathBuf,
     secrets: Arc<SecretsRegistry>,
+    /// Configured filesystem mounts exposed at `/<name>`, resolved at
+    /// boot. Empty in the common case (default `/data`-only behaviour).
+    mounts: Arc<Vec<ResolvedMount>>,
 }
 
 impl SessionFactory {
@@ -85,6 +105,7 @@ impl SessionFactory {
         outbound: mpsc::Sender<OutboundEvent>,
         data_root: PathBuf,
         secrets: Arc<SecretsRegistry>,
+        mounts: Arc<Vec<ResolvedMount>>,
     ) -> Self {
         Self {
             engine,
@@ -93,6 +114,7 @@ impl SessionFactory {
             outbound,
             data_root,
             secrets,
+            mounts,
         }
     }
 
@@ -177,6 +199,20 @@ impl SessionFactory {
             .inherit_env();
         if let Some(dir) = provider_data.as_deref() {
             wasi.preopened_dir(dir, "/data", DirPerms::all(), FilePerms::all())?;
+        }
+
+        // Host-directory mounts are preopened directly; wasmtime-wasi
+        // serves them. Mounts are only wired for real (project) sessions,
+        // matching `/data`.
+        if provider_data.is_some() {
+            for mount in self.mounts.iter() {
+                wasi.preopened_dir(
+                    &mount.host_path,
+                    &mount.guest_path(),
+                    DirPerms::all(),
+                    FilePerms::all(),
+                )?;
+            }
         }
 
         let state = HostState {

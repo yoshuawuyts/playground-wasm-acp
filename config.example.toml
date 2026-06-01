@@ -1,0 +1,33 @@
+# Example host config for playground-wasm-acp.
+#
+# Copy to the XDG config path to enable it:
+#   $XDG_CONFIG_HOME/acp-wasm/config.toml
+# falling back to the platform config dir, e.g.
+#   ~/.config/acp-wasm/config.toml                          (Linux)
+#   ~/Library/Application Support/acp-wasm/config.toml      (macOS)
+#
+# With no config file present the host runs with only the built-in
+# per-session scratch directory preopened at /data.
+
+# Each [mounts.<name>] table preopens a writable directory at /<name> for
+# the agent component chain, alongside /data. The name must be a single
+# path segment and cannot be the reserved name `data`.
+
+# A host-directory mount: preopen /var/log/myapp at /logs.
+[mounts.logs]
+path = "/var/log/myapp"
+
+# A host-directory mount for persistent storage outside the session cwd.
+# Point the ollama-provider's session history at it with the
+# ACP_DATA_ROOT=/onedrive environment variable.
+[mounts.onedrive]
+path = "/home/me/OneDrive/agent-data"
+
+# A component-backed mount: a wasi:filesystem-exporting wasm plugin
+# (by filesystem path or WIT name). NOTE: not supported yet — see the
+# "Limitations" section of the README. Validated at startup, then
+# rejected with a clear error until the dispatching wasi:filesystem
+# implementation lands.
+#
+# [mounts.s3]
+# component = "namespace:s3-fs@1.0.0"

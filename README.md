@@ -77,6 +77,47 @@ The guest reads two environment variables at runtime; both are optional:
 Host log verbosity is controlled by `RUST_LOG` (e.g. `RUST_LOG=host=debug`),
 defaulting to `host=info`.
 
+### Filesystem mounts
+
+Every project session gets a private, host-backed scratch directory preopened
+at `/data`. You can expose **additional** writable directories to the agent
+chain — for example a synced cloud folder used as persistent storage outside
+the session's working directory — by declaring **mounts** in a global host
+config file.
+
+The config lives at the XDG config path (the same layout `install` uses for its
+component cache): `$XDG_CONFIG_HOME/acp-wasm/config.toml`, falling back to the
+platform config dir (`~/.config/acp-wasm/config.toml` on Linux,
+`~/Library/Application Support/acp-wasm/config.toml` on macOS). If the file is
+absent the host runs exactly as before, with only `/data`.
+
+Each `[mounts.<name>]` table preopens a directory at `/<name>` for the chain:
+
+```toml
+# Preopen the host directory /var/log/myapp at /logs.
+[mounts.logs]
+path = "/var/log/myapp"
+
+# Preopen your synced cloud folder at /onedrive for persistent storage.
+[mounts.onedrive]
+path = "/home/me/OneDrive/agent-data"
+```
+
+Rules:
+
+- `<name>` must be a single path segment (no `/`), and cannot be the reserved
+  name `data`.
+- Exactly one backing key per entry. Host-directory mounts use `path` (an
+  absolute path to an existing directory).
+- A `component` key (pointing at a `wasi:filesystem`-exporting wasm component,
+  by path or WIT name) is reserved for plugin-backed mounts — see
+  *Limitations* below.
+
+Mounts are read/write (`DirPerms::all` / `FilePerms::all`), just like `/data`.
+The bundled `ollama-provider` honours an optional `ACP_DATA_ROOT` environment
+variable to redirect its session-history storage from `/data` onto a mount
+(e.g. `ACP_DATA_ROOT=/onedrive`), demonstrating persistence outside the cwd.
+
 ## Smoke test
 
 With Ollama running, drive the host with a fixture on stdin:
@@ -120,6 +161,18 @@ The MVP intentionally cuts a few corners:
   and `fs/write_text_file` are wired through to the editor.
 - **No MCP servers.** Servers passed in `session/new` are accepted but the
   guest doesn't connect to them.
+- **Component-backed filesystem mounts are not wired yet.** Host-directory
+  mounts (`path =`) work today (see *Filesystem mounts*). Mounting a
+  `wasi:filesystem`-**exporting** wasm component (`component =`) is validated at
+  startup but rejected with a clear error, because `wasmtime-wasi` 44 hardcodes
+  filesystem preopens to real host directories: there is no trait-based virtual
+  filesystem hook, and an agent reaches the filesystem through a single
+  `wasi:filesystem` + `wasi:io` import whose stream resources are shared with
+  stdio/http. Serving a plugin-backed mount alongside `/data` therefore requires
+  a host-owned **dispatching** implementation of `wasi:filesystem` (and the
+  `wasi:io` streams it returns) that routes each descriptor to either a host
+  directory or the plugin's exports — a sizeable change tracked as follow-up
+  work. Until then, use a `path` mount.
 
 ## License
 
