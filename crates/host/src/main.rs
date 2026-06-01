@@ -93,7 +93,7 @@ pub use crate::yosh::acp::agent as layer_agent;
 pub use layer_bindings::Layer;
 
 use crate::state::StageKind;
-use crate::wasm::{ResolvedMount, ResolvedMountSource, SessionFactory, SessionRegistry, Stage};
+use crate::wasm::{ResolvedMount, SessionFactory, SessionRegistry, Stage};
 
 #[derive(Parser)]
 struct Args {
@@ -254,11 +254,17 @@ fn main() -> Result<()> {
                     }
                     mounts.push(ResolvedMount {
                         name: mount.name.clone(),
-                        source: ResolvedMountSource::Path(path.clone()),
+                        host_path: path.clone(),
                     });
                     info!(mount = %mount.name, path = %path.display(), "configured host path mount");
                 }
                 crate::config::MountSource::Component(arg) => {
+                    // Resolve + validate the component up-front so a
+                    // misconfigured (non-filesystem) plugin still reports a
+                    // precise error. The dispatcher that proxies a guest's
+                    // exported `wasi:filesystem` into the agent chain is not
+                    // wired yet, so we stop here with an actionable message
+                    // rather than silently ignoring the mount.
                     let path = install::resolve(arg)
                         .await
                         .with_context(|| format!("resolving mount `{}` component `{arg}`", mount.name))?;
@@ -266,16 +272,15 @@ fn main() -> Result<()> {
                         .map_err(anyhow::Error::from)
                         .with_context(|| format!("loading mount `{}` ({})", mount.name, path.display()))?;
                     validate_filesystem_export(&engine, &component, &mount.name)?;
-                    let component_id = utils::component_id_from_path(&path)
-                        .context("deriving component id from wasm filename")?;
-                    mounts.push(ResolvedMount {
-                        name: mount.name.clone(),
-                        source: ResolvedMountSource::Component {
-                            component,
-                            component_id,
-                        },
-                    });
-                    info!(mount = %mount.name, component = %arg, "configured component mount");
+                    anyhow::bail!(
+                        "mount `{}`: component-backed filesystem mounts are not supported yet. \
+                         `wasi:filesystem`-exporting plugin components require a host-side \
+                         dispatching implementation of `wasi:filesystem` that is still in \
+                         progress (see issue #1). Use a host directory mount instead, e.g.\n\
+                         \n    [mounts.{}]\n    path = \"/absolute/host/dir\"\n",
+                        mount.name,
+                        mount.name,
+                    );
                 }
             }
         }

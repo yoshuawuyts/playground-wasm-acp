@@ -5,6 +5,11 @@
 //! `sessions/` subdirectory inside it and writes one JSON file per
 //! session: `/data/sessions/<id>.json`.
 //!
+//! The storage root defaults to `/data` but can be redirected to any
+//! preopened mount via the `ACP_DATA_ROOT` environment variable — for
+//! example `ACP_DATA_ROOT=/onedrive` to persist conversation history to a
+//! configured filesystem mount instead of the per-session scratch dir.
+//!
 //! Other components are free to use `/data` differently — caches,
 //! embeddings, model state — or to ignore it entirely (e.g. components
 //! backed by a remote API that owns its own persistence).
@@ -16,11 +21,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::ollama::Message;
 
-const ROOT: &str = "/data";
+const DEFAULT_ROOT: &str = "/data";
 const SESSIONS_SUBDIR: &str = "sessions";
 
+/// Storage root for session history. Honours `ACP_DATA_ROOT` (pointing at
+/// any preopened mount) and falls back to `/data`.
+fn root() -> String {
+    match std::env::var("ACP_DATA_ROOT") {
+        Ok(v) if !v.trim().is_empty() => v.trim_end_matches('/').to_string(),
+        _ => DEFAULT_ROOT.to_string(),
+    }
+}
+
 fn sessions_dir() -> PathBuf {
-    PathBuf::from(format!("{ROOT}/{SESSIONS_SUBDIR}"))
+    PathBuf::from(format!("{}/{SESSIONS_SUBDIR}", root()))
 }
 
 /// Sanitize a session id into a filename. Session ids are agent-minted but
