@@ -10,10 +10,17 @@
 //! `component_id`), so the isolation is *structural* rather than a
 //! declared grant.
 //!
+//! A component's identity is `namespace:component-name` — a registry
+//! component's WIT `namespace:package` (e.g. `yosh:ollama-provider`), or
+//! `local:<filename-stem>` for one loaded from a file (e.g.
+//! `local:ollama_provider`). This distinguishes components that share a
+//! bare name but come from different namespaces.
+//!
 //! Secrets live in a [`keyring-core`] credential store — an OS keychain
 //! by default; see [`keyring_store`]. The mapping is:
 //!
-//! - keyring `service = "{prefix}:{component_id}"` is the per-component
+//! - keyring `service = "{prefix}:{component_id}"` (i.e.
+//!   `"{prefix}:{namespace}:{component-name}"`) is the per-component
 //!   store. The `prefix` namespaces this host's entries so they don't
 //!   collide with unrelated applications in a shared OS keychain.
 //! - keyring `user = key` is an entry within that store.
@@ -327,16 +334,17 @@ mod tests {
     #[tokio::test]
     async fn per_component_isolation() {
         ensure_mock_store();
-        // Seed a key under one component; a different component must not
-        // see it, even with the identical key name.
-        set_secret(PREFIX, "comp_owner", "shared", &SecretValue::String("owned".into())).unwrap();
+        // Two components share the bare name `app` but differ by
+        // namespace; the identity is `namespace:component-name`, so a
+        // secret under one must be invisible to the other.
+        set_secret(PREFIX, "local:app", "shared", &SecretValue::String("owned".into())).unwrap();
         let r = SecretsRegistry::new(PREFIX);
-        match r.resolve("comp_owner", "shared").await.unwrap() {
+        match r.resolve("local:app", "shared").await.unwrap() {
             SecretValue::String(s) => assert_eq!(s, "owned"),
             other => panic!("expected string, got {other:?}"),
         }
         assert!(matches!(
-            r.resolve("comp_intruder", "shared").await,
+            r.resolve("yosh:app", "shared").await,
             Err(SecretsError::NotFound)
         ));
     }
@@ -362,14 +370,16 @@ mod tests {
     async fn service_uses_prefix_and_component_id() {
         ensure_mock_store();
         // Seed by writing the raw keyring entry the resolver should target,
-        // proving the `{prefix}:{component_id}` / `user = key` mapping.
-        let service = service_name(PREFIX, "comp_map");
+        // proving the `{prefix}:{namespace}:{component-name}` service /
+        // `user = key` mapping for a namespaced identity.
+        let service = service_name(PREFIX, "yosh:tablemark");
+        assert_eq!(service, "test-acp:yosh:tablemark");
         keyring_core::Entry::new(&service, "tok")
             .unwrap()
             .set_password("mapped")
             .unwrap();
         let r = SecretsRegistry::new(PREFIX);
-        match r.resolve("comp_map", "tok").await.unwrap() {
+        match r.resolve("yosh:tablemark", "tok").await.unwrap() {
             SecretValue::String(s) => assert_eq!(s, "mapped"),
             other => panic!("expected string, got {other:?}"),
         }

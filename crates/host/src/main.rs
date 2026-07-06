@@ -175,8 +175,11 @@ enum SecretCommand {
     /// single trailing newline is stripped from string values (pass
     /// `--bytes` to store stdin verbatim).
     Set {
-        /// Component id: the provider/layer wasm filename stem, e.g.
-        /// `ollama_provider`.
+        /// Component identity `namespace:component-name`. Registry
+        /// components use their WIT `namespace:package` (e.g.
+        /// `yosh:ollama-provider`); components loaded from a file use
+        /// `local:<filename-stem>` (e.g. `local:ollama_provider`). The
+        /// host logs this identity at startup.
         component_id: String,
         /// Secret key name the component looks up via `store.get`.
         key: String,
@@ -187,7 +190,8 @@ enum SecretCommand {
     },
     /// Delete a component's secret. Succeeds even if it does not exist.
     Delete {
-        /// Component id (wasm filename stem).
+        /// Component identity `namespace:component-name` (e.g.
+        /// `local:ollama_provider` or `yosh:ollama-provider`).
         component_id: String,
         /// Secret key name.
         key: String,
@@ -276,11 +280,15 @@ fn main() -> Result<()> {
     let local = LocalSet::new();
     local.block_on(&runtime, async move {
         // Resolve provider/layer args (filesystem paths pass through;
-        // WIT names install-on-miss against the component cache).
+        // WIT names install-on-miss against the component cache). The
+        // component identity (`namespace:component-name`) that keys its
+        // secret store and `/data` comes from the same arg.
         let provider_path = install::resolve(&provider_arg)
             .await
             .with_context(|| format!("resolving provider `{provider_arg}`"))?;
-        let provider = load_stage(&engine, &provider_path, StageKind::Provider)?;
+        let provider_id = install::component_id_for_arg(&provider_arg)
+            .with_context(|| format!("deriving component id for `{provider_arg}`"))?;
+        let provider = load_stage(&engine, &provider_path, StageKind::Provider, provider_id)?;
         info!(
             provider = %provider.component_id,
             layer_count = args.layers.len(),
@@ -292,7 +300,9 @@ fn main() -> Result<()> {
             let p = install::resolve(arg)
                 .await
                 .with_context(|| format!("resolving layer `{arg}`"))?;
-            layers.push(load_stage(&engine, &p, StageKind::Layer)?);
+            let layer_id = install::component_id_for_arg(arg)
+                .with_context(|| format!("deriving component id for `{arg}`"))?;
+            layers.push(load_stage(&engine, &p, StageKind::Layer, layer_id)?);
         }
         for (idx, stage) in layers.iter().enumerate() {
             info!(idx, layer = %stage.component_id, "loaded layer");
@@ -364,20 +374,24 @@ fn run_secret_command(command: Command, prefix: &str) -> Result<()> {
     Ok(())
 }
 
-/// Load a wasm component from disk and pair it with a stable component
-/// id derived from the filename. Used for both the provider and each
-/// layer stage. Validates the component's import set against the world
-/// it was passed as so a layer-shaped wasm passed via `--provider` (or
-/// vice versa) is rejected at boot rather than failing later at
+/// Load a wasm component from disk and pair it with its component
+/// identity (`namespace:component-name`; see
+/// [`install::component_id_for_arg`]). Used for both the provider and
+/// each layer stage. Validates the component's import set against the
+/// world it was passed as so a layer-shaped wasm passed via `--provider`
+/// (or vice versa) is rejected at boot rather than failing later at
 /// instantiation with a less obvious error.
-fn load_stage(engine: &Engine, path: &std::path::Path, kind: StageKind) -> Result<Stage> {
+fn load_stage(
+    engine: &Engine,
+    path: &std::path::Path,
+    kind: StageKind,
+    component_id: String,
+) -> Result<Stage> {
     let component = Component::from_file(engine, path)
         .map_err(anyhow::Error::from)
         .with_context(|| format!("loading {}", path.display()))?;
     validate_imports(engine, &component, kind)
         .with_context(|| format!("validating {}", path.display()))?;
-    let component_id =
-        utils::component_id_from_path(path).context("deriving component id from wasm filename")?;
     Ok(Stage {
         component,
         component_id,
@@ -565,10 +579,11 @@ where
 /// Each session gets a project- and component-scoped subdirectory
 /// underneath this:
 ///
-///   `<data_root>/<project_id>/<component_id>/`    <-- mounted at /data
+///   `<data_root>/<project_id>/<component_slug>/`    <-- mounted at /data
 ///
 /// `<project_id>` is a hash of the session's cwd (no path leakage in
-/// the dir name); `<component_id>` is the wasm filename stem. The
+/// the dir name); `<component_slug>` is the component identity
+/// (`namespace:component-name`) with `:` slugified to `__`. The
 /// result: data is naturally siloed per project so an agent can't
 /// accidentally leak history between unrelated codebases.
 fn init_data_root() -> Result<PathBuf> {
