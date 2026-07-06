@@ -38,8 +38,10 @@ fn map_error(e: SecretsError) -> WitSecretsError {
 
 impl StoreHost for HostState {
     async fn get(&mut self, key: String) -> Result<Resource<Secret>, WitSecretsError> {
-        // Scope lookups by the *currently executing* stage's component id
-        // (top of [`HostState::stage_stack`]).
+        // Each component sees only its own secret store: scope the
+        // lookup by the *currently executing* stage's component id (top
+        // of [`HostState::stage_stack`]). The guest never supplies the
+        // namespace, so components can't read each other's secrets.
         let component_id = self.current_stage().component_id.clone();
         let value = self
             .secrets

@@ -96,6 +96,12 @@ use crate::wasm::{SessionFactory, SessionRegistry, Stage};
 
 #[derive(Parser)]
 struct Args {
+    /// Optional admin subcommand. When omitted, the host runs an ACP
+    /// agent chain (the default). When present, it manages per-component
+    /// secrets and exits.
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Path or WIT name of the terminal ACP **provider** wasm component
     /// (the bottom of the chain). Required.
     ///
@@ -138,12 +144,54 @@ struct Args {
     #[arg(long)]
     log_filter: Option<String>,
 
-    /// Path to a TOML secrets config. Lookups are scoped by component
-    /// id (deny-by-default); see `README.md` for the file format. If
-    /// omitted, every `wasmcloud:secrets/store.get` returns
-    /// `not-found`.
-    #[arg(long, value_name = "PATH")]
-    secrets: Option<PathBuf>,
+    /// Which `keyring-core` credential store backs per-component
+    /// secrets. Defaults to the platform-native OS store (`native`); pass
+    /// `mock` for an in-memory store (tests/CI, empty each run). Applies
+    /// to both the host run path and the `secret` subcommands.
+    #[arg(long, value_name = "native|mock")]
+    keyring_store: Option<crate::secrets::keyring_store::Backend>,
+
+    /// Prefix for keyring `service` names. Each component's secrets live
+    /// under `service = "<prefix>:<component-id>"`, keeping this host's
+    /// entries from colliding with other apps in a shared OS keychain.
+    #[arg(long, value_name = "PREFIX", default_value = crate::secrets::DEFAULT_SERVICE_PREFIX)]
+    keyring_service_prefix: String,
+}
+
+/// Admin subcommands. Absent = run the ACP host (the default).
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Manage per-component secrets in the keyring store.
+    #[command(subcommand)]
+    Secret(SecretCommand),
+}
+
+#[derive(clap::Subcommand)]
+enum SecretCommand {
+    /// Store a secret for a component, reading the value from stdin.
+    ///
+    /// The value is stored under `service = "<prefix>:<component-id>"`,
+    /// `user = <key>`, in the store selected by `--keyring-store`. A
+    /// single trailing newline is stripped from string values (pass
+    /// `--bytes` to store stdin verbatim).
+    Set {
+        /// Component id: the provider/layer wasm filename stem, e.g.
+        /// `ollama_provider`.
+        component_id: String,
+        /// Secret key name the component looks up via `store.get`.
+        key: String,
+        /// Store stdin as raw bytes instead of a UTF-8 string (no
+        /// newline stripping).
+        #[arg(long)]
+        bytes: bool,
+    },
+    /// Delete a component's secret. Succeeds even if it does not exist.
+    Delete {
+        /// Component id (wasm filename stem).
+        component_id: String,
+        /// Secret key name.
+        key: String,
+    },
 }
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
@@ -171,6 +219,23 @@ fn main() -> Result<()> {
     let args = Args::parse();
     init_logging(&args)?;
 
+    // The keyring store backs both secret resolution (the host run path)
+    // and the `secret` admin subcommands, so initialize it once up front
+    // for every invocation. Setting the store is cheap and doesn't touch
+    // the keychain until a secret is actually read or written.
+    let backend = args
+        .keyring_store
+        .unwrap_or(crate::secrets::keyring_store::Backend::Native);
+    crate::secrets::keyring_store::init_default_store(backend)
+        .context("initializing keyring store")?;
+    info!(?backend, "initialized keyring store");
+
+    // Admin subcommands need neither the wasm engine nor the async
+    // runtime: run and exit.
+    if let Some(command) = args.command {
+        return run_secret_command(command, &args.keyring_service_prefix);
+    }
+
     let mut config = Config::new();
     config.wasm_component_model(true);
     config.wasm_component_model_async(true);
@@ -195,14 +260,12 @@ fn main() -> Result<()> {
 
     let data_root = init_data_root()?;
 
-    let secrets = Arc::new(match args.secrets.as_deref() {
-        Some(path) => crate::secrets::SecretsRegistry::load(path)
-            .with_context(|| format!("loading secrets config {}", path.display()))?,
-        None => crate::secrets::SecretsRegistry::empty(),
-    });
-    if let Some(path) = args.secrets.as_deref() {
-        info!(path = %path.display(), "loaded secrets config");
-    }
+    // Each component gets a private secret store namespaced by its
+    // identity: `store.get(key)` resolves against
+    // `service = "<prefix>:<component-id>"` in the keyring store.
+    let secrets = Arc::new(crate::secrets::SecretsRegistry::new(
+        args.keyring_service_prefix.clone(),
+    ));
 
     // Multi-threaded runtime + `LocalSet`: pins `!Send` session actors to
     // the `block_on` thread while `Send` work runs on the worker pool.
@@ -251,6 +314,54 @@ fn main() -> Result<()> {
 
         bridge::run(factory, registry, outbound_rx).await
     })
+}
+
+/// Run a `secret` admin subcommand against the initialized keyring store.
+/// Synchronous: keyring access blocks but needs no async runtime. Secret
+/// values are read from stdin and never logged.
+fn run_secret_command(command: Command, prefix: &str) -> Result<()> {
+    use std::io::Read;
+    let Command::Secret(command) = command;
+    match command {
+        SecretCommand::Set {
+            component_id,
+            key,
+            bytes,
+        } => {
+            let value = if bytes {
+                let mut buf = Vec::new();
+                std::io::stdin()
+                    .read_to_end(&mut buf)
+                    .context("reading secret bytes from stdin")?;
+                crate::secrets::SecretValue::Bytes(buf)
+            } else {
+                let mut s = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut s)
+                    .context("reading secret from stdin")?;
+                // Strip a single trailing newline so `echo secret | …`
+                // stores `secret`, not `secret\n`.
+                if s.ends_with('\n') {
+                    s.pop();
+                    if s.ends_with('\r') {
+                        s.pop();
+                    }
+                }
+                crate::secrets::SecretValue::String(s)
+            };
+            crate::secrets::set_secret(prefix, &component_id, &key, &value)
+                .with_context(|| format!("setting secret for `{component_id}` key `{key}`"))?;
+            info!(component_id = %component_id, key = %key, "stored secret");
+            eprintln!("stored secret for component `{component_id}`, key `{key}`");
+        }
+        SecretCommand::Delete { component_id, key } => {
+            crate::secrets::delete_secret(prefix, &component_id, &key)
+                .with_context(|| format!("deleting secret for `{component_id}` key `{key}`"))?;
+            info!(component_id = %component_id, key = %key, "deleted secret");
+            eprintln!("deleted secret for component `{component_id}`, key `{key}`");
+        }
+    }
+    Ok(())
 }
 
 /// Load a wasm component from disk and pair it with a stable component
