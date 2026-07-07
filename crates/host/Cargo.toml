@@ -22,12 +22,23 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = "0.8"
-base64 = "0.22"
 anyhow = "1.0"
 component-package-manager = { workspace = true }
 dirs = "5"
 semver = "1"
+keyring-core = { workspace = true }
+
+# Platform-native keyring-core credential stores. The `native` backend for
+# `--keyring-store` resolves to whichever of these matches the target OS; the
+# built-in `mock` store needs no extra dependency.
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1"
 
 [dev-dependencies]
 tempfile = "3"

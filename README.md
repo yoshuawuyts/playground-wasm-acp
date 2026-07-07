@@ -77,6 +77,72 @@ The guest reads two environment variables at runtime; both are optional:
 Host log verbosity is controlled by `RUST_LOG` (e.g. `RUST_LOG=host=debug`),
 defaulting to `host=info`.
 
+### Secrets
+
+The host implements the `wasmcloud:secrets/store` + `reveal` WIT interfaces
+for the guest. Every component that imports `wasmcloud:secrets` transparently
+gets its **own private secret store, indexed by its component identity**. A
+`store.get(key)` resolves only against *that component's* store, so one
+component can never read another's secrets — the host supplies the identity,
+the guest never names it. There is no config file.
+
+A component's identity is **`namespace:component-name`**:
+
+- a registry component uses its WIT `namespace:package`, e.g.
+  `yosh:ollama-provider` (the version is stripped, so secrets survive upgrades);
+- a component loaded from a file has no registry namespace, so it becomes
+  `local:<filename-stem>`, e.g. `local:ollama_provider`.
+
+The namespace means two components that share a bare name but come from
+different sources get separate stores. The host logs the resolved identity for
+each stage at startup (`provider=…`, `layer=…`).
+
+Secrets live in a [`keyring-core`] credential store — an OS keychain by
+default. Each identity maps to keyring
+`service = "<prefix>:<namespace>:<component-name>"` (the per-component store)
+with `user = <key>` for each entry. The `prefix` (default `wasm-acp`, override
+with `--keyring-service-prefix`) keeps this host's entries from colliding with
+other apps in a shared keychain. Stored bytes are returned to the guest as a
+`string` when they are valid UTF-8, otherwise as raw `bytes`. Resolved values
+never appear in logs and are cached for the host process lifetime.
+
+Select the backing store with `--keyring-store <native|mock>`:
+
+| Backend  | Store                                                             |
+|----------|------------------------------------------------------------------|
+| `native` | macOS Keychain / Windows Credential Manager / Linux Secret Service (default) |
+| `mock`   | in-memory, non-persistent (tests/CI; a fresh process starts empty) |
+
+The store is initialized once at startup; the keychain itself is not touched
+until a secret is read or written (which may surface an OS prompt).
+
+#### Provisioning
+
+The WIT interface is read-only, so populate a component's store with the
+`secret` admin subcommands. They take the full `namespace:component-name`
+identity and use the same `--keyring-store` / `--keyring-service-prefix` as the
+run path:
+
+```shell
+# Store api_key for a file-loaded provider (value read from stdin).
+printf 'sk-...' | cargo run -p host -- secret set local:ollama_provider api_key
+
+# A registry component is addressed by its WIT namespace:package.
+printf 'sk-...' | cargo run -p host -- secret set yosh:ollama-provider api_key
+
+# Store a raw-bytes secret verbatim (no trailing-newline stripping).
+head -c 32 /dev/urandom | cargo run -p host -- secret set local:ollama_provider seed --bytes
+
+# Remove a secret (idempotent).
+cargo run -p host -- secret delete local:ollama_provider api_key
+```
+
+A single trailing newline is stripped from string values, so `printf 'x\n'`
+and `printf 'x'` store the same secret; pass `--bytes` to store stdin exactly.
+The component then reads it back via `store.get("api_key")`.
+
+[`keyring-core`]: https://docs.rs/keyring-core
+
 ## Smoke test
 
 With Ollama running, drive the host with a fixture on stdin:

@@ -244,7 +244,7 @@ pub struct HostBuilder {
     provider: PathBuf,
     layers: Vec<PathBuf>,
     env: Vec<(String, String)>,
-    secrets: Option<PathBuf>,
+    keyring_store: Option<String>,
 }
 
 impl HostBuilder {
@@ -253,7 +253,7 @@ impl HostBuilder {
             provider: provider_wasm(),
             layers: Vec::new(),
             env: Vec::new(),
-            secrets: None,
+            keyring_store: None,
         }
     }
 
@@ -267,9 +267,10 @@ impl HostBuilder {
         self
     }
 
-    /// Pass `--secrets <path>` to the host.
-    pub fn with_secrets(mut self, p: PathBuf) -> Self {
-        self.secrets = Some(p);
+    /// Pass `--keyring-store <native|mock>` to the host. Tests use
+    /// `mock` (an in-memory store; a fresh host process starts empty).
+    pub fn with_keyring_store(mut self, backend: impl Into<String>) -> Self {
+        self.keyring_store = Some(backend.into());
         self
     }
 
@@ -281,8 +282,8 @@ impl HostBuilder {
         for l in &self.layers {
             cmd.arg("--layer").arg(l);
         }
-        if let Some(p) = &self.secrets {
-            cmd.arg("--secrets").arg(p);
+        if let Some(backend) = &self.keyring_store {
+            cmd.arg("--keyring-store").arg(backend);
         }
         cmd.env("XDG_STATE_HOME", state_dir.path())
             .env("RUST_LOG", "host=debug,acp=debug");

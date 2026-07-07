@@ -258,6 +258,13 @@ pub async fn resolve(arg: &str) -> Result<PathBuf> {
     }
 }
 
+/// The component identity (`namespace:component-name`) for a provider or
+/// layer argument, using the same WIT-name-vs-path classification as
+/// [`resolve`]. See [`crate::utils::component_id_from_arg`].
+pub fn component_id_for_arg(arg: &str) -> Result<String> {
+    crate::utils::component_id_from_arg(arg, looks_like_wit_name(arg))
+}
+
 /// Return the first `*.wasm` file in `dir` if the directory exists.
 async fn first_wasm_in(dir: &Path) -> Result<Option<PathBuf>> {
     let mut rd = match tokio::fs::read_dir(dir).await {

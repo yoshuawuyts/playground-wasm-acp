@@ -1,37 +1,61 @@
-//! Secret provisioning: host-side `wasmcloud:secrets@0.1.0-draft` backend.
+//! Per-component secret store: host-side `wasmcloud:secrets@0.1.0-draft`
+//! backend.
 //!
-//! Secrets are loaded from a TOML config file passed via `--secrets`.
-//! Lookups are scoped by component id: each stage in the chain can only
-//! read keys that the operator has explicitly granted to that component
-//! id (deny-by-default).
+//! Every component that imports `wasmcloud:secrets` transparently gets
+//! its own private, persistent secret store, indexed by the component's
+//! identity. A `store.get(key)` resolves against *that component's*
+//! keyring namespace only, so a component can never read another
+//! component's secrets. There is no config file: the host derives the
+//! calling component's identity itself (the currently executing stage's
+//! `component_id`), so the isolation is *structural* rather than a
+//! declared grant.
 //!
-//! Each entry is either an inline `value = "…"` (plaintext UTF-8 string,
-//! or base64-decoded bytes if `bytes = true`) or a `command = ["op",
-//! "read", "op://..."]` whose stdout is captured at first read and
-//! cached for the host process lifetime. Resolved values never appear in
-//! logs.
+//! A component's identity is `namespace:component-name` — a registry
+//! component's WIT `namespace:package` (e.g. `yosh:ollama-provider`), or
+//! `local:<filename-stem>` for one loaded from a file (e.g.
+//! `local:ollama_provider`). This distinguishes components that share a
+//! bare name but come from different namespaces.
+//!
+//! Secrets live in a [`keyring-core`] credential store — an OS keychain
+//! by default; see [`keyring_store`]. The mapping is:
+//!
+//! - keyring `service = "{prefix}:{component_id}"` (i.e.
+//!   `"{prefix}:{namespace}:{component-name}"`) is the per-component
+//!   store. The `prefix` namespaces this host's entries so they don't
+//!   collide with unrelated applications in a shared OS keychain.
+//! - keyring `user = key` is an entry within that store.
+//!
+//! Stored bytes are returned as a UTF-8 `string` when they decode
+//! cleanly, otherwise as raw `bytes`. Resolved values never appear in
+//! logs, and are cached for the host process lifetime to avoid repeated
+//! keychain access (and prompts).
+//!
+//! The WIT interface is read-only. Populate a component's store with the
+//! host's `secret set` / `secret delete` admin subcommands, which write
+//! to the same namespace via [`set_secret`] / [`delete_secret`].
+//!
+//! [`keyring-core`]: https://docs.rs/keyring-core
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Mutex;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
-use base64::Engine as _;
-use serde::Deserialize;
-use tokio::process::Command;
-use tokio::time::timeout;
 
-const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default `service` prefix for keyring entries. Namespaces this host's
+/// credentials within a shared OS keychain; override with
+/// `--keyring-service-prefix`.
+pub const DEFAULT_SERVICE_PREFIX: &str = "wasm-acp";
 
 /// Spec-aligned error type. Mirrors `wasmcloud:secrets/store.secrets-error`.
 #[derive(Debug)]
 pub enum SecretsError {
-    /// Backend (command) returned non-zero or unparseable output.
+    /// The backing store rejected the request (ambiguous match, bad
+    /// encoding, unsupported operation, …).
     Upstream(String),
-    /// I/O failure invoking the backend (spawn error, timeout, etc.).
+    /// I/O failure talking to the store (no default store, no access,
+    /// platform failure, task join, …).
     Io(String),
-    /// Key not granted to this component id.
+    /// No such secret in this component's store.
     NotFound,
 }
 
@@ -52,103 +76,34 @@ impl std::fmt::Debug for SecretValue {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct RawEntry {
-    #[serde(default)]
-    value: Option<String>,
-    #[serde(default)]
-    command: Option<Vec<String>>,
-    #[serde(default)]
-    bytes: bool,
-    #[serde(default, rename = "timeout-ms")]
-    timeout_ms: Option<u64>,
+/// The keyring `service` that backs `component_id`'s private store.
+fn service_name(prefix: &str, component_id: &str) -> String {
+    format!("{prefix}:{component_id}")
 }
 
-#[derive(Debug)]
-enum Source {
-    Plaintext(SecretValue),
-    Command {
-        program: String,
-        args: Vec<String>,
-        timeout: Duration,
-        bytes: bool,
-    },
-}
-
-/// Parsed config: `component-id -> key -> entry`.
+/// Resolves `wasmcloud:secrets` lookups against per-component namespaces
+/// in the process-global `keyring-core` default store.
+///
+/// Each component id maps to keyring `service = "{prefix}:{component_id}"`;
+/// individual keys are `user`s within it. Resolved values are cached for
+/// the process lifetime.
 pub struct SecretsRegistry {
-    entries: HashMap<String, HashMap<String, Source>>,
+    prefix: String,
     cache: Mutex<HashMap<(String, String), SecretValue>>,
 }
 
 impl SecretsRegistry {
-    pub fn empty() -> Self {
+    /// Build a resolver whose entries live under
+    /// `service = "{prefix}:{component_id}"`.
+    pub fn new(prefix: impl Into<String>) -> Self {
         Self {
-            entries: HashMap::new(),
+            prefix: prefix.into(),
             cache: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Load and validate a TOML config file.
-    pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading secrets config {}", path.display()))?;
-        let raw: HashMap<String, HashMap<String, RawEntry>> = toml::from_str(&text)
-            .with_context(|| format!("parsing secrets config {}", path.display()))?;
-
-        let mut entries: HashMap<String, HashMap<String, Source>> = HashMap::new();
-        for (component_id, keys) in raw {
-            let mut by_key = HashMap::new();
-            for (key, entry) in keys {
-                let source = match (entry.value, entry.command) {
-                    (Some(_), Some(_)) => anyhow::bail!(
-                        "secrets[{component_id}][{key}]: cannot set both `value` and `command`"
-                    ),
-                    (None, None) => anyhow::bail!(
-                        "secrets[{component_id}][{key}]: must set either `value` or `command`"
-                    ),
-                    (Some(v), None) => {
-                        let val = if entry.bytes {
-                            let bytes = base64::engine::general_purpose::STANDARD
-                                .decode(v.as_bytes())
-                                .with_context(|| {
-                                    format!(
-                                        "secrets[{component_id}][{key}]: invalid base64 for `bytes`"
-                                    )
-                                })?;
-                            SecretValue::Bytes(bytes)
-                        } else {
-                            SecretValue::String(v)
-                        };
-                        Source::Plaintext(val)
-                    }
-                    (None, Some(cmd)) => {
-                        let mut iter = cmd.into_iter();
-                        let program = iter.next().with_context(|| {
-                            format!("secrets[{component_id}][{key}]: empty `command`")
-                        })?;
-                        let args: Vec<String> = iter.collect();
-                        let timeout = entry
-                            .timeout_ms
-                            .map(Duration::from_millis)
-                            .unwrap_or(DEFAULT_COMMAND_TIMEOUT);
-                        Source::Command {
-                            program,
-                            args,
-                            timeout,
-                            bytes: entry.bytes,
-                        }
-                    }
-                };
-                by_key.insert(key, source);
-            }
-            entries.insert(component_id, by_key);
-        }
-
-        Ok(Self {
-            entries,
-            cache: Mutex::new(HashMap::new()),
-        })
+    fn service_for(&self, component_id: &str) -> String {
+        service_name(&self.prefix, component_id)
     }
 
     fn cache_get(&self, component_id: &str, key: &str) -> Option<SecretValue> {
@@ -165,216 +120,288 @@ impl SecretsRegistry {
         }
     }
 
-    /// Resolve a secret. Deny-by-default if the component id has no entry
-    /// or the key isn't granted.
+    /// Resolve `key` from `component_id`'s private store. Returns
+    /// [`SecretsError::NotFound`] when the component has no such entry.
     pub async fn resolve(
         &self,
         component_id: &str,
         key: &str,
     ) -> Result<SecretValue, SecretsError> {
-        let source = self
-            .entries
-            .get(component_id)
-            .and_then(|m| m.get(key))
-            .ok_or(SecretsError::NotFound)?;
-
-        match source {
-            Source::Plaintext(v) => Ok(v.clone()),
-            Source::Command {
-                program,
-                args,
-                timeout: t,
-                bytes,
-            } => {
-                if let Some(v) = self.cache_get(component_id, key) {
-                    return Ok(v);
-                }
-                let mut cmd = Command::new(program);
-                cmd.args(args);
-                let fut = cmd.output();
-                let output = match timeout(*t, fut).await {
-                    Err(_) => {
-                        return Err(SecretsError::Io(format!(
-                            "command `{program}` timed out after {:?}",
-                            t
-                        )));
-                    }
-                    Ok(Err(e)) => return Err(SecretsError::Io(format!("spawn: {e}"))),
-                    Ok(Ok(o)) => o,
-                };
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(SecretsError::Upstream(format!(
-                        "command `{program}` exited {}: {}",
-                        output.status,
-                        stderr.trim()
-                    )));
-                }
-                let value = if *bytes {
-                    SecretValue::Bytes(output.stdout)
-                } else {
-                    let mut s = String::from_utf8(output.stdout).map_err(|e| {
-                        SecretsError::Upstream(format!("command output not UTF-8: {e}"))
-                    })?;
-                    if s.ends_with('\n') {
-                        s.pop();
-                        if s.ends_with('\r') {
-                            s.pop();
-                        }
-                    }
-                    SecretValue::String(s)
-                };
-                self.cache_put(component_id, key, value.clone());
-                Ok(value)
-            }
+        if let Some(v) = self.cache_get(component_id, key) {
+            return Ok(v);
         }
+        // keyring-core is synchronous and may block on IPC to the OS
+        // keychain (and can surface a user prompt), so run it off the
+        // async executor.
+        let service = self.service_for(component_id);
+        let key_owned = key.to_string();
+        let value = tokio::task::spawn_blocking(move || fetch_keyring(&service, &key_owned))
+            .await
+            .map_err(|e| SecretsError::Io(format!("keyring task join: {e}")))??;
+        self.cache_put(component_id, key, value.clone());
+        Ok(value)
+    }
+}
+
+/// Read `key` from `service` in the process-global `keyring-core` default
+/// store. Blocking; call from a blocking context (see
+/// [`SecretsRegistry::resolve`]). Bytes that decode as UTF-8 become a
+/// `String`; otherwise they are returned as raw `Bytes`.
+fn fetch_keyring(service: &str, key: &str) -> Result<SecretValue, SecretsError> {
+    let entry = keyring_core::Entry::new(service, key).map_err(map_keyring_error)?;
+    let bytes = entry.get_secret().map_err(map_keyring_error)?;
+    Ok(match String::from_utf8(bytes) {
+        Ok(s) => SecretValue::String(s),
+        Err(e) => SecretValue::Bytes(e.into_bytes()),
+    })
+}
+
+/// Map a `keyring-core` error onto the spec-aligned [`SecretsError`].
+/// `Display` on these variants never includes the secret bytes, so it is
+/// safe to embed in the error message.
+fn map_keyring_error(e: keyring_core::Error) -> SecretsError {
+    use keyring_core::Error as E;
+    match e {
+        // A missing credential is the deny-by-default `not-found`.
+        E::NoEntry => SecretsError::NotFound,
+        // Store misconfiguration / access problems are host-side I/O.
+        E::NoDefaultStore => SecretsError::Io("keyring default store not initialized".to_string()),
+        E::NoStorageAccess(err) => SecretsError::Io(format!("keyring storage access: {err}")),
+        E::PlatformFailure(err) => SecretsError::Io(format!("keyring platform failure: {err}")),
+        // Everything else (ambiguous match, bad encoding, invalid input,
+        // unsupported op, and future non-exhaustive variants) is upstream.
+        other => SecretsError::Upstream(format!("keyring: {other}")),
+    }
+}
+
+/// Store `value` as `key` in `component_id`'s keyring namespace
+/// (`service = "{prefix}:{component_id}"`). Blocking; used by the
+/// `secret set` admin subcommand.
+pub fn set_secret(prefix: &str, component_id: &str, key: &str, value: &SecretValue) -> Result<()> {
+    let service = service_name(prefix, component_id);
+    let entry = keyring_core::Entry::new(&service, key)
+        .with_context(|| format!("opening keyring entry {service}/{key}"))?;
+    match value {
+        SecretValue::String(s) => entry.set_password(s),
+        SecretValue::Bytes(b) => entry.set_secret(b),
+    }
+    .with_context(|| format!("writing keyring entry {service}/{key}"))?;
+    Ok(())
+}
+
+/// Delete `key` from `component_id`'s keyring namespace. Idempotent: a
+/// missing entry is treated as success. Blocking; used by the
+/// `secret delete` admin subcommand.
+pub fn delete_secret(prefix: &str, component_id: &str, key: &str) -> Result<()> {
+    let service = service_name(prefix, component_id);
+    let entry = keyring_core::Entry::new(&service, key)
+        .with_context(|| format!("opening keyring entry {service}/{key}"))?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
+        Err(e) => Err(anyhow::anyhow!("deleting keyring entry {service}/{key}: {e}")),
+    }
+}
+
+/// Selection and initialization of the process-global `keyring-core`
+/// default store that backs all secret lookups.
+///
+/// `keyring-core` keeps a single global default store; entries created
+/// with `Entry::new` resolve against it. The host sets it once at
+/// startup based on `--keyring-store` (see [`Backend`]).
+pub mod keyring_store {
+    use anyhow::Result;
+
+    /// Which `keyring-core` credential store backs secret lookups.
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+    pub enum Backend {
+        /// The platform's native OS credential store (macOS Keychain,
+        /// Windows Credential Manager, or the Linux Secret Service).
+        Native,
+        /// An in-memory store with no persistence. For tests and CI: a
+        /// fresh process starts empty.
+        Mock,
+    }
+
+    /// Install the chosen store as `keyring-core`'s process-global
+    /// default. Call once, before resolving or provisioning any secret.
+    pub fn init_default_store(backend: Backend) -> Result<()> {
+        let store: std::sync::Arc<keyring_core::CredentialStore> = match backend {
+            Backend::Mock => keyring_core::mock::Store::new()
+                .map_err(|e| anyhow::anyhow!("building mock keyring store: {e}"))?,
+            Backend::Native => native_store()?,
+        };
+        keyring_core::set_default_store(store);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn native_store() -> Result<std::sync::Arc<keyring_core::CredentialStore>> {
+        // The User (login) keychain — the general-purpose store a CLI can
+        // reach without a provisioning profile.
+        let store: std::sync::Arc<keyring_core::CredentialStore> =
+            apple_native_keyring_store::keychain::Store::new()
+                .map_err(|e| anyhow::anyhow!("building macOS keychain store: {e}"))?;
+        Ok(store)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn native_store() -> Result<std::sync::Arc<keyring_core::CredentialStore>> {
+        let store: std::sync::Arc<keyring_core::CredentialStore> =
+            dbus_secret_service_keyring_store::Store::new()
+                .map_err(|e| anyhow::anyhow!("building Secret Service keyring store: {e}"))?;
+        Ok(store)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn native_store() -> Result<std::sync::Arc<keyring_core::CredentialStore>> {
+        let store: std::sync::Arc<keyring_core::CredentialStore> =
+            windows_native_keyring_store::Store::new()
+                .map_err(|e| anyhow::anyhow!("building Windows credential store: {e}"))?;
+        Ok(store)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    fn native_store() -> Result<std::sync::Arc<keyring_core::CredentialStore>> {
+        anyhow::bail!(
+            "no native keyring store is available for this target OS; \
+             pass `--keyring-store mock`"
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::sync::Once;
 
-    fn write_config(text: &str) -> tempfile::NamedTempFile {
-        use std::io::Write;
-        let mut f = tempfile::Builder::new().suffix(".toml").tempfile().unwrap();
-        f.write_all(text.as_bytes()).unwrap();
-        f
+    // `set_default_store` is process-global, so every test in this binary
+    // shares one in-memory mock store. Tests use unique component ids to
+    // stay isolated from one another.
+    static MOCK_STORE: Once = Once::new();
+    fn ensure_mock_store() {
+        MOCK_STORE.call_once(|| {
+            keyring_core::set_default_store(keyring_core::mock::Store::new().unwrap());
+        });
     }
 
+    const PREFIX: &str = "test-acp";
+
     #[tokio::test]
-    async fn empty_registry_not_found() {
-        let r = SecretsRegistry::empty();
+    async fn missing_secret_is_not_found() {
+        ensure_mock_store();
+        let r = SecretsRegistry::new(PREFIX);
         assert!(matches!(
-            r.resolve("c", "k").await,
+            r.resolve("missing_comp", "nope").await,
             Err(SecretsError::NotFound)
         ));
     }
 
     #[tokio::test]
-    async fn plaintext_string() {
-        let f = write_config(
-            r#"
-[component_a]
-api_key = { value = "hunter2" }
-"#,
-        );
-        let r = SecretsRegistry::load(f.path()).unwrap();
-        match r.resolve("component_a", "api_key").await.unwrap() {
+    async fn string_secret_round_trips() {
+        ensure_mock_store();
+        set_secret(PREFIX, "comp_str", "api_key", &SecretValue::String("hunter2".into())).unwrap();
+        let r = SecretsRegistry::new(PREFIX);
+        match r.resolve("comp_str", "api_key").await.unwrap() {
             SecretValue::String(s) => assert_eq!(s, "hunter2"),
-            _ => panic!("expected string"),
+            other => panic!("expected string, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn plaintext_bytes_base64() {
-        let f = write_config(
-            r#"
-[component_a]
-blob = { value = "aGVsbG8=", bytes = true }
-"#,
-        );
-        let r = SecretsRegistry::load(f.path()).unwrap();
-        match r.resolve("component_a", "blob").await.unwrap() {
-            SecretValue::Bytes(b) => assert_eq!(b, b"hello"),
-            _ => panic!("expected bytes"),
+    async fn non_utf8_secret_is_returned_as_bytes() {
+        ensure_mock_store();
+        let raw = vec![0xff, 0x00, 0xfe];
+        set_secret(PREFIX, "comp_bytes", "blob", &SecretValue::Bytes(raw.clone())).unwrap();
+        let r = SecretsRegistry::new(PREFIX);
+        match r.resolve("comp_bytes", "blob").await.unwrap() {
+            SecretValue::Bytes(b) => assert_eq!(b, raw),
+            other => panic!("expected bytes, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn cross_component_isolation() {
-        let f = write_config(
-            r#"
-[component_a]
-shared = { value = "for-a" }
-"#,
-        );
-        let r = SecretsRegistry::load(f.path()).unwrap();
+    async fn utf8_bytes_secret_is_returned_as_string() {
+        ensure_mock_store();
+        // Written via the bytes path but valid UTF-8: read back as string.
+        set_secret(PREFIX, "comp_utf8", "k", &SecretValue::Bytes(b"hello".to_vec())).unwrap();
+        let r = SecretsRegistry::new(PREFIX);
+        match r.resolve("comp_utf8", "k").await.unwrap() {
+            SecretValue::String(s) => assert_eq!(s, "hello"),
+            other => panic!("expected string, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn per_component_isolation() {
+        ensure_mock_store();
+        // Two components share the bare name `app` but differ by
+        // namespace; the identity is `namespace:component-name`, so a
+        // secret under one must be invisible to the other.
+        set_secret(PREFIX, "local:app", "shared", &SecretValue::String("owned".into())).unwrap();
+        let r = SecretsRegistry::new(PREFIX);
+        match r.resolve("local:app", "shared").await.unwrap() {
+            SecretValue::String(s) => assert_eq!(s, "owned"),
+            other => panic!("expected string, got {other:?}"),
+        }
         assert!(matches!(
-            r.resolve("component_b", "shared").await,
+            r.resolve("yosh:app", "shared").await,
             Err(SecretsError::NotFound)
         ));
     }
 
     #[tokio::test]
-    async fn command_success_and_cached() {
-        // Counter script: appends to a file, prints incrementing value.
-        let dir = tempfile::tempdir().unwrap();
-        let counter = dir.path().join("count");
-        std::fs::write(&counter, "0").unwrap();
-        let script = dir.path().join("c.sh");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nn=$(cat {p})\necho $((n+1)) > {p}\necho secret-v$n\n",
-                p = counter.display()
-            ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = std::fs::metadata(&script).unwrap().permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&script, perm).unwrap();
-
-        let cfg = format!(
-            r#"
-[c]
-k = {{ command = ["{}"] }}
-"#,
-            script.display()
-        );
-        let f = write_config(&cfg);
-        let r = Arc::new(SecretsRegistry::load(f.path()).unwrap());
-        let first = r.resolve("c", "k").await.unwrap();
-        let second = r.resolve("c", "k").await.unwrap();
-        match (first, second) {
-            (SecretValue::String(a), SecretValue::String(b)) => {
-                assert_eq!(a, b, "cache should return identical value");
-                assert_eq!(a, "secret-v0");
-            }
-            _ => panic!("expected string"),
+    async fn resolution_is_cached() {
+        ensure_mock_store();
+        set_secret(PREFIX, "comp_cache", "k", &SecretValue::String("v1".into())).unwrap();
+        let r = SecretsRegistry::new(PREFIX);
+        match r.resolve("comp_cache", "k").await.unwrap() {
+            SecretValue::String(s) => assert_eq!(s, "v1"),
+            other => panic!("expected string, got {other:?}"),
+        }
+        // Mutate the underlying store; the cached value must win.
+        set_secret(PREFIX, "comp_cache", "k", &SecretValue::String("v2".into())).unwrap();
+        match r.resolve("comp_cache", "k").await.unwrap() {
+            SecretValue::String(s) => assert_eq!(s, "v1", "expected cached value"),
+            other => panic!("expected string, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn command_nonzero_is_upstream_error() {
-        let f = write_config(
-            r#"
-[c]
-k = { command = ["false"] }
-"#,
-        );
-        let r = SecretsRegistry::load(f.path()).unwrap();
+    async fn service_uses_prefix_and_component_id() {
+        ensure_mock_store();
+        // Seed by writing the raw keyring entry the resolver should target,
+        // proving the `{prefix}:{namespace}:{component-name}` service /
+        // `user = key` mapping for a namespaced identity.
+        let service = service_name(PREFIX, "yosh:tablemark");
+        assert_eq!(service, "test-acp:yosh:tablemark");
+        keyring_core::Entry::new(&service, "tok")
+            .unwrap()
+            .set_password("mapped")
+            .unwrap();
+        let r = SecretsRegistry::new(PREFIX);
+        match r.resolve("yosh:tablemark", "tok").await.unwrap() {
+            SecretValue::String(s) => assert_eq!(s, "mapped"),
+            other => panic!("expected string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_removes_secret() {
+        ensure_mock_store();
+        set_secret(PREFIX, "comp_del", "k", &SecretValue::String("bye".into())).unwrap();
+        let service = service_name(PREFIX, "comp_del");
+        assert!(keyring_core::Entry::new(&service, "k").unwrap().get_secret().is_ok());
+        delete_secret(PREFIX, "comp_del", "k").unwrap();
         assert!(matches!(
-            r.resolve("c", "k").await,
-            Err(SecretsError::Upstream(_))
+            keyring_core::Entry::new(&service, "k").unwrap().get_secret(),
+            Err(keyring_core::Error::NoEntry)
         ));
     }
 
-    #[tokio::test]
-    async fn command_spawn_failure_is_io() {
-        let f = write_config(
-            r#"
-[c]
-k = { command = ["/nonexistent/definitely-not-here"] }
-"#,
-        );
-        let r = SecretsRegistry::load(f.path()).unwrap();
-        assert!(matches!(
-            r.resolve("c", "k").await,
-            Err(SecretsError::Io(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn rejects_both_value_and_command() {
-        let f = write_config(
-            r#"
-[c]
-k = { value = "x", command = ["echo", "y"] }
-"#,
-        );
-        assert!(SecretsRegistry::load(f.path()).is_err());
+    #[test]
+    fn delete_missing_is_ok() {
+        ensure_mock_store();
+        // Idempotent: deleting a never-set entry succeeds.
+        delete_secret(PREFIX, "comp_del_missing", "nope").unwrap();
     }
 }

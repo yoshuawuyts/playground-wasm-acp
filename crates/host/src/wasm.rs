@@ -54,9 +54,9 @@ use crate::{Layer, Provider};
 // Factory
 // -----------------------------------------------------------------------------
 
-/// One stage in the routing chain: a pre-loaded wasm `Component` plus the
-/// stable component id used to scope its `/data` preopen and secret
-/// lookups.
+/// One stage in the routing chain: a pre-loaded wasm `Component` plus its
+/// component identity (`namespace:component-name`) used to scope its
+/// `/data` preopen and secret lookups.
 #[derive(Clone)]
 pub struct Stage {
     pub component: Component,
@@ -266,8 +266,10 @@ fn debug_assert_chain_wiring(state: &HostState) {
     );
 }
 
-/// Compute `<project_dir>/<component_id>/` (creating the directory) when a
-/// project dir is supplied; otherwise return `None`.
+/// Compute `<project_dir>/<slug>/` (creating the directory) when a
+/// project dir is supplied; otherwise return `None`. The component
+/// identity is slugified (`namespace:name` → `namespace__name`) so the
+/// `:` never reaches the filesystem (illegal on Windows).
 fn stage_data_dir(
     project_dir: Option<&std::path::Path>,
     component_id: &str,
@@ -275,7 +277,7 @@ fn stage_data_dir(
     let Some(project_dir) = project_dir else {
         return Ok(None);
     };
-    let dir = project_dir.join(component_id);
+    let dir = project_dir.join(component_id.replace(':', "__"));
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating project data dir {}", dir.display()))?;
     Ok(Some(dir))
