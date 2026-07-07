@@ -160,6 +160,80 @@ Expect an `initialize` response, a `session/new` response, a sequence of
 `session/update` notifications streaming the assistant's reply, and finally
 the `session/prompt` response with `stopReason: "end_turn"`.
 
+## GitHub Copilot provider
+
+[`crates/copilot-provider`](crates/copilot-provider) is an alternative provider
+that speaks to the **GitHub Copilot** chat API instead of Ollama. Build and run
+it with:
+
+```shell
+# build the copilot provider
+cargo build -p copilot-provider --target wasm32-wasip2 --release
+
+# one-time: store your GitHub token in the provider's secret store
+gh auth token | cargo run -p host -- secret set local:copilot_provider github_token
+
+# run the host against the Copilot API
+cargo run -p host -- --provider target/wasm32-wasip2/release/copilot_provider.wasm
+```
+
+### Authentication
+
+The guest needs a raw GitHub token, which it exchanges at runtime for a
+short-lived Copilot API token (`GET /copilot_internal/v2/token`). Accepted
+token types: OAuth (`gho_…`), GitHub App (`ghu_…`), and fine-grained PATs
+(`github_pat_…` with the *Copilot Requests* permission). Classic PATs
+(`ghp_…`) are **not** accepted by the Copilot API.
+
+Provide the token via the host secret store (preferred). The guest reads it
+back as `github_token` from its own per-component store — see [Secrets](#secrets)
+for how identity and provisioning work. Loaded from a file, the provider's
+identity is `local:copilot_provider`, so populate its store with the `secret`
+admin subcommand (token read from stdin):
+
+```shell
+# Simplest source: the gh CLI.
+gh auth token | cargo run -p host -- secret set local:copilot_provider github_token
+```
+
+Then run the host normally; no secrets flag is needed:
+
+```shell
+cargo run -p host -- \
+    --provider target/wasm32-wasip2/release/copilot_provider.wasm
+```
+
+If no secret is stored, the guest falls back to the `COPILOT_GITHUB_TOKEN`,
+`GH_TOKEN`, or `GITHUB_TOKEN` environment variables (in that order).
+
+### Configuration
+
+All optional; read from the (inherited) host environment:
+
+| Variable                 | Default                                | Purpose                         |
+|--------------------------|----------------------------------------|---------------------------------|
+| `COPILOT_MODEL`          | `gpt-4o`                                | Default model id                |
+| `COPILOT_BASE_URL`       | from token, else `api.githubcopilot.com` | Override the API base URL     |
+| `COPILOT_EDITOR_VERSION` | `vscode/1.104.1`                       | `Editor-Version` header         |
+| `COPILOT_INTEGRATION_ID` | `vscode-chat`                          | `Copilot-Integration-Id` header |
+
+### Smoke test
+
+```shell
+cargo build -p copilot-provider --target wasm32-wasip2 --release
+gh auth token | cargo run -p host -- secret set local:copilot_provider github_token
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"<id-from-session/new>","prompt":[{"type":"text","text":"hi"}]}}' \
+  | cargo run -p host -- \
+      --provider target/wasm32-wasip2/release/copilot_provider.wasm
+```
+
+Use the `sessionId` returned by the `session/new` response in the
+`session/prompt` call. Like the Ollama provider, this MVP is **text only** — it
+streams assistant text and does not yet surface tool calls, images, or audio.
+
 ## Crates
 
 - [`crates/acp-wasm-sys`](crates/acp-wasm-sys) — auto-generated WIT bindings
@@ -167,6 +241,11 @@ the `session/prompt` response with `stopReason: "end_turn"`.
 - [`crates/ollama-provider`](crates/ollama-provider) — the wasm component:
   implements the ACP `agent` interface, calls Ollama via `wstd::http`, keeps
   per-session conversation history.
+- [`crates/copilot-provider`](crates/copilot-provider) — an alternative wasm
+  component that talks to the **GitHub Copilot** chat API: resolves a GitHub
+  token (host secrets store or env), exchanges it for a short-lived Copilot
+  API token, and streams OpenAI-compatible chat completions. See
+  [GitHub Copilot provider](#github-copilot-provider).
 - [`crates/host`](crates/host) — the wasmtime host: instantiates the
   ollama-provider component, speaks ACP JSON-RPC over stdio, translates
   between WIT and ACP schema types.

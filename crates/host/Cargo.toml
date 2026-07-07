@@ -27,6 +27,7 @@ component-package-manager = { workspace = true }
 dirs = "5"
 semver = "1"
 keyring-core = { workspace = true }
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
 
 # Platform-native keyring-core credential stores. The `native` backend for
 # `--keyring-store` resolves to whichever of these matches the target OS; the

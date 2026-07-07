@@ -220,6 +220,14 @@ impl LogLevel {
 }
 
 fn main() -> Result<()> {
+    // rustls 0.23 links both crypto backends in this dependency graph
+    // (wasmtime-wasi-http + oci-client pull `aws-lc-rs`; reqwest/hyper-rustls
+    // pull `ring`), so it cannot auto-select a process-level CryptoProvider
+    // and panics on the first outbound TLS handshake made by a guest. Install
+    // `aws-lc-rs` explicitly to match wasmtime's TLS backend. Idempotent — the
+    // `Err` (provider already installed) is safe to ignore.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let args = Args::parse();
     init_logging(&args)?;
 
