@@ -135,11 +135,17 @@ head -c 32 /dev/urandom | cargo run -p host -- secret set local:ollama_provider 
 
 # Remove a secret (idempotent).
 cargo run -p host -- secret delete local:ollama_provider api_key
+
+# Check whether a secret is set, without revealing it
+# (exits 0 if set, 1 if not — usable as a shell predicate).
+cargo run -p host -- secret check local:ollama_provider api_key
 ```
 
 A single trailing newline is stripped from string values, so `printf 'x\n'`
 and `printf 'x'` store the same secret; pass `--bytes` to store stdin exactly.
-The component then reads it back via `store.get("api_key")`.
+The component then reads it back via `store.get("api_key")`. `secret check`
+probes existence without decrypting the value, so it never reads (or prompts
+for) the secret it reports on.
 
 [`keyring-core`]: https://docs.rs/keyring-core
 
@@ -194,6 +200,9 @@ admin subcommand (token read from stdin):
 ```shell
 # Simplest source: the gh CLI.
 gh auth token | cargo run -p host -- secret set local:copilot_provider github_token
+
+# Verify it's stored (exit 0 = set, 1 = unset); the token is never printed.
+cargo run -p host -- secret check local:copilot_provider github_token
 ```
 
 Then run the host normally; no secrets flag is needed:
