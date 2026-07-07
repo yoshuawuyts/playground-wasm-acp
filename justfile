@@ -1,19 +1,17 @@
-# Generate WIT bindings for the ollama-provider crate.
+# Generate all WIT bindings for the acp-wasm-sys crate (provider + layer worlds).
 bindgen: bindgen-provider bindgen-layer
 
-# Build everything: ollama-provider + uppercase-layer wasm components + host binary.
-build: build-provider build-layer build-plan-layer build-host
+# Build everything: provider + layer wasm components + host binary.
+build: build-providers build-layers build-host
 
-# Build the ollama-provider wasm component (release).
-build-provider:
+# Build the provider wasm components (release).
+build-providers:
     cargo build -p ollama-provider --target wasm32-wasip2 --release
+    cargo build -p copilot-provider --target wasm32-wasip2 --release
 
-# Build the uppercase-layer wasm component (release).
-build-layer:
+# Build the layer wasm components (release).
+build-layers:
     cargo build -p uppercase-layer --target wasm32-wasip2 --release
-
-# Build the plan-layer wasm component (release).
-build-plan-layer:
     cargo build -p plan-layer --target wasm32-wasip2 --release
 
 # Build the host binary.
@@ -33,11 +31,11 @@ run: build
         --provider target/wasm32-wasip2/release/ollama_provider.wasm \
         --layer target/wasm32-wasip2/release/uppercase_layer.wasm
 
-# Build and open docs for the ollama-provider bindings.
+# Build and open docs for the acp-wasm-sys bindings.
 doc-provider:
     cargo doc -p acp-wasm-sys --no-deps --open
 
-# Generate ollama-provider bindings (provider world).
+# Generate the provider-world bindings (shared by the ollama + copilot providers).
 bindgen-provider:
     wit-bindgen rust wit/acp \
         --world provider \
@@ -47,7 +45,7 @@ bindgen-provider:
         --out-dir crates/acp-wasm-sys/src \
         --format
 
-# Generate uppercase-layer bindings (layer world).
+# Generate the layer-world bindings (shared by the uppercase + plan layers).
 #
 # After generation we rename the layer's `agent` cabi export macro to
 # avoid a `#[macro_export]` collision with the provider world's macro
