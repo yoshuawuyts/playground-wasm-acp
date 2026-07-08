@@ -13,8 +13,8 @@ Copilot** chat API instead of Ollama. It's a `yosh:acp/provider` guest that the
 # build the copilot provider
 cargo build -p copilot-provider --target wasm32-wasip2 --release
 
-# one-time: store a Copilot-entitled GitHub token (see "Authentication" —
-# a plain `gh auth token` is not entitled and will 404 at exchange)
+# one-time: store a GitHub token from an account with a Copilot subscription
+# (a `gh auth token` from the GitHub CLI works — see "Authentication")
 gh auth token | cargo run -p host -- secret set local:copilot_provider github_token
 
 # run the host against the Copilot API
@@ -23,42 +23,29 @@ cargo run -p host -- --provider target/wasm32-wasip2/release/copilot_provider.wa
 
 ## Authentication
 
-The guest needs a raw GitHub token, which it exchanges at runtime for a
-short-lived Copilot API token (`GET /copilot_internal/v2/token`). **Two
-conditions must both hold**, or the exchange fails:
+The guest needs a GitHub token from an account with an **active Copilot
+subscription**. A `gh auth token` from the GitHub CLI works directly — there is
+no separate "grant" step and no editor OAuth-app dance.
 
-- **Token type** — OAuth (`gho_…`), GitHub App (`ghu_…`), or a fine-grained
-  PAT (`github_pat_…` with the *Copilot Requests* permission). Classic PATs
-  (`ghp_…`) are rejected up front.
-- **Copilot entitlement** — the token's OAuth app must be authorized for
-  Copilot *and* the account must have an active Copilot subscription. A token
-  that authenticates but isn't entitled makes the exchange return **`404 Not
-  Found`** (not `403`). In particular a **`gh auth token` from the GitHub CLI
-  is _not_ Copilot-entitled** — it's a valid `gho_…` token, so it passes the
-  prefix check, but it 404s at exchange.
+**Accepted token types:** OAuth (`gho_…`), GitHub App (`ghu_…`), and
+fine-grained PATs (`github_pat_…` with the *Copilot Requests* permission).
+Classic PATs (`ghp_…`) are rejected up front.
 
-The reliable way to mint an *entitled* token is GitHub's device flow against a
-Copilot editor OAuth app (`client_id=Iv1.b507a08c87ecfe98`, the client editor
-integrations use). This runs the flow and stores the result in the provider's
-secret store (identity `local:copilot_provider` when loaded from a file — see
-[Secrets](../../README.md#secrets)); it needs `curl` and `python3`:
+**How the token is used.** The guest first tries GitHub's editor token-exchange
+endpoint (`GET /copilot_internal/v2/token`). That endpoint only accepts tokens
+minted by a Copilot-enabled *editor* OAuth app, so for a GitHub CLI token or a
+fine-grained PAT it returns `404`. The guest treats that as "exchange
+unavailable" and falls back to sending the GitHub token **directly** to the
+chat API (`https://api.githubcopilot.com`) as a bearer token, which those
+tokens are accepted for. So both kinds of token just work — you never have to
+care which path ran.
+
+Provision the token into the provider's secret store (identity
+`local:copilot_provider` when loaded from a file — see
+[Secrets](../../README.md#secrets)); the value is read from stdin:
 
 ```shell
-cid=Iv1.b507a08c87ecfe98
-resp=$(curl -s https://github.com/login/device/code \
-  -d "client_id=$cid&scope=read:user" -H 'accept: application/json')
-device_code=$(printf %s "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["device_code"])')
-printf %s "$resp" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("Open", d["verification_uri"], "and enter code:", d["user_code"])'
-
-# Authorize in the browser, then poll until the token is issued:
-until token=$(curl -s https://github.com/login/oauth/access_token \
-      -d "client_id=$cid&device_code=$device_code&grant_type=urn:ietf:params:oauth:grant-type:device_code" \
-      -H 'accept: application/json' \
-      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))') \
-    && [ -n "$token" ]; do sleep 5; done
-
-printf %s "$token" | cargo run -p host -- secret set local:copilot_provider github_token
-unset token
+gh auth token | cargo run -p host -- secret set local:copilot_provider github_token
 ```
 
 Verify it landed — exit 0 = set, 1 = unset; the token is never printed:
@@ -66,10 +53,6 @@ Verify it landed — exit 0 = set, 1 = unset; the token is never printed:
 ```shell
 cargo run -p host -- secret check local:copilot_provider github_token
 ```
-
-If your GitHub CLI login *is* Copilot-entitled, the shorter
-`gh auth token | cargo run -p host -- secret set local:copilot_provider github_token`
-works too — but if it 404s at exchange, fall back to the device flow above.
 
 Then run the host normally; no secrets flag is needed:
 
@@ -79,7 +62,8 @@ cargo run -p host -- \
 ```
 
 If no secret is stored, the guest falls back to the `COPILOT_GITHUB_TOKEN`,
-`GH_TOKEN`, or `GITHUB_TOKEN` environment variables (in that order).
+`GH_TOKEN`, or `GITHUB_TOKEN` environment variables (in that order) — handy for
+CI (`GH_TOKEN=$(gh auth token)`).
 
 ## Configuration
 
@@ -96,8 +80,8 @@ All optional; read from the (inherited) host environment:
 
 ```shell
 cargo build -p copilot-provider --target wasm32-wasip2 --release
-# Provision a Copilot-entitled token first (see "Authentication"); a plain
-# `gh auth token` will 404 at exchange if it isn't entitled.
+# A `gh auth token` from the GitHub CLI works (account needs a Copilot
+# subscription); see "Authentication".
 gh auth token | cargo run -p host -- secret set local:copilot_provider github_token
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false}}}' \

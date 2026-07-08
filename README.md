@@ -175,8 +175,8 @@ that speaks to the **GitHub Copilot** chat API instead of Ollama:
 # build the copilot provider
 cargo build -p copilot-provider --target wasm32-wasip2 --release
 
-# one-time: store a Copilot-entitled GitHub token — see the provider README
-# (a plain `gh auth token` is not entitled and will 404 at exchange)
+# one-time: store a GitHub token from an account with a Copilot subscription —
+# a `gh auth token` from the GitHub CLI works (see the provider README)
 gh auth token | cargo run -p host -- secret set local:copilot_provider github_token
 
 # run the host against the Copilot API
@@ -184,8 +184,9 @@ cargo run -p host -- --provider target/wasm32-wasip2/release/copilot_provider.wa
 ```
 
 See **[`crates/copilot-provider/README.md`](crates/copilot-provider/README.md)**
-for GitHub token authentication (including the device-flow recipe that mints a
-Copilot-entitled token), configuration, and a full smoke test.
+for GitHub token authentication (token types and how the guest falls back from
+the editor token-exchange to direct-token auth), configuration, and a full
+smoke test.
 
 ## Crates
 

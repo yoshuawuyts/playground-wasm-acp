@@ -1,15 +1,22 @@
 //! Minimal client for the GitHub Copilot chat API.
 //!
-//! Two hops are involved:
+//! Authentication has two possible shapes:
 //!
-//! 1. **Token exchange.** A raw GitHub token (OAuth `gho_`, GitHub App
-//!    `ghu_`, or fine-grained PAT `github_pat_`) is exchanged at
+//! 1. **Token exchange (editor apps).** A GitHub token minted by a
+//!    Copilot-enabled *editor* OAuth app is exchanged at
 //!    `GET https://api.github.com/copilot_internal/v2/token` for a
-//!    short-lived Copilot API token plus the account's API base URL.
-//!    The result is cached in-process and refreshed before expiry.
-//! 2. **Chat / models.** The exchanged token authenticates
-//!    `POST {base}/chat/completions` (OpenAI-compatible, streamed as
-//!    Server-Sent Events) and `GET {base}/models`.
+//!    short-lived Copilot API token plus the account's API base URL. This
+//!    endpoint returns `404` for tokens it doesn't recognise — notably a
+//!    `gh auth token` from the GitHub CLI, or a fine-grained PAT — even
+//!    though those same tokens work fine against the chat API.
+//! 2. **Direct token (fallback).** When the exchange is unavailable we send
+//!    the raw GitHub token (OAuth `gho_`, GitHub App `ghu_`, or a fine-grained
+//!    PAT `github_pat_` with the *Copilot Requests* permission) straight to
+//!    the chat API as a bearer token.
+//!
+//! Either way the resulting token authenticates
+//! `POST {base}/chat/completions` (OpenAI-compatible, streamed as
+//! Server-Sent Events) and `GET {base}/models`, and is cached in-process.
 //!
 //! The raw GitHub token is resolved from the host secrets store (key
 //! `github_token`, scoped to this component id) with an environment
@@ -34,6 +41,12 @@ const USER_AGENT: &str = "playground-wasm-acp/0.1";
 
 /// Refresh the Copilot token this many seconds before it actually expires.
 const REFRESH_MARGIN_SECS: u64 = 120;
+
+/// How long a direct (un-exchanged) GitHub token is cached before the raw
+/// token is re-resolved. A long-lived GitHub token carries no server-provided
+/// expiry, so this is just a periodic refresh; a mid-session `401` forces an
+/// earlier re-resolution via [`invalidate_token`].
+const DIRECT_TOKEN_TTL_SECS: u64 = 8 * 3600;
 
 /// Environment variables checked (in order) for a raw GitHub token when
 /// the secrets store has none. Matches the Copilot CLI's precedence.
@@ -171,7 +184,12 @@ pub async fn copilot_token() -> Result<CopilotToken, String> {
         }
     }
     let github_token = resolve_github_token()?;
-    let fresh = exchange_token(&github_token).await?;
+    let fresh = match try_exchange(&github_token).await? {
+        Some(exchanged) => exchanged,
+        // The exchange endpoint doesn't accept this token (gh-CLI tokens and
+        // fine-grained PATs 404 there); use it directly against the chat API.
+        None => direct_token(github_token),
+    };
     TOKEN_CACHE.with(|c| *c.borrow_mut() = Some(fresh.clone()));
     Ok(fresh)
 }
@@ -182,8 +200,14 @@ pub fn invalidate_token() {
     TOKEN_CACHE.with(|c| *c.borrow_mut() = None);
 }
 
-/// Exchange a raw GitHub token for a short-lived Copilot API token.
-async fn exchange_token(github_token: &str) -> Result<CopilotToken, String> {
+/// Try to exchange a raw GitHub token for a short-lived Copilot API token.
+///
+/// Returns `Ok(Some(_))` on success. Returns `Ok(None)` when the exchange
+/// endpoint rejects the token with any non-success status — expected for
+/// GitHub CLI tokens and fine-grained PATs, which the exchange endpoint `404`s
+/// but the chat API accepts directly, so the caller falls back to
+/// [`direct_token`]. Only a transport failure yields `Err`.
+async fn try_exchange(github_token: &str) -> Result<Option<CopilotToken>, String> {
     let req = Request::builder()
         .method(Method::GET)
         .uri(token_exchange_url())
@@ -198,28 +222,11 @@ async fn exchange_token(github_token: &str) -> Result<CopilotToken, String> {
         .send(req)
         .await
         .map_err(|e| format!("token exchange send: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let txt = resp
-            .body_mut()
-            .str_contents()
-            .await
-            .unwrap_or("<unreadable>")
-            .to_string();
-        // GitHub returns 404 (not 403) when the token authenticates but the
-        // account/OAuth-app carries no Copilot entitlement — notably a
-        // `gh auth token` from the GitHub CLI, whose OAuth app is not
-        // Copilot-enabled. Turn the bare "Not Found" into an actionable hint.
-        let hint = match status.as_u16() {
-            404 => " — the token is valid but not Copilot-entitled. A GitHub CLI \
-token (`gh auth token`) does not work here; mint one from a Copilot editor app \
-via the device flow (see the copilot-provider README, \"Authentication\") and \
-ensure the account has an active Copilot subscription",
-            401 => " — the token was rejected as expired or invalid",
-            403 => " — the token is forbidden from the Copilot API (missing Copilot permission)",
-            _ => "",
-        };
-        return Err(format!("copilot token exchange HTTP {status}: {txt}{hint}"));
+    if !resp.status().is_success() {
+        // Exchange unavailable for this token (commonly `404` for gh-CLI
+        // tokens and fine-grained PATs). Signal the caller to use the token
+        // directly rather than surfacing a misleading "Not Found".
+        return Ok(None);
     }
 
     let body = resp
@@ -241,11 +248,22 @@ ensure the account has an active Copilot subscription",
 
     let expires_at = body.expires_at.unwrap_or_else(|| now_secs() + 1800);
 
-    Ok(CopilotToken {
+    Ok(Some(CopilotToken {
         token: body.token,
         base_url,
         expires_at,
-    })
+    }))
+}
+
+/// Build a direct-auth token: the raw GitHub token is used as the chat API
+/// bearer token, against the `COPILOT_BASE_URL` override or [`DEFAULT_BASE_URL`].
+/// Used when the token exchange is unavailable (see [`try_exchange`]).
+fn direct_token(github_token: String) -> CopilotToken {
+    CopilotToken {
+        token: github_token,
+        base_url: base_url_override().unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+        expires_at: now_secs() + DIRECT_TOKEN_TTL_SECS,
+    }
 }
 
 /// Derive an API base URL from the `proxy-ep` field embedded in an exchanged
