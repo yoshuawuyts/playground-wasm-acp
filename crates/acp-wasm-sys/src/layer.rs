@@ -4159,9 +4159,54 @@ pub mod yosh {
                         .finish()
                 }
             }
+            /// Monetary cost associated with a [`usage-update`].
+            #[derive(Clone)]
+            pub struct UsageCost {
+                /// The cost amount, expressed in `currency` units.
+                pub amount: f64,
+                /// ISO 4217 currency code (e.g. `USD`).
+                pub currency: _rt::String,
+            }
+            impl ::core::fmt::Debug for UsageCost {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("UsageCost")
+                        .field("amount", &self.amount)
+                        .field("currency", &self.currency)
+                        .finish()
+                }
+            }
             /// ------------------------------------------------------------------
             /// Session updates (streamed body of a prompt-turn)
             /// ------------------------------------------------------------------
+            /// Token usage for a session's context window, letting the client
+            /// render a "context %" indicator. Context % = `used` / `size`.
+            ///
+            /// Mirrors ACP's stable `usage_update` session update.
+            /// See: <https://agentclientprotocol.com/protocol/session-updates>
+            #[derive(Clone)]
+            pub struct UsageUpdate {
+                /// Tokens currently occupying the model's context window.
+                pub used: u64,
+                /// Total size of the model's context window, in tokens.
+                pub size: u64,
+                /// Optional monetary cost accrued by the session so far.
+                pub cost: Option<UsageCost>,
+            }
+            impl ::core::fmt::Debug for UsageUpdate {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("UsageUpdate")
+                        .field("used", &self.used)
+                        .field("size", &self.size)
+                        .field("cost", &self.cost)
+                        .finish()
+                }
+            }
             /// A single item in [`agent.prompt-turn.updates`]'s stream.
             /// Variants follow the `sessionUpdate` discriminator in the JSON
             /// wire protocol.
@@ -4181,6 +4226,9 @@ pub mod yosh {
                 CurrentModeUpdate(SessionModeId),
                 SessionInfoUpdate(SessionInfoUpdate),
                 AvailableCommandsUpdate(_rt::Vec<AvailableCommand>),
+                /// Token usage for the session context, so the client can show
+                /// a "context %" indicator (context % = `used` / `size`).
+                UsageUpdate(UsageUpdate),
             }
             impl ::core::fmt::Debug for SessionUpdate {
                 fn fmt(
@@ -4228,6 +4276,9 @@ pub mod yosh {
                             f.debug_tuple("SessionUpdate::AvailableCommandsUpdate")
                                 .field(e)
                                 .finish()
+                        }
+                        SessionUpdate::UsageUpdate(e) => {
+                            f.debug_tuple("SessionUpdate::UsageUpdate").field(e).finish()
                         }
                     }
                 }
@@ -20771,6 +20822,23 @@ mod _rt {
             unsafe { core::hint::unreachable_unchecked() }
         }
     }
+    pub fn as_f64<T: AsF64>(t: T) -> f64 {
+        t.as_f64()
+    }
+    pub trait AsF64 {
+        fn as_f64(self) -> f64;
+    }
+    impl<'a, T: Copy + AsF64> AsF64 for &'a T {
+        fn as_f64(self) -> f64 {
+            (*self).as_f64()
+        }
+    }
+    impl AsF64 for f64 {
+        #[inline]
+        fn as_f64(self) -> f64 {
+            self as f64
+        }
+    }
     pub unsafe fn bool_lift(val: u8) -> bool {
         if cfg!(debug_assertions) {
             match val {
@@ -20846,10 +20914,10 @@ pub mod wit_stream {
         unsafe fn lift(ptr: *mut u8) -> super::super::yosh::acp::prompts::SessionUpdate {
             unsafe {
                 let l0 = i32::from(*ptr.add(0).cast::<u8>());
-                use super::super::yosh::acp::prompts::SessionUpdate as V432;
-                let v432 = match l0 {
+                use super::super::yosh::acp::prompts::SessionUpdate as V439;
+                let v439 = match l0 {
                     0 => {
-                        let e432 = {
+                        let e439 = {
                             let l1 = i32::from(*ptr.add(8).cast::<u8>());
                             use super::super::yosh::acp::content::ContentBlock as V63;
                             let v63 = match l1 {
@@ -21227,10 +21295,10 @@ pub mod wit_stream {
                             };
                             v63
                         };
-                        V432::UserMessageChunk(e432)
+                        V439::UserMessageChunk(e439)
                     }
                     1 => {
-                        let e432 = {
+                        let e439 = {
                             let l64 = i32::from(*ptr.add(8).cast::<u8>());
                             use super::super::yosh::acp::content::ContentBlock as V126;
                             let v126 = match l64 {
@@ -21608,10 +21676,10 @@ pub mod wit_stream {
                             };
                             v126
                         };
-                        V432::AgentMessageChunk(e432)
+                        V439::AgentMessageChunk(e439)
                     }
                     2 => {
-                        let e432 = {
+                        let e439 = {
                             let l127 = i32::from(*ptr.add(8).cast::<u8>());
                             use super::super::yosh::acp::content::ContentBlock as V189;
                             let v189 = match l127 {
@@ -21989,10 +22057,10 @@ pub mod wit_stream {
                             };
                             v189
                         };
-                        V432::AgentThoughtChunk(e432)
+                        V439::AgentThoughtChunk(e439)
                     }
                     3 => {
-                        let e432 = {
+                        let e439 = {
                             let l190 = *ptr.add(8).cast::<*mut u8>();
                             let l191 = *ptr
                                 .add(8 + 1 * ::core::mem::size_of::<*const u8>())
@@ -22630,10 +22698,10 @@ pub mod wit_stream {
                                 },
                             }
                         };
-                        V432::ToolCall(e432)
+                        V439::ToolCall(e439)
                     }
                     4 => {
-                        let e432 = {
+                        let e439 = {
                             let l295 = *ptr.add(8).cast::<*mut u8>();
                             let l296 = *ptr
                                 .add(8 + 1 * ::core::mem::size_of::<*const u8>())
@@ -23271,10 +23339,10 @@ pub mod wit_stream {
                                 },
                             }
                         };
-                        V432::ToolCallUpdate(e432)
+                        V439::ToolCallUpdate(e439)
                     }
                     5 => {
-                        let e432 = {
+                        let e439 = {
                             let l400 = *ptr.add(8).cast::<*mut u8>();
                             let l401 = *ptr
                                 .add(8 + 1 * ::core::mem::size_of::<*const u8>())
@@ -23329,10 +23397,10 @@ pub mod wit_stream {
                                 entries: result407,
                             }
                         };
-                        V432::Plan(e432)
+                        V439::Plan(e439)
                     }
                     6 => {
-                        let e432 = {
+                        let e439 = {
                             let l408 = *ptr.add(8).cast::<*mut u8>();
                             let l409 = *ptr
                                 .add(8 + 1 * ::core::mem::size_of::<*const u8>())
@@ -23345,10 +23413,10 @@ pub mod wit_stream {
                             );
                             super::super::_rt::string_lift(bytes410)
                         };
-                        V432::CurrentModeUpdate(e432)
+                        V439::CurrentModeUpdate(e439)
                     }
                     7 => {
-                        let e432 = {
+                        let e439 = {
                             let l411 = i32::from(*ptr.add(8).cast::<u8>());
                             let l415 = i32::from(
                                 *ptr
@@ -23402,11 +23470,10 @@ pub mod wit_stream {
                                 },
                             }
                         };
-                        V432::SessionInfoUpdate(e432)
+                        V439::SessionInfoUpdate(e439)
                     }
-                    n => {
-                        debug_assert_eq!(n, 8, "invalid enum discriminant");
-                        let e432 = {
+                    8 => {
+                        let e439 = {
                             let l419 = *ptr.add(8).cast::<*mut u8>();
                             let l420 = *ptr
                                 .add(8 + 1 * ::core::mem::size_of::<*const u8>())
@@ -23485,10 +23552,47 @@ pub mod wit_stream {
                             );
                             result431
                         };
-                        V432::AvailableCommandsUpdate(e432)
+                        V439::AvailableCommandsUpdate(e439)
+                    }
+                    n => {
+                        debug_assert_eq!(n, 9, "invalid enum discriminant");
+                        let e439 = {
+                            let l432 = *ptr.add(8).cast::<i64>();
+                            let l433 = *ptr.add(16).cast::<i64>();
+                            let l434 = i32::from(*ptr.add(24).cast::<u8>());
+                            super::super::yosh::acp::prompts::UsageUpdate {
+                                used: l432 as u64,
+                                size: l433 as u64,
+                                cost: match l434 {
+                                    0 => None,
+                                    1 => {
+                                        let e = {
+                                            let l435 = *ptr.add(32).cast::<f64>();
+                                            let l436 = *ptr.add(40).cast::<*mut u8>();
+                                            let l437 = *ptr
+                                                .add(40 + 1 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>();
+                                            let len438 = l437;
+                                            let bytes438 = super::super::_rt::Vec::from_raw_parts(
+                                                l436.cast(),
+                                                len438,
+                                                len438,
+                                            );
+                                            super::super::yosh::acp::prompts::UsageCost {
+                                                amount: l435,
+                                                currency: super::super::_rt::string_lift(bytes438),
+                                            }
+                                        };
+                                        Some(e)
+                                    }
+                                    _ => super::super::_rt::invalid_enum_discriminant(),
+                                },
+                            }
+                        };
+                        V439::UsageUpdate(e439)
                     }
                 };
-                v432
+                v439
             }
         }
         unsafe fn lower(
@@ -23496,9 +23600,9 @@ pub mod wit_stream {
             ptr: *mut u8,
         ) {
             unsafe {
-                use super::super::yosh::acp::prompts::SessionUpdate as V174;
+                use super::super::yosh::acp::prompts::SessionUpdate as V177;
                 match value {
-                    V174::UserMessageChunk(e) => {
+                    V177::UserMessageChunk(e) => {
                         *ptr.add(0).cast::<u8>() = (0i32) as u8;
                         use super::super::yosh::acp::content::ContentBlock as V25;
                         match e {
@@ -23810,7 +23914,7 @@ pub mod wit_stream {
                             }
                         }
                     }
-                    V174::AgentMessageChunk(e) => {
+                    V177::AgentMessageChunk(e) => {
                         *ptr.add(0).cast::<u8>() = (1i32) as u8;
                         use super::super::yosh::acp::content::ContentBlock as V51;
                         match e {
@@ -24122,7 +24226,7 @@ pub mod wit_stream {
                             }
                         }
                     }
-                    V174::AgentThoughtChunk(e) => {
+                    V177::AgentThoughtChunk(e) => {
                         *ptr.add(0).cast::<u8>() = (2i32) as u8;
                         use super::super::yosh::acp::content::ContentBlock as V77;
                         match e {
@@ -24434,7 +24538,7 @@ pub mod wit_stream {
                             }
                         }
                     }
-                    V174::ToolCall(e) => {
+                    V177::ToolCall(e) => {
                         *ptr.add(0).cast::<u8>() = (3i32) as u8;
                         let super::super::yosh::acp::tools::ToolCallSnapshot {
                             id: id78,
@@ -24968,7 +25072,7 @@ pub mod wit_stream {
                             }
                         };
                     }
-                    V174::ToolCallUpdate(e) => {
+                    V177::ToolCallUpdate(e) => {
                         *ptr.add(0).cast::<u8>() = (4i32) as u8;
                         let super::super::yosh::acp::tools::ToolCallSnapshot {
                             id: id119,
@@ -25502,7 +25606,7 @@ pub mod wit_stream {
                             }
                         };
                     }
-                    V174::Plan(e) => {
+                    V177::Plan(e) => {
                         *ptr.add(0).cast::<u8>() = (5i32) as u8;
                         let super::super::yosh::acp::tools::Plan {
                             entries: entries160,
@@ -25550,7 +25654,7 @@ pub mod wit_stream {
                             .cast::<usize>() = len163;
                         *ptr.add(8).cast::<*mut u8>() = result163;
                     }
-                    V174::CurrentModeUpdate(e) => {
+                    V177::CurrentModeUpdate(e) => {
                         *ptr.add(0).cast::<u8>() = (6i32) as u8;
                         let vec164 = (e.into_bytes()).into_boxed_slice();
                         let ptr164 = vec164.as_ptr().cast::<u8>();
@@ -25561,7 +25665,7 @@ pub mod wit_stream {
                             .cast::<usize>() = len164;
                         *ptr.add(8).cast::<*mut u8>() = ptr164.cast_mut();
                     }
-                    V174::SessionInfoUpdate(e) => {
+                    V177::SessionInfoUpdate(e) => {
                         *ptr.add(0).cast::<u8>() = (7i32) as u8;
                         let super::super::yosh::acp::sessions::SessionInfoUpdate {
                             title: title165,
@@ -25608,7 +25712,7 @@ pub mod wit_stream {
                             }
                         };
                     }
-                    V174::AvailableCommandsUpdate(e) => {
+                    V177::AvailableCommandsUpdate(e) => {
                         *ptr.add(0).cast::<u8>() = (8i32) as u8;
                         let vec173 = e;
                         let len173 = vec173.len();
@@ -25682,6 +25786,39 @@ pub mod wit_stream {
                             .add(8 + 1 * ::core::mem::size_of::<*const u8>())
                             .cast::<usize>() = len173;
                         *ptr.add(8).cast::<*mut u8>() = result173;
+                    }
+                    V177::UsageUpdate(e) => {
+                        *ptr.add(0).cast::<u8>() = (9i32) as u8;
+                        let super::super::yosh::acp::prompts::UsageUpdate {
+                            used: used174,
+                            size: size174,
+                            cost: cost174,
+                        } = e;
+                        *ptr.add(8).cast::<i64>() = super::super::_rt::as_i64(used174);
+                        *ptr.add(16).cast::<i64>() = super::super::_rt::as_i64(size174);
+                        match cost174 {
+                            Some(e) => {
+                                *ptr.add(24).cast::<u8>() = (1i32) as u8;
+                                let super::super::yosh::acp::prompts::UsageCost {
+                                    amount: amount175,
+                                    currency: currency175,
+                                } = e;
+                                *ptr.add(32).cast::<f64>() = super::super::_rt::as_f64(
+                                    amount175,
+                                );
+                                let vec176 = (currency175.into_bytes()).into_boxed_slice();
+                                let ptr176 = vec176.as_ptr().cast::<u8>();
+                                let len176 = vec176.len();
+                                ::core::mem::forget(vec176);
+                                *ptr
+                                    .add(40 + 1 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>() = len176;
+                                *ptr.add(40).cast::<*mut u8>() = ptr176.cast_mut();
+                            }
+                            None => {
+                                *ptr.add(24).cast::<u8>() = (0i32) as u8;
+                            }
+                        };
                     }
                 }
             }
@@ -26982,7 +27119,7 @@ pub mod wit_stream {
                             }
                         }
                     }
-                    _ => {
+                    8 => {
                         let l280 = *ptr.add(8).cast::<*mut u8>();
                         let l281 = *ptr
                             .add(8 + 1 * ::core::mem::size_of::<*const u8>())
@@ -27029,6 +27166,19 @@ pub mod wit_stream {
                             len289 * (7 * ::core::mem::size_of::<*const u8>()),
                             ::core::mem::size_of::<*const u8>(),
                         );
+                    }
+                    _ => {
+                        let l290 = i32::from(*ptr.add(24).cast::<u8>());
+                        match l290 {
+                            0 => {}
+                            _ => {
+                                let l291 = *ptr.add(40).cast::<*mut u8>();
+                                let l292 = *ptr
+                                    .add(40 + 1 * ::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                super::super::_rt::cabi_dealloc(l291, l292, 1);
+                            }
+                        }
                     }
                 }
             }
@@ -27162,9 +27312,9 @@ macro_rules! __export_layer_impl {
         = { #[rustfmt::skip] #[cfg(target_arch = "wasm32")] #[unsafe (link_section =
         "component-type:wit-bindgen:0.54.0:yosh:acp@7.0.0:layer:imports and exports")]
         #[doc(hidden)] #[allow(clippy::octal_escapes)] pub static
-        __WIT_BINDGEN_COMPONENT_TYPE : [u8; 10100] = *
+        __WIT_BINDGEN_COMPONENT_TYPE : [u8; 10195] = *
         b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xf8M\x01A\x02\x01A?\x01\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xd7N\x01A\x02\x01A?\x01\
 B\x04\x01q\x08\x0bparse-error\0\0\x0finvalid-request\0\0\x10method-not-found\0\0\
 \x0einvalid-params\0\0\x0einternal-error\0\0\x0dauth-required\0\0\x12resource-no\
 t-found\0\0\x05other\x01z\0\x04\0\x0aerror-code\x03\0\0\x01r\x02\x04code\x01\x07\
@@ -27261,26 +27411,28 @@ ssion-outcome\x03\0/\x01r\x01\x07outcome0\x04\0\x1brequest-permission-response\x
 h\x06\x01C\x02\x04self5\x05patch\x1c\x01\0\x04\0\x18[method]tool-call.update\x01\
 6\x03\0\x14yosh:acp/tools@7.0.0\x05\x09\x02\x03\0\x02\x0fsession-mode-id\x02\x03\
 \0\x02\x13session-info-update\x02\x03\0\x05\x12tool-call-snapshot\x02\x03\0\x05\x04\
-plan\x01B\x16\x02\x03\x02\x01\x0a\x04\0\x0fsession-mode-id\x03\0\0\x02\x03\x02\x01\
+plan\x01B\x1b\x02\x03\x02\x01\x0a\x04\0\x0fsession-mode-id\x03\0\0\x02\x03\x02\x01\
 \x0b\x04\0\x13session-info-update\x03\0\x02\x02\x03\x02\x01\x07\x04\0\x0dcontent\
 -block\x03\0\x04\x02\x03\x02\x01\x0c\x04\0\x12tool-call-snapshot\x03\0\x06\x02\x03\
 \x02\x01\x0d\x04\0\x04plan\x03\0\x08\x01m\x05\x08end-turn\x0amax-tokens\x11max-t\
 urn-requests\x07refusal\x09cancelled\x04\0\x0bstop-reason\x03\0\x0a\x01r\x01\x0b\
 stop-reason\x0b\x04\0\x0fprompt-response\x03\0\x0c\x01r\x01\x04hints\x04\0\x17av\
 ailable-command-input\x03\0\x0e\x01k\x0f\x01r\x03\x04names\x0bdescriptions\x05in\
-put\x10\x04\0\x11available-command\x03\0\x11\x01p\x12\x01q\x09\x12user-message-c\
-hunk\x01\x05\0\x13agent-message-chunk\x01\x05\0\x13agent-thought-chunk\x01\x05\0\
-\x09tool-call\x01\x07\0\x10tool-call-update\x01\x07\0\x04plan\x01\x09\0\x13curre\
-nt-mode-update\x01\x01\0\x13session-info-update\x01\x03\0\x19available-commands-\
-update\x01\x13\0\x04\0\x0esession-update\x03\0\x14\x03\0\x16yosh:acp/prompts@7.0\
-.0\x05\x0e\x02\x03\0\0\x05error\x02\x03\0\x01\x12initialize-request\x02\x03\0\x01\
-\x13initialize-response\x02\x03\0\x01\x14authenticate-request\x02\x03\0\x02\x10s\
-ession-model-id\x02\x03\0\x02\x11session-config-id\x02\x03\0\x02\x17session-conf\
-ig-value-id\x02\x03\0\x02\x15session-config-option\x02\x03\0\x02\x13new-session-\
-request\x02\x03\0\x02\x14new-session-response\x02\x03\0\x02\x14load-session-requ\
-est\x02\x03\0\x02\x15load-session-response\x02\x03\0\x02\x15list-sessions-reques\
-t\x02\x03\0\x02\x16list-sessions-response\x02\x03\0\x02\x16resume-session-reques\
-t\x02\x03\0\x02\x17resume-session-response\x02\x03\0\x06\x0esession-update\x02\x03\
+put\x10\x04\0\x11available-command\x03\0\x11\x01r\x02\x06amountu\x08currencys\x04\
+\0\x0ausage-cost\x03\0\x13\x01k\x14\x01r\x03\x04usedw\x04sizew\x04cost\x15\x04\0\
+\x0cusage-update\x03\0\x16\x01p\x12\x01q\x0a\x12user-message-chunk\x01\x05\0\x13\
+agent-message-chunk\x01\x05\0\x13agent-thought-chunk\x01\x05\0\x09tool-call\x01\x07\
+\0\x10tool-call-update\x01\x07\0\x04plan\x01\x09\0\x13current-mode-update\x01\x01\
+\0\x13session-info-update\x01\x03\0\x19available-commands-update\x01\x18\0\x0cus\
+age-update\x01\x17\0\x04\0\x0esession-update\x03\0\x19\x03\0\x16yosh:acp/prompts\
+@7.0.0\x05\x0e\x02\x03\0\0\x05error\x02\x03\0\x01\x12initialize-request\x02\x03\0\
+\x01\x13initialize-response\x02\x03\0\x01\x14authenticate-request\x02\x03\0\x02\x10\
+session-model-id\x02\x03\0\x02\x11session-config-id\x02\x03\0\x02\x17session-con\
+fig-value-id\x02\x03\0\x02\x15session-config-option\x02\x03\0\x02\x13new-session\
+-request\x02\x03\0\x02\x14new-session-response\x02\x03\0\x02\x14load-session-req\
+uest\x02\x03\0\x02\x15load-session-response\x02\x03\0\x02\x15list-sessions-reque\
+st\x02\x03\0\x02\x16list-sessions-response\x02\x03\0\x02\x16resume-session-reque\
+st\x02\x03\0\x02\x17resume-session-response\x02\x03\0\x06\x0esession-update\x02\x03\
 \0\x06\x0fprompt-response\x01BT\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\
 \x02\x01\x10\x04\0\x12initialize-request\x03\0\x02\x02\x03\x02\x01\x11\x04\0\x13\
 initialize-response\x03\0\x04\x02\x03\x02\x01\x12\x04\0\x14authenticate-request\x03\
@@ -27393,8 +27545,8 @@ pub use __export_layer_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 8404] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xb8@\x01A\x02\x01A;\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 8499] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x97A\x01A\x02\x01A;\x01\
 B\x04\x01q\x08\x0bparse-error\0\0\x0finvalid-request\0\0\x10method-not-found\0\0\
 \x0einvalid-params\0\0\x0einternal-error\0\0\x0dauth-required\0\0\x12resource-no\
 t-found\0\0\x05other\x01z\0\x04\0\x0aerror-code\x03\0\0\x01r\x02\x04code\x01\x07\
@@ -27491,26 +27643,28 @@ ssion-outcome\x03\0/\x01r\x01\x07outcome0\x04\0\x1brequest-permission-response\x
 h\x06\x01C\x02\x04self5\x05patch\x1c\x01\0\x04\0\x18[method]tool-call.update\x01\
 6\x03\0\x14yosh:acp/tools@7.0.0\x05\x09\x02\x03\0\x02\x0fsession-mode-id\x02\x03\
 \0\x02\x13session-info-update\x02\x03\0\x05\x12tool-call-snapshot\x02\x03\0\x05\x04\
-plan\x01B\x16\x02\x03\x02\x01\x0a\x04\0\x0fsession-mode-id\x03\0\0\x02\x03\x02\x01\
+plan\x01B\x1b\x02\x03\x02\x01\x0a\x04\0\x0fsession-mode-id\x03\0\0\x02\x03\x02\x01\
 \x0b\x04\0\x13session-info-update\x03\0\x02\x02\x03\x02\x01\x07\x04\0\x0dcontent\
 -block\x03\0\x04\x02\x03\x02\x01\x0c\x04\0\x12tool-call-snapshot\x03\0\x06\x02\x03\
 \x02\x01\x0d\x04\0\x04plan\x03\0\x08\x01m\x05\x08end-turn\x0amax-tokens\x11max-t\
 urn-requests\x07refusal\x09cancelled\x04\0\x0bstop-reason\x03\0\x0a\x01r\x01\x0b\
 stop-reason\x0b\x04\0\x0fprompt-response\x03\0\x0c\x01r\x01\x04hints\x04\0\x17av\
 ailable-command-input\x03\0\x0e\x01k\x0f\x01r\x03\x04names\x0bdescriptions\x05in\
-put\x10\x04\0\x11available-command\x03\0\x11\x01p\x12\x01q\x09\x12user-message-c\
-hunk\x01\x05\0\x13agent-message-chunk\x01\x05\0\x13agent-thought-chunk\x01\x05\0\
-\x09tool-call\x01\x07\0\x10tool-call-update\x01\x07\0\x04plan\x01\x09\0\x13curre\
-nt-mode-update\x01\x01\0\x13session-info-update\x01\x03\0\x19available-commands-\
-update\x01\x13\0\x04\0\x0esession-update\x03\0\x14\x03\0\x16yosh:acp/prompts@7.0\
-.0\x05\x0e\x02\x03\0\0\x05error\x02\x03\0\x01\x12initialize-request\x02\x03\0\x01\
-\x13initialize-response\x02\x03\0\x01\x14authenticate-request\x02\x03\0\x02\x10s\
-ession-model-id\x02\x03\0\x02\x11session-config-id\x02\x03\0\x02\x17session-conf\
-ig-value-id\x02\x03\0\x02\x15session-config-option\x02\x03\0\x02\x13new-session-\
-request\x02\x03\0\x02\x14new-session-response\x02\x03\0\x02\x14load-session-requ\
-est\x02\x03\0\x02\x15load-session-response\x02\x03\0\x02\x15list-sessions-reques\
-t\x02\x03\0\x02\x16list-sessions-response\x02\x03\0\x02\x16resume-session-reques\
-t\x02\x03\0\x02\x17resume-session-response\x02\x03\0\x06\x0esession-update\x02\x03\
+put\x10\x04\0\x11available-command\x03\0\x11\x01r\x02\x06amountu\x08currencys\x04\
+\0\x0ausage-cost\x03\0\x13\x01k\x14\x01r\x03\x04usedw\x04sizew\x04cost\x15\x04\0\
+\x0cusage-update\x03\0\x16\x01p\x12\x01q\x0a\x12user-message-chunk\x01\x05\0\x13\
+agent-message-chunk\x01\x05\0\x13agent-thought-chunk\x01\x05\0\x09tool-call\x01\x07\
+\0\x10tool-call-update\x01\x07\0\x04plan\x01\x09\0\x13current-mode-update\x01\x01\
+\0\x13session-info-update\x01\x03\0\x19available-commands-update\x01\x18\0\x0cus\
+age-update\x01\x17\0\x04\0\x0esession-update\x03\0\x19\x03\0\x16yosh:acp/prompts\
+@7.0.0\x05\x0e\x02\x03\0\0\x05error\x02\x03\0\x01\x12initialize-request\x02\x03\0\
+\x01\x13initialize-response\x02\x03\0\x01\x14authenticate-request\x02\x03\0\x02\x10\
+session-model-id\x02\x03\0\x02\x11session-config-id\x02\x03\0\x02\x17session-con\
+fig-value-id\x02\x03\0\x02\x15session-config-option\x02\x03\0\x02\x13new-session\
+-request\x02\x03\0\x02\x14new-session-response\x02\x03\0\x02\x14load-session-req\
+uest\x02\x03\0\x02\x15load-session-response\x02\x03\0\x02\x15list-sessions-reque\
+st\x02\x03\0\x02\x16list-sessions-response\x02\x03\0\x02\x16resume-session-reque\
+st\x02\x03\0\x02\x17resume-session-response\x02\x03\0\x06\x0esession-update\x02\x03\
 \0\x06\x0fprompt-response\x01BT\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\
 \x02\x01\x10\x04\0\x12initialize-request\x03\0\x02\x02\x03\x02\x01\x11\x04\0\x13\
 initialize-response\x03\0\x04\x02\x03\x02\x01\x12\x04\0\x14authenticate-request\x03\

@@ -556,50 +556,6 @@ impl Session {
         }
     }
 
-    pub async fn select_model(
-        &self,
-        model_id: crate::yosh::acp::sessions::SessionModelId,
-    ) -> SetModeOutcome {
-        let head_idx = self.inner.head_idx;
-        let head_session = match *self.inner.head_session.lock().unwrap() {
-            Some(any) => any,
-            None => {
-                return SetModeOutcome::Trap(wasmtime::Error::msg(
-                    "select-model called before new-session",
-                ));
-            }
-        };
-        let res = self
-            .run_head(|a| {
-                Box::pin(async move {
-                    let bindings = a
-                        .with(|mut x| x.get().stages[head_idx].bindings.clone())
-                        .expect("head bindings filled");
-                    match &*bindings {
-                        Bindings::Provider(b) => {
-                            b.yosh_acp_agent()
-                                .session()
-                                .call_select_model(a, head_session, model_id)
-                                .await
-                        }
-                        Bindings::Layer(b) => {
-                            b.yosh_acp_agent()
-                                .session()
-                                .call_select_model(a, head_session, model_id)
-                                .await
-                        }
-                    }
-                })
-            })
-            .await;
-        match res {
-            Err(e) => SetModeOutcome::Trap(e),
-            Ok(Err(e)) => SetModeOutcome::Trap(e),
-            Ok(Ok(Err(e))) => SetModeOutcome::Wit(e),
-            Ok(Ok(Ok(()))) => SetModeOutcome::Done,
-        }
-    }
-
     pub async fn set_config_option(
         &self,
         config_id: crate::yosh::acp::sessions::SessionConfigId,

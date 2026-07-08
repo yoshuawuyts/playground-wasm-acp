@@ -122,6 +122,19 @@ pub fn chat_done_chunk() -> Value {
     json!({"message": {"role": "assistant", "content": ""}, "done": true})
 }
 
+/// Final chunk carrying token accounting, as Ollama reports on the real
+/// `done: true` chunk. `prompt_eval_count` is the context (prompt) tokens
+/// and `eval_count` the generated tokens; the provider sums them into the
+/// `usage_update`'s `used` field.
+pub fn chat_done_chunk_with_usage(prompt_eval_count: u64, eval_count: u64) -> Value {
+    json!({
+        "message": {"role": "assistant", "content": ""},
+        "done": true,
+        "prompt_eval_count": prompt_eval_count,
+        "eval_count": eval_count,
+    })
+}
+
 /// Sequenced responder: returns the i-th `ResponseTemplate` from a fixed
 /// list, advancing on every call. Used to script multi-turn `/api/chat`
 /// stubs (e.g. tool call, then final answer).
@@ -181,6 +194,21 @@ impl OllamaMock {
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(json!({"capabilities": ["tools"]})),
             )
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Stub `POST /api/show` to declare tool-calling support *and* report a
+    /// context-window size. The provider reads the window length from a
+    /// `model_info` key ending in `.context_length` (architecture-prefixed,
+    /// e.g. `llama.context_length`) to compute the `usage_update`'s `size`.
+    pub async fn expect_show_with_tools_and_context(&self, context_length: u64) {
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "capabilities": ["tools"],
+                "model_info": {"llama.context_length": context_length},
+            })))
             .mount(&self.server)
             .await;
     }

@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use agent_client_protocol::schema;
+use agent_client_protocol::schema::v1 as schema;
 use agent_client_protocol::{Error as AcpError, ErrorCode as AcpErrorCode};
 use tracing::debug;
 
@@ -25,7 +25,7 @@ use crate::yosh::acp::sessions::{
     ComponentSource, EnvVar, HttpHeader, LoadSessionRequest, LoadSessionResponse, McpServer,
     McpServerHttp, McpServerSse, McpServerStdio, NewSessionRequest, NewSessionResponse,
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption, SessionId,
-    SessionMode, SessionModeId, SessionModeState, SessionModel, SessionModelState,
+    SessionMode, SessionModeId, SessionModeState,
 };
 use crate::yosh::acp::tools::{
     PermissionOption, PermissionOptionKind, PermissionOutcome, RequestPermissionRequest,
@@ -104,12 +104,12 @@ pub fn internal_error(message: &str) -> Error {
 // Protocol version
 // -----------------------------------------------------------------------------
 
-pub fn pv_to_u32(pv: &schema::ProtocolVersion) -> u32 {
+pub fn pv_to_u32(pv: &agent_client_protocol::schema::ProtocolVersion) -> u32 {
     pv.to_string().parse::<u32>().unwrap_or(0)
 }
 
-pub fn pv_from_u32(n: u32) -> schema::ProtocolVersion {
-    schema::ProtocolVersion::from(n as u16)
+pub fn pv_from_u32(n: u32) -> agent_client_protocol::schema::ProtocolVersion {
+    agent_client_protocol::schema::ProtocolVersion::from(n as u16)
 }
 
 // -----------------------------------------------------------------------------
@@ -195,9 +195,6 @@ pub fn new_session_response_wit_to_schema(
     } else if let Some(modes) = ensure_host_default_mode(resp.modes) {
         json["modes"] = session_mode_state_to_json(modes, component_id);
     }
-    if let Some(models) = resp.models {
-        json["models"] = session_model_state_to_json(models);
-    }
     synth("new-session response", json)
 }
 
@@ -226,9 +223,6 @@ pub fn load_session_response_wit_to_schema(
     } else if let Some(modes) = ensure_host_default_mode(resp.modes) {
         json["modes"] = session_mode_state_to_json(modes, component_id);
     }
-    if let Some(models) = resp.models {
-        json["models"] = session_model_state_to_json(models);
-    }
     synth("load-session response", json)
 }
 
@@ -243,48 +237,8 @@ pub fn empty_set_session_mode_response() -> Result<schema::SetSessionModeRespons
 }
 
 // -----------------------------------------------------------------------------
-// Session models (UNSTABLE — gated behind `unstable_session_model` on the
-// `agent-client-protocol` crate)
+// Session modes
 // -----------------------------------------------------------------------------
-
-pub fn empty_select_model_response() -> Result<schema::SetSessionModelResponse, AcpError> {
-    synth("select-model response", serde_json::json!({}))
-}
-
-fn session_model_state_to_json(state: SessionModelState) -> serde_json::Value {
-    let SessionModelState {
-        current_model_id,
-        available_models,
-    } = state;
-    serde_json::json!({
-        "currentModelId": current_model_id,
-        "availableModels": available_models
-            .into_iter()
-            .map(session_model_to_json)
-            .collect::<Vec<_>>(),
-    })
-}
-
-fn session_model_to_json(model: SessionModel) -> serde_json::Value {
-    let SessionModel {
-        id,
-        name,
-        description,
-        provided_by,
-    } = model;
-    // Upstream ACP's `ModelInfo` doesn't carry provenance, so bake the
-    // contributing component's id into the display name. Round-trip
-    // through `synth` would otherwise drop any extra fields.
-    let display = format!("{name} ({})", provided_by.component_id);
-    let mut entry = serde_json::json!({
-        "modelId": id,
-        "name": display,
-    });
-    if let Some(d) = description {
-        entry["description"] = serde_json::Value::String(d);
-    }
-    entry
-}
 
 fn session_mode_state_to_json(state: SessionModeState, component_id: &str) -> serde_json::Value {
     let SessionModeState {
@@ -655,6 +609,21 @@ pub fn session_update_wit_to_schema(
         SessionUpdate::SessionInfoUpdate(_) => {
             debug!(session = %session_id, "dropped session update: session-info-update (not yet wired)");
             None
+        }
+        SessionUpdate::UsageUpdate(usage) => {
+            // Context-window usage: forward as ACP's stable `usage_update`
+            // so the editor can render a "context %" indicator
+            // (context % = used / size).
+            let cost = usage
+                .cost
+                .map(|c| schema::Cost::new(c.amount, c.currency));
+            let upd = schema::SessionUpdate::UsageUpdate(
+                schema::UsageUpdate::new(usage.used, usage.size).cost(cost),
+            );
+            return Some(schema::SessionNotification::new(
+                schema::SessionId::from(session_id),
+                upd,
+            ));
         }
         SessionUpdate::AvailableCommandsUpdate(cmds) => {
             let mut cmds_json: Vec<serde_json::Value> = cmds
@@ -1084,7 +1053,7 @@ mod tests {
 
     #[test]
     fn initialize_request_translation() {
-        let req = schema::InitializeRequest::new(schema::ProtocolVersion::V1)
+        let req = schema::InitializeRequest::new(agent_client_protocol::schema::ProtocolVersion::V1)
             .client_info(schema::Implementation::new("editor", "1.0").title(Some("Ed".into())));
         let wit_req = init_request_schema_to_wit(req);
         assert_eq!(wit_req.protocol_version, 1);

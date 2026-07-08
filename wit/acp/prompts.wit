@@ -48,6 +48,28 @@ interface prompts {
     // Session updates (streamed body of a prompt-turn)
     // ------------------------------------------------------------------
 
+    /// Token usage for a session's context window, letting the client
+    /// render a "context %" indicator. Context % = `used` / `size`.
+    ///
+    /// Mirrors ACP's stable `usage_update` session update.
+    /// See: <https://agentclientprotocol.com/protocol/session-updates>
+    record usage-update {
+        /// Tokens currently occupying the model's context window.
+        used: u64,
+        /// Total size of the model's context window, in tokens.
+        size: u64,
+        /// Optional monetary cost accrued by the session so far.
+        cost: option<usage-cost>,
+    }
+
+    /// Monetary cost associated with a [`usage-update`].
+    record usage-cost {
+        /// The cost amount, expressed in `currency` units.
+        amount: f64,
+        /// ISO 4217 currency code (e.g. `USD`).
+        currency: string,
+    }
+
     /// A single item in [`agent.prompt-turn.updates`]'s stream.
     /// Variants follow the `sessionUpdate` discriminator in the JSON
     /// wire protocol.
@@ -69,5 +91,9 @@ interface prompts {
         current-mode-update(session-mode-id),
         session-info-update(session-info-update),
         available-commands-update(list<available-command>),
+
+        /// Token usage for the session context, so the client can show
+        /// a "context %" indicator (context % = `used` / `size`).
+        usage-update(usage-update),
     }
 }

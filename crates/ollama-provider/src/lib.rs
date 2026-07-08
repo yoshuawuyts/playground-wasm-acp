@@ -17,12 +17,14 @@ use acp_wasm_sys::provider::yosh::acp::init::{
     AgentCapabilities, AuthenticateRequest, ImplementationInfo, InitializeRequest,
     InitializeResponse, McpCapabilities, PromptCapabilities, SessionCapabilities,
 };
-use acp_wasm_sys::provider::yosh::acp::prompts::{PromptResponse, SessionUpdate, StopReason};
+use acp_wasm_sys::provider::yosh::acp::prompts::{
+    PromptResponse, SessionUpdate, StopReason, UsageUpdate,
+};
 use acp_wasm_sys::provider::yosh::acp::sessions::{
     ComponentSource, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, NewSessionRequest, NewSessionResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SessionConfigId, SessionConfigOption, SessionConfigValueId,
-    SessionModeId, SessionModel, SessionModelId, SessionModelState,
+    ResumeSessionResponse, SessionConfigId, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionConfigValueId, SessionModeId, SessionModelId,
 };
 use acp_wasm_sys::provider::yosh::acp::tools::ToolKind;
 
@@ -94,16 +96,42 @@ impl GuestSession for ProviderSession {
 
     async fn set_config_option(
         &self,
-        _config_id: SessionConfigId,
-        _value: SessionConfigValueId,
+        config_id: SessionConfigId,
+        value: SessionConfigValueId,
     ) -> Result<Vec<SessionConfigOption>, Error> {
-        // Provider advertises no config-option selectors; the slot is
-        // reserved for layers. Anything reaching the provider is an
-        // unknown config id.
-        Err(err(
-            ErrorCode::InvalidParams,
-            "ollama provider does not advertise any config options",
-        ))
+        let session_id = self.id.clone();
+
+        // Apply the change to the addressed option, validating the value
+        // against the currently advertised model list.
+        let current_model = SESSIONS
+            .with(|s| {
+                let mut sessions = s.borrow_mut();
+                let Some(session) = sessions.get_mut(&session_id) else {
+                    return Err(format!("unknown session id: {session_id}"));
+                };
+                match config_id.as_str() {
+                    CONFIG_MODEL => {
+                        // Accept any id currently installed; if the cache is
+                        // empty (e.g. the models endpoint was unreachable)
+                        // accept optimistically so switching stays offline.
+                        let known = MODELS_CACHE.with(|c| {
+                            let cache = c.borrow();
+                            cache.is_empty() || cache.iter().any(|m| *m == value)
+                        });
+                        if !known {
+                            return Err(format!("unknown model: {value}"));
+                        }
+                        session.model = value.clone();
+                        Ok(session.model.clone())
+                    }
+                    other => Err(format!("unknown config option: {other}")),
+                }
+            })
+            .map_err(|e| err(ErrorCode::InvalidParams, &e))?;
+
+        // Rebuild the full option set from the cached model list — no network.
+        let models = cached_models(&current_model);
+        Ok(build_config_options(&models, &current_model))
     }
 }
 
@@ -203,6 +231,21 @@ thread_local! {
     static SESSIONS: RefCell<HashMap<String, SessionState>> = RefCell::new(HashMap::new());
 }
 
+thread_local! {
+    /// The locally installed Ollama model list, cached per host process the
+    /// first time a session lifecycle response is built. Lets
+    /// `set-config-option` rebuild the full option set without re-hitting the
+    /// `/api/tags` endpoint on every switch.
+    static MODELS_CACHE: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+thread_local! {
+    /// Per-model context-window length (tokens), cached per host process the
+    /// first time a prompt turn reports usage. Avoids an `/api/show` round
+    /// trip on every turn just to compute the "context %" denominator.
+    static CONTEXT_LENGTHS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+}
+
 /// One-time system message inserted at the start of every fresh session.
 ///
 /// Small tool-capable Ollama models will happily call any tool we
@@ -212,57 +255,103 @@ thread_local! {
 /// it dramatically reduces useless tool-call storms.
 const SYSTEM_PROMPT: &str = "You are a coding assistant connected to the user's editor. You have access to a `read_file` tool that can read source files in the user's project. Only call tools when the user explicitly asks you to read a file, or when reading a specific file is strictly necessary to answer the user's request. For greetings, small talk, or general questions, respond in plain text without calling any tools. Never call `read_file` with an empty path, `/`, `.`, or any directory.";
 
-/// Build the [`SessionModelState`] for a freshly created or loaded session.
-///
-/// Lists the locally installed Ollama models and exposes them via
-/// ACP's (unstable) `session/models` capability. The current model
-/// defaults to `preferred_model` when present in the list, otherwise
-/// `default_model()`, otherwise the first model returned by Ollama.
-///
-/// If Ollama is unreachable or returns no models, falls back to a
-/// single entry for `default_model()` so session creation still
-/// succeeds; the failure is logged to stderr.
-fn build_models_state_from_listed(
-    listed: Vec<String>,
-    preferred_model: Option<&str>,
-) -> (SessionModelState, String) {
-    let default = ollama::default_model();
+/// Component id stamped on every config option this provider contributes.
+const COMPONENT_ID: &str = "local:ollama-provider";
 
-    let pick = |want: &str| listed.iter().any(|m| m == want);
-    let current = preferred_model
-        .filter(|m| pick(m))
-        .map(|s| s.to_string())
-        .or_else(|| {
-            if pick(&default) {
-                Some(default.clone())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| listed[0].clone());
+/// Config option id. Stable identifier the editor echoes back on
+/// `set-config-option`.
+const CONFIG_MODEL: &str = "model";
 
-    let available_models = listed
-        .into_iter()
-        .map(|name| SessionModel {
-            id: name.clone(),
-            name,
-            description: None,
-            provided_by: ComponentSource {
-                component_id: "local:ollama-provider".to_string(),
-            },
-        })
-        .collect();
-
-    (
-        SessionModelState {
-            current_model_id: current.clone(),
-            available_models,
-        },
-        current,
-    )
+fn component_source() -> ComponentSource {
+    ComponentSource {
+        component_id: COMPONENT_ID.to_string(),
+    }
 }
 
-async fn build_models_state(preferred_model: Option<&str>) -> (SessionModelState, String) {
+/// Build the session's config-option selectors from the installed model list.
+///
+/// Exposes a single `model` selector (category [`Model`]) whose options are
+/// the locally installed Ollama models, mirroring how `copilot-provider`
+/// advertises model selection through ACP's unified `config_options`
+/// mechanism (which supersedes the removed `session/models` capability).
+///
+/// [`Model`]: SessionConfigOptionCategory::Model
+fn build_config_options(models: &[String], current_model: &str) -> Vec<SessionConfigOption> {
+    let model_options = models
+        .iter()
+        .map(|name| SessionConfigSelectOption {
+            value: name.clone(),
+            name: name.clone(),
+            description: None,
+        })
+        .collect();
+    vec![SessionConfigOption {
+        id: CONFIG_MODEL.to_string(),
+        name: "Model".to_string(),
+        description: Some("Which locally installed Ollama model backs this session.".to_string()),
+        category: Some(SessionConfigOptionCategory::Model),
+        current_value: current_model.to_string(),
+        options: model_options,
+        provided_by: component_source(),
+    }]
+}
+
+/// Pick the current model: `preferred` if installed, else
+/// [`ollama::default_model`] if installed, else the first model listed.
+fn pick_current_model(listed: &[String], preferred: Option<&str>) -> String {
+    let default = ollama::default_model();
+    let has = |want: &str| listed.iter().any(|m| m == want);
+    preferred
+        .filter(|m| has(m))
+        .map(|s| s.to_string())
+        .or_else(|| if has(&default) { Some(default.clone()) } else { None })
+        .unwrap_or_else(|| listed[0].clone())
+}
+
+/// Read the cached model list, falling back to a single entry for
+/// `current_model` when the cache is empty (e.g. `/api/tags` was
+/// unreachable). Keeps `set-config-option` offline.
+fn cached_models(current_model: &str) -> Vec<String> {
+    let cached = MODELS_CACHE.with(|c| c.borrow().clone());
+    if cached.is_empty() {
+        vec![current_model.to_string()]
+    } else {
+        cached
+    }
+}
+
+/// Resolve the context-window length (tokens) for `model`, consulting
+/// [`CONTEXT_LENGTHS`] first and querying `/api/show` on a miss. Returns
+/// `None` when the size is unknown, so callers skip usage reporting rather
+/// than emit a meaningless denominator.
+async fn context_length_for(model: &str) -> Option<u64> {
+    if let Some(n) = CONTEXT_LENGTHS.with(|c| c.borrow().get(model).copied()) {
+        return Some(n);
+    }
+    match ollama::model_context_length(model).await {
+        Ok(Some(n)) => {
+            CONTEXT_LENGTHS.with(|c| c.borrow_mut().insert(model.to_string(), n));
+            Some(n)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            eprintln!("failed to fetch context length for {model} ({e})");
+            None
+        }
+    }
+}
+
+/// List the locally installed Ollama models (populating [`MODELS_CACHE`]) and
+/// build the session's config-option selectors plus the resolved current
+/// model. The current model defaults to `preferred_model` when installed,
+/// otherwise `default_model()`, otherwise the first model returned.
+///
+/// If Ollama is unreachable or returns no models, falls back to a single
+/// entry for `default_model()` so session creation still succeeds; the
+/// failure is logged to stderr.
+async fn build_session_config(
+    preferred_model: Option<&str>,
+) -> (Vec<SessionConfigOption>, String) {
     let default = ollama::default_model();
     let listed = match ollama::list_models().await {
         Ok(models) if !models.is_empty() => models,
@@ -275,7 +364,10 @@ async fn build_models_state(preferred_model: Option<&str>) -> (SessionModelState
             vec![default.clone()]
         }
     };
-    build_models_state_from_listed(listed, preferred_model)
+    MODELS_CACHE.with(|c| *c.borrow_mut() = listed.clone());
+    let current = pick_current_model(&listed, preferred_model);
+    let options = build_config_options(&listed, &current);
+    (options, current)
 }
 
 fn next_session_id() -> String {
@@ -367,7 +459,7 @@ impl Guest for Agent {
 
     async fn new_session(req: NewSessionRequest) -> Result<(Session, NewSessionResponse), Error> {
         let id = next_session_id();
-        let (models, current_model) = build_models_state(None).await;
+        let (config_options, current_model) = build_session_config(None).await;
         SESSIONS.with(|s| {
             s.borrow_mut().insert(
                 id.clone(),
@@ -384,8 +476,8 @@ impl Guest for Agent {
             NewSessionResponse {
                 session_id: id,
                 modes: None,
-                models: Some(models),
-                config_options: None,
+                models: None,
+                config_options: Some(config_options),
             },
         ))
     }
@@ -407,7 +499,7 @@ impl Guest for Agent {
             .map(|s| s.history.clone())
             .unwrap_or_default();
         let preferred = stored.as_ref().map(|s| s.model.clone());
-        let (models, current_model) = build_models_state(preferred.as_deref()).await;
+        let (config_options, current_model) = build_session_config(preferred.as_deref()).await;
         for msg in &history {
             let block = ContentBlock::Text(TextContent {
                 text: msg.content.clone(),
@@ -434,8 +526,8 @@ impl Guest for Agent {
             resource,
             LoadSessionResponse {
                 modes: None,
-                models: Some(models),
-                config_options: None,
+                models: None,
+                config_options: Some(config_options),
             },
         ))
     }
@@ -463,7 +555,7 @@ impl Guest for Agent {
             .map(|s| s.history.clone())
             .unwrap_or_default();
         let preferred = stored.as_ref().map(|s| s.model.clone());
-        let (models, current_model) = build_models_state(preferred.as_deref()).await;
+        let (config_options, current_model) = build_session_config(preferred.as_deref()).await;
         SESSIONS.with(|s| {
             s.borrow_mut().insert(
                 session_id.clone(),
@@ -479,8 +571,8 @@ impl Guest for Agent {
             resource,
             ResumeSessionResponse {
                 modes: None,
-                models: Some(models),
-                config_options: None,
+                models: None,
+                config_options: Some(config_options),
             },
         ))
     }
@@ -572,6 +664,11 @@ async fn prompt_impl(
     let mut tool_call_seq: u64 = 0;
     let mut stop = StopReason::EndTurn;
     let mut turns_remaining = MAX_TURNS;
+    // Token counts from the most recent `/api/chat` turn. The final turn's
+    // counts describe the full context (history grows monotonically), which
+    // we forward as a `usage-update` once the loop settles.
+    let mut last_prompt_eval: Option<u64> = None;
+    let mut last_eval: Option<u64> = None;
     loop {
         if turns_remaining == 0 {
             stop = StopReason::MaxTurnRequests;
@@ -599,6 +696,14 @@ async fn prompt_impl(
         )
         .await
         .map_err(|e| err(ErrorCode::InternalError, &format!("ollama: {e}")))?;
+
+        // Remember this turn's token accounting for the usage-update.
+        if turn.prompt_eval_count.is_some() {
+            last_prompt_eval = turn.prompt_eval_count;
+        }
+        if turn.eval_count.is_some() {
+            last_eval = turn.eval_count;
+        }
 
         // Persist the assistant turn (text + any tool-call requests)
         // back into history so the next ollama call sees it.
@@ -643,6 +748,26 @@ async fn prompt_impl(
                 outcome.content
             };
             history.push(Message::tool(tool_msg));
+        }
+    }
+
+    // Emit context-window usage so the editor can render a "context %"
+    // indicator (context % = used / size). `used` is the final turn's
+    // prompt + generated tokens (the tokens now occupying the context);
+    // `size` is the model's context-window length. Skip silently when
+    // Ollama didn't report counts or the window size is unknown.
+    let used = last_prompt_eval.unwrap_or(0) + last_eval.unwrap_or(0);
+    if used > 0 {
+        if let Some(size) = context_length_for(&model).await {
+            emit_update(
+                session_id.clone(),
+                SessionUpdate::UsageUpdate(UsageUpdate {
+                    used,
+                    size,
+                    cost: None,
+                }),
+            )
+            .await;
         }
     }
 

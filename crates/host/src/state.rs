@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use agent_client_protocol::{Error as AcpError, schema};
+use agent_client_protocol::{Error as AcpError, schema::v1 as schema};
 use tokio::sync::{mpsc, oneshot};
 use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};

@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use agent_client_protocol::role::acp::Client;
-use agent_client_protocol::{ConnectionTo, Error as AcpError, Responder, schema};
+use agent_client_protocol::{ConnectionTo, Error as AcpError, Responder, schema::v1 as schema};
 use tracing::debug;
 
 use super::gate::NotificationGate;
@@ -235,40 +235,6 @@ pub(super) fn handle_set_session_mode(
     Ok(())
 }
 
-/// `session/set_model` — UNSTABLE. Mirrors `handle_set_session_mode`
-/// except it dispatches to the session actor's `select_model` path so
-/// the wasm chain's `select-model` export is invoked.
-pub(super) fn handle_select_model(
-    registry: &SessionRegistry,
-    req: schema::SetSessionModelRequest,
-    responder: Responder<schema::SetSessionModelResponse>,
-    cx: ConnectionTo<Client>,
-) -> Result<(), AcpError> {
-    let session_key = req.session_id.0.to_string();
-    debug!(session = %session_key, "session/set_model");
-
-    let handle = require_session(registry, &session_key)?;
-    let model_id = req.model_id.0.to_string();
-
-    cx.spawn(async move {
-        let outcome = handle.select_model(model_id).await;
-        match outcome {
-            SetModeOutcome::Done => {
-                let resp = match translate::empty_select_model_response() {
-                    Ok(r) => r,
-                    Err(e) => return responder.respond_with_error(e),
-                };
-                responder.respond(resp)
-            }
-            SetModeOutcome::Wit(e) => responder.respond_with_error(translate::wit_error_to_acp(e)),
-            SetModeOutcome::Trap(e) => {
-                responder.respond_with_error(translate::trap_to_acp("select-model", e))
-            }
-        }
-    })?;
-    Ok(())
-}
-
 /// `session/set_config_option` — the unified selector mechanism (model /
 /// mode / thought-level). Mirrors `handle_set_session_mode` but dispatches
 /// to the session actor's `set_config_option` path and responds with the
@@ -284,7 +250,15 @@ pub(super) fn handle_set_session_config_option(
 
     let handle = require_session(registry, &session_key)?;
     let config_id = req.config_id.0.to_string();
-    let value = req.value.0.to_string();
+    let value = match &req.value {
+        schema::SessionConfigOptionValue::ValueId { value } => value.0.to_string(),
+        schema::SessionConfigOptionValue::Boolean { value } => value.to_string(),
+        other => {
+            let mut e = AcpError::invalid_params();
+            e.message = format!("unsupported session config option value: {other:?}");
+            return Err(e);
+        }
+    };
 
     cx.spawn(async move {
         let outcome = handle.set_config_option(config_id, value).await;
