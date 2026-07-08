@@ -1052,6 +1052,63 @@ mod tests {
     }
 
     #[test]
+    fn usage_update_with_cost_serializes_to_wire() {
+        use crate::yosh::acp::prompts::{UsageCost, UsageUpdate};
+        let note = session_update_wit_to_schema(
+            "sess-1".to_string(),
+            SessionUpdate::UsageUpdate(UsageUpdate {
+                used: 120,
+                size: 8192,
+                cost: Some(UsageCost {
+                    amount: 1.5,
+                    currency: "premium-requests".to_string(),
+                }),
+            }),
+        )
+        .expect("usage update translates to a notification");
+        let json = serde_json::to_value(&note).expect("serialize notification");
+        assert_eq!(json.pointer("/sessionId"), Some(&serde_json::json!("sess-1")));
+        assert_eq!(
+            json.pointer("/update/sessionUpdate"),
+            Some(&serde_json::json!("usage_update")),
+            "full wire: {json}"
+        );
+        assert_eq!(json.pointer("/update/used"), Some(&serde_json::json!(120)));
+        assert_eq!(json.pointer("/update/size"), Some(&serde_json::json!(8192)));
+        assert_eq!(
+            json.pointer("/update/cost/amount"),
+            Some(&serde_json::json!(1.5)),
+            "cost.amount missing/renamed on the wire: {json}"
+        );
+        assert_eq!(
+            json.pointer("/update/cost/currency"),
+            Some(&serde_json::json!("premium-requests")),
+            "cost.currency missing/renamed on the wire: {json}"
+        );
+    }
+
+    #[test]
+    fn usage_update_without_cost_omits_cost() {
+        use crate::yosh::acp::prompts::UsageUpdate;
+        let note = session_update_wit_to_schema(
+            "sess-2".to_string(),
+            SessionUpdate::UsageUpdate(UsageUpdate {
+                used: 42,
+                size: 4096,
+                cost: None,
+            }),
+        )
+        .expect("usage update translates");
+        let json = serde_json::to_value(&note).expect("serialize notification");
+        assert_eq!(json.pointer("/update/used"), Some(&serde_json::json!(42)));
+        assert_eq!(
+            json.pointer("/update/cost"),
+            None,
+            "cost should be absent when None: {json}"
+        );
+    }
+
+    #[test]
     fn initialize_request_translation() {
         let req = schema::InitializeRequest::new(agent_client_protocol::schema::ProtocolVersion::V1)
             .client_info(schema::Implementation::new("editor", "1.0").title(Some("Ed".into())));
