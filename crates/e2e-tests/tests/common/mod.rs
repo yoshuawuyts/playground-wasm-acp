@@ -64,6 +64,15 @@ pub fn layer_wasm() -> PathBuf {
         .join("uppercase_layer.wasm")
 }
 
+/// Path to the copilot-provider wasm component.
+pub fn copilot_provider_wasm() -> PathBuf {
+    workspace_root()
+        .join("target")
+        .join("wasm32-wasip2")
+        .join("release")
+        .join("copilot_provider.wasm")
+}
+
 /// Assert all build artifacts exist; otherwise instruct the user to run
 /// `just build`. Call this at the top of every test.
 pub fn ensure_artifacts() {
@@ -287,6 +296,13 @@ impl HostBuilder {
 
     pub fn with_layer(mut self, p: PathBuf) -> Self {
         self.layers.push(p);
+        self
+    }
+
+    /// Use a specific provider wasm component instead of the default
+    /// (ollama-provider).
+    pub fn provider(mut self, p: PathBuf) -> Self {
+        self.provider = p;
         self
     }
 
