@@ -300,7 +300,7 @@ pub(super) fn handle_prompt(
         .collect();
 
     cx.spawn(async move {
-        let outcome = handle.prompt(wit_prompt).await;
+        let outcome = handle.prompt(session_key.clone(), wit_prompt).await;
         let resp = match outcome {
             PromptOutcome::Done(r) => match translate::prompt_response_wit_to_schema(r) {
                 Ok(r) => r,
