@@ -393,12 +393,47 @@ struct ChatRequest<'a> {
     tools: Option<&'a serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<&'a str>,
+    /// Ask the OpenAI-compatible endpoint to include a final `usage` chunk
+    /// (with `choices: []`) so we can report context-window usage. Only set
+    /// for streaming requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+}
+
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
+}
+
+/// Token accounting reported by the chat endpoint on its final streamed
+/// chunk (requires `stream_options.include_usage`). `prompt_tokens` are the
+/// context tokens the model read; `completion_tokens` the tokens it
+/// generated; `total_tokens` their sum.
+#[derive(Deserialize, Clone, Copy, Default)]
+pub struct Usage {
+    /// Context tokens the model read this turn. Retained to mirror the
+    /// upstream shape (and asserted in tests); the context indicator reports
+    /// `total_tokens`, so this field isn't read on its own in the component.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    /// Tokens the model generated this turn. Retained for the same reason as
+    /// `prompt_tokens`.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
 }
 
 #[derive(Deserialize)]
 struct StreamChunk {
     #[serde(default)]
     choices: Vec<StreamChoice>,
+    /// Present only on the final chunk when `stream_options.include_usage`
+    /// was requested; carries the turn's token accounting.
+    #[serde(default)]
+    usage: Option<Usage>,
 }
 
 #[derive(Deserialize)]
@@ -483,7 +518,11 @@ fn fold_chunk(
     chunk: StreamChunk,
     accum: &mut Vec<ToolCallAccum>,
     finish_reason: &mut Option<String>,
+    usage: &mut Option<Usage>,
 ) -> String {
+    if let Some(u) = chunk.usage {
+        *usage = Some(u);
+    }
     let mut text = String::new();
     for choice in chunk.choices {
         if let Some(fr) = choice.finish_reason {
@@ -529,6 +568,9 @@ pub struct RoundOutcome {
     /// The round's `finish_reason`, if the stream reported one
     /// (`"stop"`, `"tool_calls"`, `"length"`, …).
     pub finish_reason: Option<String>,
+    /// Token usage for this round, if the endpoint reported it on its final
+    /// chunk. `None` when the model/endpoint didn't include usage.
+    pub usage: Option<Usage>,
 }
 
 /// Run one streamed chat round. `on_chunk` is invoked once per non-empty text
@@ -596,6 +638,7 @@ where
         reasoning_effort,
         tools,
         tool_choice: tools.map(|_| "auto"),
+        stream_options: Some(StreamOptions { include_usage: true }),
     })
     .map_err(|e| ChatError::Other(format!("encode chat request: {e}")))?;
 
@@ -638,6 +681,7 @@ where
     let mut content = String::new();
     let mut accum: Vec<ToolCallAccum> = Vec::new();
     let mut finish_reason: Option<String> = None;
+    let mut usage: Option<Usage> = None;
     'outer: while let Some(frame) = stream.next().await {
         let bytes = frame.map_err(|e| ChatError::Other(format!("read chat body: {e}")))?;
         buf.extend_from_slice(&bytes);
@@ -648,7 +692,7 @@ where
             };
             match parse_sse_line(line) {
                 SseEvent::Chunk(chunk) => {
-                    let text = fold_chunk(chunk, &mut accum, &mut finish_reason);
+                    let text = fold_chunk(chunk, &mut accum, &mut finish_reason, &mut usage);
                     if !text.is_empty() {
                         on_chunk(text.clone()).await;
                         content.push_str(&text);
@@ -662,7 +706,7 @@ where
     // Handle a trailing line with no terminating newline (rare).
     if let Ok(line) = std::str::from_utf8(&buf) {
         if let SseEvent::Chunk(chunk) = parse_sse_line(line) {
-            let text = fold_chunk(chunk, &mut accum, &mut finish_reason);
+            let text = fold_chunk(chunk, &mut accum, &mut finish_reason, &mut usage);
             if !text.is_empty() {
                 on_chunk(text.clone()).await;
                 content.push_str(&text);
@@ -687,6 +731,7 @@ where
         text: content,
         tool_calls,
         finish_reason,
+        usage,
     })
 }
 
@@ -704,6 +749,34 @@ pub struct CopilotModel {
     /// models with no native reasoning control (e.g. gpt-4o). Sourced from
     /// `capabilities.supports.reasoning_effort`.
     pub reasoning_efforts: Vec<String>,
+    /// Context-window size in tokens, from
+    /// `capabilities.limits.max_context_window_tokens`. `None` when the API
+    /// doesn't advertise a limit for this model. Used as the `size` of the
+    /// context-usage indicator.
+    pub context_window: Option<u64>,
+    /// Premium-request cost multiplier for this model, from `billing.multiplier`
+    /// (e.g. `1.0`, `0.33`, `0` for included models). `is_premium` marks models
+    /// that draw from the monthly premium-request allowance. Together they let
+    /// us report a per-turn cost in premium-request units.
+    pub multiplier: f64,
+    pub is_premium: bool,
+}
+
+impl CopilotModel {
+    /// A minimal fallback model entry used when the `/models` endpoint is
+    /// unreachable: no reasoning levels, unknown context window, and treated
+    /// as non-premium (so no cost is reported until real capabilities load).
+    pub fn fallback(id: impl Into<String>) -> Self {
+        let id = id.into();
+        Self {
+            name: id.clone(),
+            id,
+            reasoning_efforts: Vec::new(),
+            context_window: None,
+            multiplier: 0.0,
+            is_premium: false,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -719,6 +792,8 @@ struct ModelEntry {
     name: Option<String>,
     #[serde(default)]
     capabilities: Option<ModelCapabilities>,
+    #[serde(default)]
+    billing: Option<ModelBilling>,
 }
 
 #[derive(Deserialize)]
@@ -727,12 +802,68 @@ struct ModelCapabilities {
     kind: Option<String>,
     #[serde(default)]
     supports: Option<ModelSupports>,
+    #[serde(default)]
+    limits: Option<ModelLimits>,
 }
 
 #[derive(Deserialize)]
 struct ModelSupports {
     #[serde(default)]
     reasoning_effort: Option<Vec<String>>,
+}
+
+/// Model resource limits advertised under `capabilities.limits`.
+#[derive(Deserialize)]
+struct ModelLimits {
+    #[serde(default)]
+    max_context_window_tokens: Option<u64>,
+}
+
+/// Premium-request billing metadata advertised under the top-level `billing`
+/// key of a model entry.
+#[derive(Deserialize)]
+struct ModelBilling {
+    #[serde(default)]
+    is_premium: bool,
+    #[serde(default)]
+    multiplier: f64,
+}
+
+/// Convert one raw `/models` entry into a [`CopilotModel`], sourcing the
+/// reasoning-effort levels, context-window limit, and premium-request billing
+/// straight from the payload. Returns `None` for entries that explicitly
+/// advertise a non-`chat` capability type (e.g. embeddings), which we skip.
+fn model_from_entry(entry: ModelEntry) -> Option<CopilotModel> {
+    let mut reasoning_efforts = Vec::new();
+    let mut context_window = None;
+    if let Some(caps) = &entry.capabilities {
+        if let Some(kind) = &caps.kind {
+            if kind != "chat" {
+                return None;
+            }
+        }
+        if let Some(supports) = &caps.supports {
+            if let Some(levels) = &supports.reasoning_effort {
+                reasoning_efforts = levels.clone();
+            }
+        }
+        if let Some(limits) = &caps.limits {
+            context_window = limits.max_context_window_tokens;
+        }
+    }
+    let name = entry.name.unwrap_or_else(|| entry.id.clone());
+    let (is_premium, multiplier) = entry
+        .billing
+        .map(|b| (b.is_premium, b.multiplier))
+        .unwrap_or((false, 0.0));
+    Some(CopilotModel {
+        id: entry.id,
+        name,
+        reasoning_efforts,
+        context_window,
+        multiplier,
+        is_premium,
+    })
 }
 
 /// List chat-capable models via `GET {base}/models`, de-duplicated by id and
@@ -774,31 +905,106 @@ pub async fn list_models() -> Result<Vec<CopilotModel>, String> {
 
     let mut out: Vec<CopilotModel> = Vec::new();
     for entry in body.data {
-        // Skip non-chat models (e.g. embeddings) when the capability type is
-        // advertised; keep entries that don't declare one. Capture the
-        // reasoning-effort levels the model natively supports.
-        let mut reasoning_efforts = Vec::new();
-        if let Some(caps) = &entry.capabilities {
-            if let Some(kind) = &caps.kind {
-                if kind != "chat" {
-                    continue;
-                }
-            }
-            if let Some(supports) = &caps.supports {
-                if let Some(levels) = &supports.reasoning_effort {
-                    reasoning_efforts = levels.clone();
-                }
-            }
-        }
-        if out.iter().any(|m| m.id == entry.id) {
+        let Some(model) = model_from_entry(entry) else {
+            continue;
+        };
+        if out.iter().any(|m| m.id == model.id) {
             continue;
         }
-        let name = entry.name.unwrap_or_else(|| entry.id.clone());
-        out.push(CopilotModel {
-            id: entry.id,
-            name,
-            reasoning_efforts,
-        });
+        out.push(model);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A realistic `/models` entry (premium, reasoning-capable, with a
+    /// context-window limit) round-trips into a `CopilotModel` with every
+    /// upstream-sourced field populated.
+    #[test]
+    fn model_from_entry_captures_limits_and_billing() {
+        let entry: ModelEntry = serde_json::from_str(
+            r#"{
+                "id": "gpt-5",
+                "name": "GPT-5",
+                "capabilities": {
+                    "type": "chat",
+                    "supports": { "reasoning_effort": ["low", "medium", "high"] },
+                    "limits": { "max_context_window_tokens": 128000 }
+                },
+                "billing": { "is_premium": true, "multiplier": 1.0 }
+            }"#,
+        )
+        .unwrap();
+        let model = model_from_entry(entry).expect("chat model");
+        assert_eq!(model.id, "gpt-5");
+        assert_eq!(model.name, "GPT-5");
+        assert_eq!(model.reasoning_efforts, vec!["low", "medium", "high"]);
+        assert_eq!(model.context_window, Some(128000));
+        assert!(model.is_premium);
+        assert_eq!(model.multiplier, 1.0);
+    }
+
+    /// Entries that declare a non-`chat` capability type (e.g. embeddings)
+    /// are skipped.
+    #[test]
+    fn model_from_entry_skips_non_chat() {
+        let entry: ModelEntry = serde_json::from_str(
+            r#"{ "id": "text-embedding-3", "capabilities": { "type": "embeddings" } }"#,
+        )
+        .unwrap();
+        assert!(model_from_entry(entry).is_none());
+    }
+
+    /// A bare entry with no billing or limits is treated as a non-premium
+    /// model with an unknown context window (so no cost is ever reported).
+    #[test]
+    fn model_from_entry_defaults_to_free_unknown_window() {
+        let entry: ModelEntry = serde_json::from_str(r#"{ "id": "gpt-4o" }"#).unwrap();
+        let model = model_from_entry(entry).expect("chat model");
+        assert_eq!(model.context_window, None);
+        assert!(!model.is_premium);
+        assert_eq!(model.multiplier, 0.0);
+        assert!(model.reasoning_efforts.is_empty());
+    }
+
+    /// The final streamed chunk carries `usage` (thanks to
+    /// `stream_options.include_usage`); `fold_chunk` captures it into the
+    /// running accumulator.
+    #[test]
+    fn fold_chunk_captures_usage_from_final_chunk() {
+        let SseEvent::Chunk(chunk) = parse_sse_line(
+            r#"data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}"#,
+        ) else {
+            panic!("expected a chunk");
+        };
+        let mut accum = Vec::new();
+        let mut finish_reason = None;
+        let mut usage = None;
+        let text = fold_chunk(chunk, &mut accum, &mut finish_reason, &mut usage);
+        assert!(text.is_empty());
+        let usage = usage.expect("usage captured");
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 20);
+        assert_eq!(usage.total_tokens, 120);
+    }
+
+    /// Content-only chunks leave `usage` untouched (it stays `None` until the
+    /// final accounting chunk arrives).
+    #[test]
+    fn fold_chunk_leaves_usage_none_for_content_chunks() {
+        let SseEvent::Chunk(chunk) =
+            parse_sse_line(r#"data: {"choices":[{"delta":{"content":"hi"}}]}"#)
+        else {
+            panic!("expected a chunk");
+        };
+        let mut accum = Vec::new();
+        let mut finish_reason = None;
+        let mut usage = None;
+        let text = fold_chunk(chunk, &mut accum, &mut finish_reason, &mut usage);
+        assert_eq!(text, "hi");
+        assert!(usage.is_none());
+    }
 }

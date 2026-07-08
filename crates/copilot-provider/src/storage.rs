@@ -47,6 +47,13 @@ pub struct SessionState {
     pub reasoning: String,
     #[serde(default)]
     pub cwd: String,
+    /// Cumulative premium-request cost billed to this session so far, in
+    /// premium-request units (model `billing.multiplier` summed over model
+    /// API turns on premium models). Reported to the editor via the
+    /// `usage-update`'s cost field so users can track spend. `0` for sessions
+    /// that have only used included (non-premium) models.
+    #[serde(default)]
+    pub premium_requests: f64,
 }
 
 /// Read a session from disk. Returns `Ok(None)` if the file doesn't exist.

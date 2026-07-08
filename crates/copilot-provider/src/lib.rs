@@ -21,7 +21,9 @@ use acp_wasm_sys::provider::yosh::acp::init::{
     AgentCapabilities, AuthenticateRequest, ImplementationInfo, InitializeRequest,
     InitializeResponse, McpCapabilities, PromptCapabilities, SessionCapabilities,
 };
-use acp_wasm_sys::provider::yosh::acp::prompts::{PromptResponse, SessionUpdate, StopReason};
+use acp_wasm_sys::provider::yosh::acp::prompts::{
+    PromptResponse, SessionUpdate, StopReason, UsageCost, UsageUpdate,
+};
 use acp_wasm_sys::provider::yosh::acp::sessions::{
     ComponentSource, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, NewSessionRequest, NewSessionResponse, ResumeSessionRequest,
@@ -408,11 +410,7 @@ fn pick_current_model(models: &[copilot::CopilotModel], preferred: Option<&str>)
 fn cached_models(current_model: &str) -> Vec<copilot::CopilotModel> {
     let cached = MODELS_CACHE.with(|c| c.borrow().clone());
     if cached.is_empty() {
-        vec![copilot::CopilotModel {
-            id: current_model.to_string(),
-            name: current_model.to_string(),
-            reasoning_efforts: Vec::new(),
-        }]
+        vec![copilot::CopilotModel::fallback(current_model)]
     } else {
         cached
     }
@@ -432,19 +430,11 @@ async fn build_session_config(
         Ok(models) if !models.is_empty() => models,
         Ok(_) => {
             eprintln!("copilot returned no models; using default");
-            vec![copilot::CopilotModel {
-                id: default.clone(),
-                name: default.clone(),
-                reasoning_efforts: Vec::new(),
-            }]
+            vec![copilot::CopilotModel::fallback(default.clone())]
         }
         Err(e) => {
             eprintln!("failed to list copilot models ({e}); using default");
-            vec![copilot::CopilotModel {
-                id: default.clone(),
-                name: default.clone(),
-                reasoning_efforts: Vec::new(),
-            }]
+            vec![copilot::CopilotModel::fallback(default.clone())]
         }
     };
     MODELS_CACHE.with(|c| *c.borrow_mut() = listed.clone());
@@ -540,6 +530,7 @@ impl Guest for Agent {
                     model: current_model,
                     reasoning,
                     cwd: req.cwd,
+                    premium_requests: 0.0,
                 },
             )
         });
@@ -576,6 +567,7 @@ impl Guest for Agent {
             .as_ref()
             .map(|s| s.reasoning.clone())
             .unwrap_or_default();
+        let stored_cost = stored.as_ref().map(|s| s.premium_requests).unwrap_or(0.0);
         let (config_options, current_model, reasoning) =
             build_session_config(preferred.as_deref(), &stored_reasoning).await;
         for msg in &history {
@@ -597,6 +589,7 @@ impl Guest for Agent {
                     model: current_model,
                     reasoning,
                     cwd: req.cwd,
+                    premium_requests: stored_cost,
                 },
             );
         });
@@ -635,6 +628,7 @@ impl Guest for Agent {
             .as_ref()
             .map(|s| s.reasoning.clone())
             .unwrap_or_default();
+        let stored_cost = stored.as_ref().map(|s| s.premium_requests).unwrap_or(0.0);
         let (config_options, current_model, reasoning) =
             build_session_config(preferred.as_deref(), &stored_reasoning).await;
         SESSIONS.with(|s| {
@@ -645,6 +639,7 @@ impl Guest for Agent {
                     model: current_model,
                     reasoning,
                     cwd: req.cwd,
+                    premium_requests: stored_cost,
                 },
             );
         });
@@ -683,6 +678,7 @@ async fn prompt_impl(
             model: copilot::default_model(),
             reasoning: String::new(),
             cwd: String::new(),
+            premium_requests: 0.0,
         });
         if entry.history.is_empty() {
             let mut prompt = SYSTEM_PROMPT.to_string();
@@ -728,6 +724,7 @@ async fn prompt_impl(
     // (or we hit the round cap).
     const MAX_ROUNDS: usize = 8;
     let mut stop_reason = StopReason::EndTurn;
+    let mut last_usage: Option<copilot::Usage> = None;
     for round in 0..MAX_ROUNDS {
         let sid = session_id.clone();
         let outcome = copilot::chat_round(
@@ -750,6 +747,12 @@ async fn prompt_impl(
         )
         .await
         .map_err(|e| err(ErrorCode::InternalError, &format!("copilot: {e}")))?;
+
+        // Keep the most recent round's token accounting: it reflects the
+        // tokens now occupying the model's context window.
+        if outcome.usage.is_some() {
+            last_usage = outcome.usage;
+        }
 
         if outcome.tool_calls.is_empty() {
             working.push(Message::assistant(outcome.text));
@@ -786,15 +789,56 @@ async fn prompt_impl(
         }
     }
 
+    // Resolve the model's upstream capabilities for the usage report: the
+    // context-window size and its premium-request billing. GitHub bills one
+    // premium request per user-initiated turn, scaled by the model's
+    // `multiplier`; included (non-premium) models cost nothing.
+    let models = cached_models(&model);
+    let model_info = find_model(&models, &model);
+    let context_window = model_info.and_then(|m| m.context_window);
+    let turn_cost = match model_info {
+        Some(m) if m.is_premium => m.multiplier,
+        _ => 0.0,
+    };
+
     // Persist the full working history — including tool-call and tool-result
-    // messages — so a resumed session keeps the model's tool context.
+    // messages — so a resumed session keeps the model's tool context. Also
+    // fold this turn's premium-request cost into the running session total.
     let snapshot = SESSIONS.with(|s| {
         let mut sessions = s.borrow_mut();
         sessions.get_mut(&session_id).map(|entry| {
             entry.history = working;
+            entry.premium_requests += turn_cost;
             entry.clone()
         })
     });
+
+    // Emit context-window usage so the editor can render a "context %"
+    // indicator (context % = used / size) and track spend. `used` is the last
+    // round's total tokens (the tokens now occupying the context); `size` is
+    // the model's context window. Cost is the cumulative premium requests this
+    // session has drawn (only for premium models). Skip fields we can't source
+    // from upstream rather than fabricating them.
+    if let Some(session) = &snapshot {
+        let used = last_usage.map(|u| u.total_tokens).unwrap_or(0);
+        if used > 0 {
+            if let Some(size) = context_window {
+                // Copilot's only cost signal is premium-request consumption, so
+                // we report it in that unit rather than inventing a monetary
+                // amount. `0` for sessions that only used included models.
+                let cost = (session.premium_requests > 0.0).then(|| UsageCost {
+                    amount: session.premium_requests,
+                    currency: "premium-requests".to_string(),
+                });
+                emit_update(
+                    session_id.clone(),
+                    SessionUpdate::UsageUpdate(UsageUpdate { used, size, cost }),
+                )
+                .await;
+            }
+        }
+    }
+
     if let Some(session) = snapshot {
         if let Err(e) = storage::save(&session_id, &session) {
             // Persistence is best-effort: a failed save shouldn't fail the
