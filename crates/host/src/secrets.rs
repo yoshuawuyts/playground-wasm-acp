@@ -31,8 +31,9 @@
 //! keychain access (and prompts).
 //!
 //! The WIT interface is read-only. Populate a component's store with the
-//! host's `secret set` / `secret delete` admin subcommands, which write
-//! to the same namespace via [`set_secret`] / [`delete_secret`].
+//! host's `secret set` / `secret delete` admin subcommands ([`set_secret`]
+//! / [`delete_secret`]); `secret check` ([`check_secret`]) reports whether
+//! an entry exists without revealing it.
 //!
 //! [`keyring-core`]: https://docs.rs/keyring-core
 
@@ -199,6 +200,24 @@ pub fn delete_secret(prefix: &str, component_id: &str, key: &str) -> Result<()> 
     match entry.delete_credential() {
         Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
         Err(e) => Err(anyhow::anyhow!("deleting keyring entry {service}/{key}: {e}")),
+    }
+}
+
+/// Report whether `component_id` has a secret stored under `key`,
+/// *without revealing its value*. Probes existence with
+/// [`keyring_core::Entry::get_credential`], which resolves the credential
+/// but does not decrypt the secret material — so a `secret check` never
+/// reads (or risks prompting for) the secret it is only asking about. A
+/// missing entry yields `Ok(false)`; store/access failures propagate as
+/// `Err`. Blocking; used by the `secret check` admin subcommand.
+pub fn check_secret(prefix: &str, component_id: &str, key: &str) -> Result<bool> {
+    let service = service_name(prefix, component_id);
+    let entry = keyring_core::Entry::new(&service, key)
+        .with_context(|| format!("opening keyring entry {service}/{key}"))?;
+    match entry.get_credential() {
+        Ok(_) => Ok(true),
+        Err(keyring_core::Error::NoEntry) => Ok(false),
+        Err(e) => Err(anyhow::anyhow!("checking keyring entry {service}/{key}: {e}")),
     }
 }
 
@@ -403,5 +422,18 @@ mod tests {
         ensure_mock_store();
         // Idempotent: deleting a never-set entry succeeds.
         delete_secret(PREFIX, "comp_del_missing", "nope").unwrap();
+    }
+
+    #[test]
+    fn check_reports_presence_without_revealing() {
+        ensure_mock_store();
+        // Absent → false.
+        assert!(!check_secret(PREFIX, "comp_check", "k").unwrap());
+        // Present → true.
+        set_secret(PREFIX, "comp_check", "k", &SecretValue::String("hunter2".into())).unwrap();
+        assert!(check_secret(PREFIX, "comp_check", "k").unwrap());
+        // Deleted → false again.
+        delete_secret(PREFIX, "comp_check", "k").unwrap();
+        assert!(!check_secret(PREFIX, "comp_check", "k").unwrap());
     }
 }

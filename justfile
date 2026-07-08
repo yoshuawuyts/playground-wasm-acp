@@ -1,19 +1,17 @@
-# Generate WIT bindings for the ollama-provider crate.
+# Generate all WIT bindings for the acp-wasm-sys crate (provider + layer worlds).
 bindgen: bindgen-provider bindgen-layer
 
-# Build everything: ollama-provider + uppercase-layer wasm components + host binary.
-build: build-provider build-layer build-plan-layer build-host
+# Build everything: provider + layer wasm components + host binary.
+build: build-providers build-layers build-host
 
-# Build the ollama-provider wasm component (release).
-build-provider:
+# Build the provider wasm components (release).
+build-providers:
     cargo build -p ollama-provider --target wasm32-wasip2 --release
+    cargo build -p copilot-provider --target wasm32-wasip2 --release
 
-# Build the uppercase-layer wasm component (release).
-build-layer:
+# Build the layer wasm components (release).
+build-layers:
     cargo build -p uppercase-layer --target wasm32-wasip2 --release
-
-# Build the plan-layer wasm component (release).
-build-plan-layer:
     cargo build -p plan-layer --target wasm32-wasip2 --release
 
 # Build the host binary.
@@ -33,12 +31,27 @@ run: build
         --provider target/wasm32-wasip2/release/ollama_provider.wasm \
         --layer target/wasm32-wasip2/release/uppercase_layer.wasm
 
-# Build and open docs for the ollama-provider bindings.
+# Build and open docs for the acp-wasm-sys bindings.
 doc-provider:
     cargo doc -p acp-wasm-sys --no-deps --open
 
-# Generate ollama-provider bindings (provider world).
-bindgen-provider:
+# Verify the installed `wit-bindgen` CLI matches the workspace `wit-bindgen`
+# crate version. A mismatched CLI silently emits bindings that don't compile
+# against the pinned runtime (e.g. a 0.41 CLI references `AsyncWaitResult`,
+# which was removed by 0.54), so fail fast with an actionable message instead.
+_check-wit-bindgen:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    want="$(grep -m1 '^wit-bindgen = ' Cargo.toml | sed -E 's/.*"([0-9.]+)".*/\1/')"
+    have="$(wit-bindgen --version | sed -E 's/.*[[:space:]]([0-9.]+)$/\1/')"
+    if [ "$want" != "$have" ]; then
+        echo "error: wit-bindgen CLI $have does not match workspace crate $want" >&2
+        echo "install the matching CLI: cargo install wit-bindgen-cli --version $want --locked" >&2
+        exit 1
+    fi
+
+# Generate the provider-world bindings (shared by the ollama + copilot providers).
+bindgen-provider: _check-wit-bindgen
     wit-bindgen rust wit/acp \
         --world provider \
         --runtime-path wit_bindgen::rt \
@@ -47,14 +60,14 @@ bindgen-provider:
         --out-dir crates/acp-wasm-sys/src \
         --format
 
-# Generate uppercase-layer bindings (layer world).
+# Generate the layer-world bindings (shared by the uppercase + plan layers).
 #
 # After generation we rename the layer's `agent` cabi export macro to
 # avoid a `#[macro_export]` collision with the provider world's macro
 # of the same name (both worlds export `agent`, both files end up at
 # the same crate root). The `client` cabi macro is unique to the
 # layer and needs no rename.
-bindgen-layer:
+bindgen-layer: _check-wit-bindgen
     wit-bindgen rust wit/acp \
         --world layer \
         --runtime-path wit_bindgen::rt \

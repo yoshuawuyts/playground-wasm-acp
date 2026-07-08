@@ -196,6 +196,16 @@ enum SecretCommand {
         /// Secret key name.
         key: String,
     },
+    /// Check whether a component's secret is set, without revealing its
+    /// value. Exits `0` if the secret exists, `1` if it does not — so it
+    /// can be used as a predicate (e.g. `host secret check … && …`).
+    Check {
+        /// Component identity `namespace:component-name` (e.g.
+        /// `local:ollama_provider` or `yosh:ollama-provider`).
+        component_id: String,
+        /// Secret key name.
+        key: String,
+    },
 }
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
@@ -220,6 +230,14 @@ impl LogLevel {
 }
 
 fn main() -> Result<()> {
+    // rustls 0.23 links both crypto backends in this dependency graph
+    // (wasmtime-wasi-http + oci-client pull `aws-lc-rs`; reqwest/hyper-rustls
+    // pull `ring`), so it cannot auto-select a process-level CryptoProvider
+    // and panics on the first outbound TLS handshake made by a guest. Install
+    // `aws-lc-rs` explicitly to match wasmtime's TLS backend. Idempotent — the
+    // `Err` (provider already installed) is safe to ignore.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let args = Args::parse();
     init_logging(&args)?;
 
@@ -369,6 +387,21 @@ fn run_secret_command(command: Command, prefix: &str) -> Result<()> {
                 .with_context(|| format!("deleting secret for `{component_id}` key `{key}`"))?;
             info!(component_id = %component_id, key = %key, "deleted secret");
             eprintln!("deleted secret for component `{component_id}`, key `{key}`");
+        }
+        SecretCommand::Check { component_id, key } => {
+            let present = crate::secrets::check_secret(prefix, &component_id, &key)
+                .with_context(|| format!("checking secret for `{component_id}` key `{key}`"))?;
+            if present {
+                info!(component_id = %component_id, key = %key, "secret is set");
+                eprintln!("secret is set for component `{component_id}`, key `{key}`");
+            } else {
+                info!(component_id = %component_id, key = %key, "secret is not set");
+                eprintln!("secret is NOT set for component `{component_id}`, key `{key}`");
+                // Signal absence with a non-zero exit so `check` works as a
+                // shell predicate. No async runtime or wasm resources are
+                // live on this admin path, so exiting directly is safe.
+                std::process::exit(1);
+            }
         }
     }
     Ok(())

@@ -135,11 +135,17 @@ head -c 32 /dev/urandom | cargo run -p host -- secret set local:ollama_provider 
 
 # Remove a secret (idempotent).
 cargo run -p host -- secret delete local:ollama_provider api_key
+
+# Check whether a secret is set, without revealing it
+# (exits 0 if set, 1 if not — usable as a shell predicate).
+cargo run -p host -- secret check local:ollama_provider api_key
 ```
 
 A single trailing newline is stripped from string values, so `printf 'x\n'`
 and `printf 'x'` store the same secret; pass `--bytes` to store stdin exactly.
-The component then reads it back via `store.get("api_key")`.
+The component then reads it back via `store.get("api_key")`. `secret check`
+probes existence without decrypting the value, so it never reads (or prompts
+for) the secret it reports on.
 
 [`keyring-core`]: https://docs.rs/keyring-core
 
@@ -160,6 +166,34 @@ Expect an `initialize` response, a `session/new` response, a sequence of
 `session/update` notifications streaming the assistant's reply, and finally
 the `session/prompt` response with `stopReason: "end_turn"`.
 
+## GitHub Copilot provider
+
+[`crates/copilot-provider`](crates/copilot-provider) is an alternative provider
+that speaks to the **GitHub Copilot** chat API instead of Ollama:
+
+```shell
+# build the copilot provider
+cargo build -p copilot-provider --target wasm32-wasip2 --release
+
+# one-time: store a GitHub token from an account with a Copilot subscription —
+# a `gh auth token` from the GitHub CLI works (see the provider README)
+gh auth token | cargo run -p host -- secret set local:copilot_provider github_token
+
+# run the host against the Copilot API
+cargo run -p host -- --provider target/wasm32-wasip2/release/copilot_provider.wasm
+```
+
+Unlike the Ollama provider, the Copilot provider is **agentic**: it advertises
+`read_text_file` and `write_text_file` tools to the model, surfaces each call to
+the editor as a tool-call card, and asks the editor for permission before
+touching the filesystem (with per-session *allow always* / *reject always*
+memory).
+
+See **[`crates/copilot-provider/README.md`](crates/copilot-provider/README.md)**
+for GitHub token authentication (token types and how the guest falls back from
+the editor token-exchange to direct-token auth), the file-editing tools,
+configuration, and a full smoke test.
+
 ## Crates
 
 - [`crates/acp-wasm-sys`](crates/acp-wasm-sys) — auto-generated WIT bindings
@@ -167,6 +201,11 @@ the `session/prompt` response with `stopReason: "end_turn"`.
 - [`crates/ollama-provider`](crates/ollama-provider) — the wasm component:
   implements the ACP `agent` interface, calls Ollama via `wstd::http`, keeps
   per-session conversation history.
+- [`crates/copilot-provider`](crates/copilot-provider) — an alternative wasm
+  component that talks to the **GitHub Copilot** chat API: resolves a GitHub
+  token (host secrets store or env), exchanges it for a short-lived Copilot
+  API token, and streams OpenAI-compatible chat completions. See
+  [GitHub Copilot provider](#github-copilot-provider).
 - [`crates/host`](crates/host) — the wasmtime host: instantiates the
   ollama-provider component, speaks ACP JSON-RPC over stdio, translates
   between WIT and ACP schema types.
@@ -181,9 +220,10 @@ The MVP intentionally cuts a few corners:
   the host's `await` on the wasm prompt and returns `stopReason: cancelled`,
   but the wasm guest itself doesn't get an interrupt — any in-flight HTTP
   request to Ollama still completes (its result is just discarded).
-- **No terminal/permission methods.** The host returns `method-not-found`
-  for `terminal/*` and `session/request_permission`. `fs/read_text_file`
-  and `fs/write_text_file` are wired through to the editor.
+- **No terminal methods.** The host returns `method-not-found` for
+  `terminal/*`. `fs/read_text_file`, `fs/write_text_file`, and
+  `session/request_permission` are wired through to the editor — the
+  copilot-provider uses all three to offer permissioned file editing.
 - **No MCP servers.** Servers passed in `session/new` are accepted but the
   guest doesn't connect to them.
 

@@ -29,14 +29,19 @@
 //! it.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context as TaskContext, Poll};
 
 use anyhow::{Context, Result};
 use futures_concurrency::future::Race;
-use tokio::sync::{mpsc, watch};
-use wasmtime::component::{Component, HasSelf, Linker, ResourceAny, ResourceTable};
-use wasmtime::{Engine, Store};
+use tokio::sync::{mpsc, oneshot, watch};
+use wasmtime::component::{
+    Component, HasSelf, Linker, ResourceAny, ResourceTable, Source, StreamConsumer, StreamResult,
+};
+use wasmtime::{Engine, Store, StoreContextMut};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 use wasmtime_wasi_http::WasiHttpCtx;
 
@@ -231,7 +236,7 @@ impl SessionFactory {
         debug_assert_chain_wiring(store.data());
 
         let (cancel_tx, _cancel_rx) = watch::channel(false);
-        Ok(Session::new(store, head_idx, cancel_tx))
+        Ok(Session::new(store, head_idx, cancel_tx, self.outbound.clone()))
     }
 }
 
@@ -340,6 +345,12 @@ pub enum SetModeOutcome {
     Trap(wasmtime::Error),
 }
 
+pub enum SetConfigOptionOutcome {
+    Done(Vec<crate::yosh::acp::sessions::SessionConfigOption>),
+    Wit(Error),
+    Trap(wasmtime::Error),
+}
+
 /// One ACP session: a shared store hosting every chain stage, plus the
 /// head index and a cancel watch. Cheap to clone (it's an `Arc`).
 #[derive(Clone)]
@@ -353,6 +364,10 @@ struct SessionInner {
     store: tokio::sync::Mutex<Store<HostState>>,
     head_idx: usize,
     cancel: watch::Sender<bool>,
+    /// Outbound bridge sender for this session. `prompt` uses it to
+    /// forward each `session-update` streamed on the prompt-turn body
+    /// to the editor as a `session/update` notification.
+    outbound: mpsc::Sender<OutboundEvent>,
     /// Owned chain-head `session` resource handle, populated after
     /// `new-session` / `load-session` / `resume-session`. Held inside
     /// the `Store`, so it (and any downstream resources transitively
@@ -363,12 +378,18 @@ struct SessionInner {
 }
 
 impl Session {
-    fn new(store: Store<HostState>, head_idx: usize, cancel: watch::Sender<bool>) -> Self {
+    fn new(
+        store: Store<HostState>,
+        head_idx: usize,
+        cancel: watch::Sender<bool>,
+        outbound: mpsc::Sender<OutboundEvent>,
+    ) -> Self {
         Self {
             inner: Arc::new(SessionInner {
                 store: tokio::sync::Mutex::new(store),
                 head_idx,
                 cancel,
+                outbound,
                 head_session: Mutex::new(None),
             }),
         }
@@ -579,19 +600,64 @@ impl Session {
         }
     }
 
-    /// Race the chain-head `prompt` call against the cancel watch.
+    pub async fn set_config_option(
+        &self,
+        config_id: crate::yosh::acp::sessions::SessionConfigId,
+        value: crate::yosh::acp::sessions::SessionConfigValueId,
+    ) -> SetConfigOptionOutcome {
+        let head_idx = self.inner.head_idx;
+        let head_session = match *self.inner.head_session.lock().unwrap() {
+            Some(any) => any,
+            None => {
+                return SetConfigOptionOutcome::Trap(wasmtime::Error::msg(
+                    "set-config-option called before new-session",
+                ));
+            }
+        };
+        let res = self
+            .run_head(|a| {
+                Box::pin(async move {
+                    let bindings = a
+                        .with(|mut x| x.get().stages[head_idx].bindings.clone())
+                        .expect("head bindings filled");
+                    match &*bindings {
+                        Bindings::Provider(b) => {
+                            b.yosh_acp_agent()
+                                .session()
+                                .call_set_config_option(a, head_session, config_id, value)
+                                .await
+                        }
+                        Bindings::Layer(b) => {
+                            b.yosh_acp_agent()
+                                .session()
+                                .call_set_config_option(a, head_session, config_id, value)
+                                .await
+                        }
+                    }
+                })
+            })
+            .await;
+        match res {
+            Err(e) => SetConfigOptionOutcome::Trap(e),
+            Ok(Err(e)) => SetConfigOptionOutcome::Trap(e),
+            Ok(Ok(Err(e))) => SetConfigOptionOutcome::Wit(e),
+            Ok(Ok(Ok(options))) => SetConfigOptionOutcome::Done(options),
+        }
+    }
     /// Dropping the prompt future on cancel releases the store lock and
     /// wasmtime cancels any in-flight component tasks.
     ///
-    /// Phase 3 v1: gets the prompt-turn resource from
-    /// `session.prompt()`, immediately closes its `updates()` stream
-    /// reader (so the guest's `emit_update` writes resolve to
-    /// `StreamResult::Dropped` instead of hanging), and awaits
-    /// `response()`. The body stream is dropped on the floor; phase 3
-    /// v2 implements a `StreamConsumer` that pushes each update onto
-    /// the outbound bridge as a `session/update` notification.
+    /// Phase 3 v2: gets the prompt-turn resource from
+    /// `session.prompt()`, then `pipe`s its `updates()` stream into an
+    /// [`UpdateForwarder`] `StreamConsumer` that pushes each streamed
+    /// `session-update` onto the outbound bridge as a `session/update`
+    /// notification. The consumer runs concurrently with `response()`,
+    /// so updates reach the editor as the guest emits them; the guest's
+    /// `emit_update` write-rate is bounded by editor delivery so every
+    /// update is on the wire before `response()`'s final result.
     pub async fn prompt(
         &self,
+        session_id: String,
         prompt: Vec<crate::yosh::acp::content::ContentBlock>,
     ) -> PromptOutcome {
         let _ = self.inner.cancel.send_replace(false);
@@ -608,6 +674,7 @@ impl Session {
             }
         };
         let this = self.clone();
+        let outbound = self.inner.outbound.clone();
         let prompt_arm = async move {
             let res = this
                 .run_head(|a| {
@@ -630,14 +697,13 @@ impl Session {
                                     .await?
                             }
                         };
-                        // Drain the updates body. v1: close the reader
-                        // immediately so guest writes resolve to
-                        // `StreamResult::Dropped` rather than blocking
-                        // on backpressure with no reader. v2 wires a
-                        // real `StreamConsumer` that forwards each
-                        // update to the outbound bridge as a
-                        // `session/update` notification.
-                        let mut reader = match &*bindings {
+                        // Drain the updates body. v2: `pipe` the
+                        // reader into an `UpdateForwarder` consumer so
+                        // each streamed `session-update` is forwarded
+                        // to the outbound bridge as a `session/update`
+                        // notification, driven concurrently with
+                        // `response()` below.
+                        let reader = match &*bindings {
                             Bindings::Provider(b) => {
                                 b.yosh_acp_agent()
                                     .prompt_turn()
@@ -651,12 +717,17 @@ impl Session {
                                     .await?
                             }
                         };
-                        // Close the reader. Errors here are reported
-                        // but not fatal; if the reader's already
-                        // closed (e.g. the guest dropped it), that's
-                        // a no-op.
-                        if let Err(e) = reader.close_with(a) {
-                            tracing::debug!(error = %e, "close updates reader");
+                        // Install the forwarding consumer. Errors here
+                        // are reported but not fatal; if the reader's
+                        // already closed (e.g. the guest dropped it),
+                        // `pipe` fails and we simply forward nothing.
+                        let consumer = UpdateForwarder {
+                            session_id: session_id.clone(),
+                            outbound: outbound.clone(),
+                            pending: None,
+                        };
+                        if let Err(e) = a.with(|access| reader.pipe(access, consumer)) {
+                            tracing::debug!(error = %e, "pipe updates reader");
                         }
                         // Await the final response.
                         let resp = match &*bindings {
@@ -696,6 +767,103 @@ impl Session {
             PromptOutcome::Cancelled
         };
         (cancel_arm, prompt_arm).race().await
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Prompt-turn update forwarding
+// -----------------------------------------------------------------------------
+
+/// Forwards each `session-update` streamed on a prompt-turn's body to
+/// the outbound bridge as a `session/update` notification.
+///
+/// Installed on the guest's `updates()` stream via
+/// [`wasmtime::component::StreamReader::pipe`]; the wasmtime concurrent
+/// runtime drives [`poll_consume`](StreamConsumer::poll_consume) as the
+/// guest writes updates during the prompt turn's `response()`.
+///
+/// Backpressure and ordering: items taken from a write are forwarded to
+/// the bridge — and each editor ack awaited — before the write is
+/// reported `Completed` to the guest. So the guest's `emit_update`
+/// write-rate tracks editor delivery, and every update is committed to
+/// the wire before the turn's final `response()` result is returned
+/// (which the handler turns into the `session/prompt` reply).
+struct UpdateForwarder {
+    session_id: String,
+    outbound: mpsc::Sender<OutboundEvent>,
+    /// In-flight forward of items already taken from the current write.
+    /// `Some` while awaiting the outbound send + editor ack(s); polled
+    /// to completion before the write is reported `Completed`.
+    pending: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+}
+
+impl StreamConsumer<HostState> for UpdateForwarder {
+    type Item = crate::yosh::acp::prompts::SessionUpdate;
+
+    fn poll_consume(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        mut store: StoreContextMut<HostState>,
+        mut source: Source<Self::Item>,
+        finish: bool,
+    ) -> Poll<wasmtime::Result<StreamResult>> {
+        // `UpdateForwarder` is `Unpin` (all fields are), so a plain
+        // `&mut Self` is sound.
+        let this = self.get_mut();
+
+        // Drive an in-flight forward first. Once it resolves, the items
+        // taken for the current write are fully on the wire, so report
+        // the write `Completed` to the guest.
+        if let Some(fut) = this.pending.as_mut() {
+            std::task::ready!(fut.as_mut().poll(cx));
+            this.pending = None;
+            return Poll::Ready(Ok(StreamResult::Completed));
+        }
+
+        // No in-flight forward: take whatever the current write offers.
+        let available = source.remaining(&mut store);
+        if available == 0 {
+            // Empty source: either a writability probe (we're always
+            // ready to accept) or a cancellation when `finish` is set.
+            return Poll::Ready(Ok(if finish {
+                StreamResult::Cancelled
+            } else {
+                StreamResult::Completed
+            }));
+        }
+        let mut items: Vec<Self::Item> = Vec::with_capacity(available);
+        source.read(&mut store, &mut items)?;
+
+        // Translate (dropping unsupported variants) and forward the
+        // rest, awaiting each ack so notifications land before the
+        // turn's final response.
+        let session_id = this.session_id.clone();
+        let outbound = this.outbound.clone();
+        let notifs: Vec<_> = items
+            .into_iter()
+            .filter_map(|u| crate::translate::session_update_wit_to_schema(session_id.clone(), u))
+            .collect();
+        this.pending = Some(Box::pin(async move {
+            for notif in notifs {
+                let (ack_tx, ack_rx) = oneshot::channel();
+                if outbound
+                    .send(OutboundEvent::SessionUpdate(notif, ack_tx))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                let _ = ack_rx.await;
+            }
+        }));
+        // Poll the freshly-built forward once; park until the ack(s)
+        // arrive if it can't finish synchronously.
+        let fut = this.pending.as_mut().unwrap();
+        if fut.as_mut().poll(cx).is_pending() {
+            return Poll::Pending;
+        }
+        this.pending = None;
+        Poll::Ready(Ok(StreamResult::Completed))
     }
 }
 
@@ -1265,6 +1433,49 @@ impl layer_agent::HostSessionWithStore for HasSelf<HostState> {
             })
             .await;
             flatten_downstream("session.select-model", res)
+        }
+    }
+
+    fn set_config_option<T: Send>(
+        accessor: &wasmtime::component::Accessor<T, Self>,
+        self_: wasmtime::component::Resource<layer_agent::Session>,
+        config_id: crate::yosh::acp::sessions::SessionConfigId,
+        value: crate::yosh::acp::sessions::SessionConfigValueId,
+    ) -> impl ::core::future::Future<
+        Output = Result<Vec<crate::yosh::acp::sessions::SessionConfigOption>, Error>,
+    > + Send {
+        let downstream = accessor.with(|mut a| {
+            let state = a.get();
+            let stage = state.current_stage();
+            let idx = stage.downstream_idx?;
+            let bindings = state.stages[idx].bindings.clone()?;
+            let any = state.downstream_sessions.get(&self_.rep()).copied()?;
+            Some((idx, bindings, any))
+        });
+        async move {
+            let Some((idx, bindings, any)) = downstream else {
+                return Err(translate::internal_error(
+                    "layer called `session.set-config-option` but no downstream session is mapped",
+                ));
+            };
+            let res = downstream_call(accessor, idx, || async {
+                match &*bindings {
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent()
+                            .session()
+                            .call_set_config_option(accessor, any, config_id, value)
+                            .await
+                    }
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_agent()
+                            .session()
+                            .call_set_config_option(accessor, any, config_id, value)
+                            .await
+                    }
+                }
+            })
+            .await;
+            flatten_downstream("session.set-config-option", res)
         }
     }
 }

@@ -40,8 +40,8 @@ use acp_wasm_sys::layer::yosh::acp::prompts::{PromptResponse, SessionUpdate};
 use acp_wasm_sys::layer::yosh::acp::sessions::{
     ComponentSource, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, NewSessionRequest, NewSessionResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SessionId, SessionMode, SessionModeId, SessionModeState,
-    SessionModelId,
+    ResumeSessionResponse, SessionConfigId, SessionConfigOption, SessionConfigValueId, SessionId,
+    SessionMode, SessionModeId, SessionModeState, SessionModelId,
 };
 use acp_wasm_sys::layer::yosh::acp::tools::{
     PermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ToolKind,
@@ -104,6 +104,15 @@ impl GuestSession for PlanSession {
     async fn select_model(&self, model_id: SessionModelId) -> Result<(), Error> {
         // Models are entirely the provider's concern; forward verbatim.
         self.downstream.select_model(model_id).await
+    }
+
+    async fn set_config_option(
+        &self,
+        config_id: SessionConfigId,
+        value: SessionConfigValueId,
+    ) -> Result<Vec<SessionConfigOption>, Error> {
+        // Config-option selectors are the provider's concern; forward verbatim.
+        self.downstream.set_config_option(config_id, value).await
     }
 }
 

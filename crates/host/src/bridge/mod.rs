@@ -73,6 +73,7 @@ pub async fn run(
     let registry_load = registry.clone();
     let registry_set_mode = registry.clone();
     let registry_select_model = registry.clone();
+    let registry_set_config_option = registry.clone();
     let factory_prompt = factory.clone();
     let registry_prompt = registry.clone();
     let registry_cancel = registry.clone();
@@ -132,6 +133,17 @@ pub async fn run(
         .on_receive_request(
             async move |req, responder, cx| {
                 handlers::handle_select_model(&registry_select_model, req, responder, cx)
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req, responder, cx| {
+                handlers::handle_set_session_config_option(
+                    &registry_set_config_option,
+                    req,
+                    responder,
+                    cx,
+                )
             },
             agent_client_protocol::on_receive_request!(),
         )

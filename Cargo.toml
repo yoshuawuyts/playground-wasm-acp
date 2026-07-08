@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/acp-wasm-sys",
+    "crates/copilot-provider",
     "crates/e2e-tests",
     "crates/host",
     "crates/ollama-provider",

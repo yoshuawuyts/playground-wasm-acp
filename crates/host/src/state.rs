@@ -49,6 +49,11 @@ pub enum OutboundEvent {
         schema::WriteTextFileRequest,
         oneshot::Sender<Result<schema::WriteTextFileResponse, AcpError>>,
     ),
+    /// `session/request_permission` request that expects a response.
+    RequestPermission(
+        schema::RequestPermissionRequest,
+        oneshot::Sender<Result<schema::RequestPermissionResponse, AcpError>>,
+    ),
 }
 
 /// Which world a stage instantiates as.

@@ -24,11 +24,12 @@ use crate::yosh::acp::prompts::{PromptResponse, SessionUpdate, StopReason};
 use crate::yosh::acp::sessions::{
     ComponentSource, EnvVar, HttpHeader, LoadSessionRequest, LoadSessionResponse, McpServer,
     McpServerHttp, McpServerSse, McpServerStdio, NewSessionRequest, NewSessionResponse,
-    SessionId, SessionMode, SessionModeId, SessionModeState, SessionModel,
-    SessionModelState,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption, SessionId,
+    SessionMode, SessionModeId, SessionModeState, SessionModel, SessionModelState,
 };
 use crate::yosh::acp::tools::{
-    ToolCallContent, ToolCallSnapshot, ToolCallStatus, ToolKind,
+    PermissionOption, PermissionOptionKind, PermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, ToolCallContent, ToolCallSnapshot, ToolCallStatus, ToolKind,
 };
 
 // -----------------------------------------------------------------------------
@@ -53,15 +54,6 @@ fn synth<T: serde::de::DeserializeOwned>(
 // -----------------------------------------------------------------------------
 // Errors
 // -----------------------------------------------------------------------------
-
-/// Build a WIT `Error` with `method-not-found` semantics. Used by the host's
-/// `client` interface stubs.
-pub fn method_not_found(message: &str) -> Error {
-    Error {
-        code: ErrorCode::MethodNotFound,
-        message: message.to_string(),
-    }
-}
 
 /// Convert a WIT-side ACP `Error` (returned by the wasm guest) into the
 /// JSON-RPC `Error` shape the `agent_client_protocol` crate expects.
@@ -195,8 +187,12 @@ pub fn new_session_response_wit_to_schema(
     // schema::NewSessionResponse is `non_exhaustive`. Roundtrip via JSON to
     // construct it without depending on the (unstable) field set.
     let mut json = serde_json::json!({ "sessionId": resp.session_id });
-    let modes = ensure_host_default_mode(resp.modes);
-    if let Some(modes) = modes {
+    // `config_options` (the unified selector mechanism) is XOR with the legacy
+    // `modes` field client-side: when present it fully replaces modes, so skip
+    // the host-injected default mode to avoid advertising a phantom selector.
+    if let Some(config_options) = resp.config_options {
+        json["configOptions"] = session_config_options_to_json(config_options);
+    } else if let Some(modes) = ensure_host_default_mode(resp.modes) {
         json["modes"] = session_mode_state_to_json(modes, component_id);
     }
     if let Some(models) = resp.models {
@@ -225,8 +221,9 @@ pub fn load_session_response_wit_to_schema(
     component_id: &str,
 ) -> Result<schema::LoadSessionResponse, AcpError> {
     let mut json = serde_json::json!({});
-    let modes = ensure_host_default_mode(resp.modes);
-    if let Some(modes) = modes {
+    if let Some(config_options) = resp.config_options {
+        json["configOptions"] = session_config_options_to_json(config_options);
+    } else if let Some(modes) = ensure_host_default_mode(resp.modes) {
         json["modes"] = session_mode_state_to_json(modes, component_id);
     }
     if let Some(models) = resp.models {
@@ -383,6 +380,92 @@ fn session_mode_to_json(mode: SessionMode, _component_id: &str) -> serde_json::V
 const _: fn(SessionModeId) = |_| {};
 
 // -----------------------------------------------------------------------------
+// Session config options (the unified selector mechanism: model / mode /
+// thought-level, rendered client-side from a single `configOptions` list)
+// -----------------------------------------------------------------------------
+
+/// Build the `{ configOptions: [...] }` response to `session/set_config_option`.
+pub fn set_config_option_response(
+    options: Vec<SessionConfigOption>,
+) -> Result<schema::SetSessionConfigOptionResponse, AcpError> {
+    let json = serde_json::json!({ "configOptions": session_config_options_to_json(options) });
+    synth("set-config-option response", json)
+}
+
+fn session_config_options_to_json(options: Vec<SessionConfigOption>) -> serde_json::Value {
+    serde_json::Value::Array(
+        options
+            .into_iter()
+            .map(session_config_option_to_json)
+            .collect(),
+    )
+}
+
+fn session_config_option_to_json(option: SessionConfigOption) -> serde_json::Value {
+    let SessionConfigOption {
+        id,
+        name,
+        description,
+        category,
+        current_value,
+        options,
+        // Upstream ACP's `SessionConfigOption` carries no provenance field;
+        // these are top-level category selectors, so provenance would just be
+        // display noise. Drop it, mirroring how the host handles its own modes.
+        provided_by: _,
+    } = option;
+    // The schema flattens `kind` via a `type` discriminator; we only emit
+    // `select` options. `SessionConfigSelectOptions` is untagged, so a flat
+    // array deserializes as the ungrouped variant.
+    let mut entry = serde_json::json!({
+        "id": id,
+        "name": name,
+        "type": "select",
+        "currentValue": current_value,
+        "options": options
+            .into_iter()
+            .map(session_config_select_option_to_json)
+            .collect::<Vec<_>>(),
+    });
+    if let Some(d) = description {
+        entry["description"] = serde_json::Value::String(d);
+    }
+    if let Some(cat) = category {
+        entry["category"] = session_config_category_to_json(cat);
+    }
+    entry
+}
+
+fn session_config_category_to_json(category: SessionConfigOptionCategory) -> serde_json::Value {
+    match category {
+        SessionConfigOptionCategory::Mode => serde_json::Value::String("mode".to_string()),
+        SessionConfigOptionCategory::Model => serde_json::Value::String("model".to_string()),
+        SessionConfigOptionCategory::ThoughtLevel => {
+            serde_json::Value::String("thought_level".to_string())
+        }
+        // Free-form categories serialize as their raw string (schema's
+        // `#[serde(untagged)] Other(String)`).
+        SessionConfigOptionCategory::Other(s) => serde_json::Value::String(s),
+    }
+}
+
+fn session_config_select_option_to_json(option: SessionConfigSelectOption) -> serde_json::Value {
+    let SessionConfigSelectOption {
+        value,
+        name,
+        description,
+    } = option;
+    let mut entry = serde_json::json!({
+        "value": value,
+        "name": name,
+    });
+    if let Some(d) = description {
+        entry["description"] = serde_json::Value::String(d);
+    }
+    entry
+}
+
+// -----------------------------------------------------------------------------
 // Prompt
 // -----------------------------------------------------------------------------
 
@@ -535,17 +618,17 @@ pub fn session_update_wit_to_schema(
         SessionUpdate::AgentThoughtChunk(b) => Some(("thought", b)),
         SessionUpdate::UserMessageChunk(b) => Some(("user", b)),
         SessionUpdate::ToolCall(call) => {
-            let upd = tool_call_to_schema_update(&session_id, call)?;
+            let upd = tool_call_to_schema_update(&session_id, call, false)?;
             return Some(schema::SessionNotification::new(
                 schema::SessionId::from(session_id),
                 upd,
             ));
         }
         SessionUpdate::ToolCallUpdate(snapshot) => {
-            // Phase 1 streams: both `ToolCall` and `ToolCallUpdate`
-            // variants now carry a full [`ToolCallSnapshot`], so we
-            // can reuse the same translation. Phase 4 may diverge.
-            let upd = tool_call_to_schema_update(&session_id, snapshot)?;
+            // Both `ToolCall` and `ToolCallUpdate` variants carry a full
+            // [`ToolCallSnapshot`]; the only wire difference is the
+            // `sessionUpdate` discriminator, so reuse the same translation.
+            let upd = tool_call_to_schema_update(&session_id, snapshot, true)?;
             return Some(schema::SessionNotification::new(
                 schema::SessionId::from(session_id),
                 upd,
@@ -827,9 +910,16 @@ fn tool_call_content_to_json(
             let inner = serde_json::to_value(schema_block).ok()?;
             Some(serde_json::json!({ "type": "content", "content": inner }))
         }
-        ToolCallContent::Diff(_) => {
-            debug!(session = %session_id, "dropped tool-call diff content (not yet wired)");
-            None
+        ToolCallContent::Diff(diff) => {
+            let mut d = serde_json::json!({
+                "type": "diff",
+                "path": diff.path,
+                "newText": diff.new_text,
+            });
+            if let Some(old) = diff.old_text {
+                d["oldText"] = serde_json::Value::String(old);
+            }
+            Some(d)
         }
         ToolCallContent::Terminal(_) => {
             debug!(session = %session_id, "dropped tool-call terminal content (not yet wired)");
@@ -838,10 +928,10 @@ fn tool_call_content_to_json(
     }
 }
 
-fn tool_call_to_schema_update(
-    session_id: &str,
-    call: ToolCallSnapshot,
-) -> Option<schema::SessionUpdate> {
+/// Build the shared `{ toolCallId, title, kind, status, content, rawInput,
+/// rawOutput }` JSON object used by both `tool_call` / `tool_call_update`
+/// session updates and the `toolCall` field of a permission request.
+fn tool_call_snapshot_to_json(session_id: &str, call: ToolCallSnapshot) -> serde_json::Value {
     let content: Vec<serde_json::Value> = call
         .content
         .into_iter()
@@ -857,7 +947,6 @@ fn tool_call_to_schema_update(
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
         .or_else(|| call.raw_output.map(serde_json::Value::String));
     let mut json = serde_json::json!({
-        "sessionUpdate": "tool_call",
         "toolCallId": call.id,
         "title": call.title,
         "kind": tool_kind_str(call.kind),
@@ -870,7 +959,70 @@ fn tool_call_to_schema_update(
     if let Some(v) = raw_output {
         json["rawOutput"] = v;
     }
+    json
+}
+
+fn tool_call_to_schema_update(
+    session_id: &str,
+    call: ToolCallSnapshot,
+    is_update: bool,
+) -> Option<schema::SessionUpdate> {
+    // The initial announcement is a `tool_call`; every later state change is a
+    // `tool_call_update`. Both carry the same top-level field layout.
+    let discriminator = if is_update { "tool_call_update" } else { "tool_call" };
+    let mut json = tool_call_snapshot_to_json(session_id, call);
+    json["sessionUpdate"] = serde_json::Value::String(discriminator.to_string());
     serde_json::from_value(json).ok()
+}
+
+/// Map our WIT `PermissionOptionKind` to the ACP wire string.
+fn permission_option_kind_str(kind: PermissionOptionKind) -> &'static str {
+    match kind {
+        PermissionOptionKind::AllowOnce => "allow_once",
+        PermissionOptionKind::AllowAlways => "allow_always",
+        PermissionOptionKind::RejectOnce => "reject_once",
+        PermissionOptionKind::RejectAlways => "reject_always",
+    }
+}
+
+/// Translate a guest `request-permission` call into the schema request the
+/// editor expects. Returns `None` if the assembled JSON doesn't round-trip.
+pub fn request_permission_request_wit_to_schema(
+    req: RequestPermissionRequest,
+) -> Option<schema::RequestPermissionRequest> {
+    let session = req.session_id;
+    let tool_call = tool_call_snapshot_to_json(&session, req.tool_call);
+    let options: Vec<serde_json::Value> = req
+        .options
+        .into_iter()
+        .map(|o: PermissionOption| {
+            serde_json::json!({
+                "optionId": o.id,
+                "name": o.name,
+                "kind": permission_option_kind_str(o.kind),
+            })
+        })
+        .collect();
+    let json = serde_json::json!({
+        "sessionId": session,
+        "toolCall": tool_call,
+        "options": options,
+    });
+    serde_json::from_value(json).ok()
+}
+
+/// Translate the editor's permission response back into the WIT shape.
+pub fn request_permission_response_schema_to_wit(
+    resp: schema::RequestPermissionResponse,
+) -> RequestPermissionResponse {
+    let outcome = match resp.outcome {
+        schema::RequestPermissionOutcome::Selected(sel) => {
+            PermissionOutcome::Selected(sel.option_id.0.to_string())
+        }
+        // `Cancelled` — and any future non-exhaustive variant — abort the call.
+        _ => PermissionOutcome::Cancelled,
+    };
+    RequestPermissionResponse { outcome }
 }
 
 fn _dead_tool_call_update_to_schema_update(
@@ -1034,5 +1186,69 @@ mod tests {
             })),
         );
         assert!(dropped.is_none());
+    }
+
+    #[test]
+    fn tool_call_announce_vs_update_discriminator() {
+        use crate::yosh::acp::tools::ToolCallSnapshot;
+        let snap = |status| ToolCallSnapshot {
+            id: "tc1".into(),
+            title: "Read /tmp/x".into(),
+            kind: ToolKind::Read,
+            status,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: Some("{\"path\":\"/tmp/x\"}".into()),
+            raw_output: None,
+        };
+
+        // The initial announcement is `tool_call`.
+        let announce = session_update_wit_to_schema(
+            "s".into(),
+            SessionUpdate::ToolCall(snap(ToolCallStatus::Pending)),
+        )
+        .unwrap();
+        let json = serde_json::to_value(&announce).unwrap();
+        assert_eq!(json["update"]["sessionUpdate"], "tool_call");
+        assert_eq!(json["update"]["toolCallId"], "tc1");
+        assert_eq!(json["update"]["kind"], "read");
+        assert_eq!(json["update"]["rawInput"]["path"], "/tmp/x");
+
+        // Every later state change is a `tool_call_update`.
+        let update = session_update_wit_to_schema(
+            "s".into(),
+            SessionUpdate::ToolCallUpdate(snap(ToolCallStatus::Completed)),
+        )
+        .unwrap();
+        let json = serde_json::to_value(&update).unwrap();
+        assert_eq!(json["update"]["sessionUpdate"], "tool_call_update");
+        assert_eq!(json["update"]["toolCallId"], "tc1");
+        assert_eq!(json["update"]["status"], "completed");
+    }
+
+    #[test]
+    fn tool_call_diff_content_is_wired() {
+        use crate::yosh::acp::tools::{Diff, ToolCallSnapshot};
+        let snap = ToolCallSnapshot {
+            id: "tc2".into(),
+            title: "Write /tmp/y".into(),
+            kind: ToolKind::Edit,
+            status: ToolCallStatus::Completed,
+            content: vec![ToolCallContent::Diff(Diff {
+                path: "/tmp/y".into(),
+                old_text: None,
+                new_text: "hello\n".into(),
+            })],
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: None,
+        };
+        let notif =
+            session_update_wit_to_schema("s".into(), SessionUpdate::ToolCallUpdate(snap)).unwrap();
+        let json = serde_json::to_value(&notif).unwrap();
+        let diff = &json["update"]["content"][0];
+        assert_eq!(diff["type"], "diff");
+        assert_eq!(diff["path"], "/tmp/y");
+        assert_eq!(diff["newText"], "hello\n");
     }
 }
