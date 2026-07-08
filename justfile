@@ -35,8 +35,23 @@ run: build
 doc-provider:
     cargo doc -p acp-wasm-sys --no-deps --open
 
+# Verify the installed `wit-bindgen` CLI matches the workspace `wit-bindgen`
+# crate version. A mismatched CLI silently emits bindings that don't compile
+# against the pinned runtime (e.g. a 0.41 CLI references `AsyncWaitResult`,
+# which was removed by 0.54), so fail fast with an actionable message instead.
+_check-wit-bindgen:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    want="$(grep -m1 '^wit-bindgen = ' Cargo.toml | sed -E 's/.*"([0-9.]+)".*/\1/')"
+    have="$(wit-bindgen --version | sed -E 's/.*[[:space:]]([0-9.]+)$/\1/')"
+    if [ "$want" != "$have" ]; then
+        echo "error: wit-bindgen CLI $have does not match workspace crate $want" >&2
+        echo "install the matching CLI: cargo install wit-bindgen-cli --version $want --locked" >&2
+        exit 1
+    fi
+
 # Generate the provider-world bindings (shared by the ollama + copilot providers).
-bindgen-provider:
+bindgen-provider: _check-wit-bindgen
     wit-bindgen rust wit/acp \
         --world provider \
         --runtime-path wit_bindgen::rt \
@@ -52,7 +67,7 @@ bindgen-provider:
 # of the same name (both worlds export `agent`, both files end up at
 # the same crate root). The `client` cabi macro is unique to the
 # layer and needs no rename.
-bindgen-layer:
+bindgen-layer: _check-wit-bindgen
     wit-bindgen rust wit/acp \
         --world layer \
         --runtime-path wit_bindgen::rt \
