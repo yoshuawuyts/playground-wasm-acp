@@ -65,6 +65,31 @@ If no secret is stored, the guest falls back to the `COPILOT_GITHUB_TOKEN`,
 `GH_TOKEN`, or `GITHUB_TOKEN` environment variables (in that order) — handy for
 CI (`GH_TOKEN=$(gh auth token)`).
 
+## Tools
+
+Unlike the Ollama provider (a pure text relay), the Copilot provider runs an
+**agentic loop**: on every prompt it advertises two file-editing tools to the
+model and lets it call them for up to eight rounds before answering.
+
+| Tool              | ACP method            | Kind   |
+|-------------------|-----------------------|--------|
+| `read_text_file`  | `fs/read_text_file`   | `read` |
+| `write_text_file` | `fs/write_text_file`  | `edit` |
+
+Both are always advertised; there is intentionally **no terminal/command tool**.
+Relative paths are resolved against the session `cwd`.
+
+Each call is surfaced to the editor as a tool-call card — an initial
+`tool_call` update (status *pending*), then a `tool_call_update` when it
+completes or fails. Writes carry a `diff` so the editor can render the change.
+
+Before the guest touches the filesystem it asks the editor for permission via
+`session/request_permission`, offering four choices: *allow once*, *allow always*,
+*reject once*, *reject always*. The two *always* choices are remembered for the
+rest of the session (per tool), so you're only prompted once per tool. If the
+editor doesn't support a tool or denies permission, the model is told and can
+continue without it.
+
 ## Configuration
 
 All optional; read from the (inherited) host environment:
@@ -92,5 +117,7 @@ printf '%s\n' \
 ```
 
 Use the `sessionId` returned by the `session/new` response in the
-`session/prompt` call. Like the Ollama provider, this MVP is **text only** — it
-streams assistant text and does not yet surface tool calls, images, or audio.
+`session/prompt` call. This example prompts for plain text, but the provider is
+**agentic**: ask it to read or edit a file and it will call the
+`read_text_file` / `write_text_file` tools (with editor permission prompts) —
+see [Tools](#tools). Image and audio content are still dropped.

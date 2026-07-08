@@ -56,6 +56,9 @@ pub(super) async fn run_outbound_drain(
             OutboundEvent::WriteTextFile(req, reply) => {
                 forward_write_text_file(&cx, req, reply);
             }
+            OutboundEvent::RequestPermission(req, reply) => {
+                forward_request_permission(&cx, req, reply);
+            }
         }
     }
     Ok(())
@@ -147,6 +150,35 @@ fn forward_write_text_file(
                 path = %path,
                 error = %e.message,
                 "fs/write_text_file responded err"
+            ),
+        }
+        let _ = reply.send(result);
+        Ok(())
+    });
+}
+
+fn forward_request_permission(
+    cx: &ConnectionTo<Client>,
+    req: schema::RequestPermissionRequest,
+    reply: oneshot::Sender<Result<schema::RequestPermissionResponse, AcpError>>,
+) {
+    let session = req.session_id.0.to_string();
+    let tool_call = req.tool_call.tool_call_id.0.to_string();
+    debug!(session = %session, tool_call = %tool_call, "session/request_permission dispatched");
+    let pending = cx.send_request(req);
+    let _ = cx.spawn(async move {
+        let result = pending.block_task().await;
+        match &result {
+            Ok(_) => debug!(
+                session = %session,
+                tool_call = %tool_call,
+                "session/request_permission responded ok"
+            ),
+            Err(e) => debug!(
+                session = %session,
+                tool_call = %tool_call,
+                error = %e.message,
+                "session/request_permission responded err"
             ),
         }
         let _ = reply.send(result);

@@ -136,6 +136,7 @@ interface tools {
     }
 
     record request-permission-request {
+        session-id: string,
         tool-call: tool-call-snapshot,
         options: list<permission-option>,
     }

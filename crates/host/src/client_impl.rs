@@ -227,8 +227,21 @@ impl client::HostWithStore for HasSelf<HostState> {
         let route = routing(accessor);
         async move {
             match route {
-                Routing::Outbound(_) => {
-                    Err(translate::method_not_found("request-permission not wired"))
+                Routing::Outbound(outbound) => {
+                    let Some(schema_req) =
+                        translate::request_permission_request_wit_to_schema(req)
+                    else {
+                        return Err(translate::internal_error(
+                            "request-permission: could not translate request",
+                        ));
+                    };
+                    let resp = send_and_await(
+                        &outbound,
+                        |tx| OutboundEvent::RequestPermission(schema_req, tx),
+                        "session/request_permission",
+                    )
+                    .await?;
+                    Ok(translate::request_permission_response_schema_to_wit(resp))
                 }
                 Routing::Upstream { idx, bindings } => {
                     let res = spawn_upstream(accessor, idx, "request-permission", |reply| {

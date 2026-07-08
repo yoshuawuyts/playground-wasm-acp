@@ -183,10 +183,16 @@ gh auth token | cargo run -p host -- secret set local:copilot_provider github_to
 cargo run -p host -- --provider target/wasm32-wasip2/release/copilot_provider.wasm
 ```
 
+Unlike the Ollama provider, the Copilot provider is **agentic**: it advertises
+`read_text_file` and `write_text_file` tools to the model, surfaces each call to
+the editor as a tool-call card, and asks the editor for permission before
+touching the filesystem (with per-session *allow always* / *reject always*
+memory).
+
 See **[`crates/copilot-provider/README.md`](crates/copilot-provider/README.md)**
 for GitHub token authentication (token types and how the guest falls back from
-the editor token-exchange to direct-token auth), configuration, and a full
-smoke test.
+the editor token-exchange to direct-token auth), the file-editing tools,
+configuration, and a full smoke test.
 
 ## Crates
 
@@ -214,9 +220,10 @@ The MVP intentionally cuts a few corners:
   the host's `await` on the wasm prompt and returns `stopReason: cancelled`,
   but the wasm guest itself doesn't get an interrupt — any in-flight HTTP
   request to Ollama still completes (its result is just discarded).
-- **No terminal/permission methods.** The host returns `method-not-found`
-  for `terminal/*` and `session/request_permission`. `fs/read_text_file`
-  and `fs/write_text_file` are wired through to the editor.
+- **No terminal methods.** The host returns `method-not-found` for
+  `terminal/*`. `fs/read_text_file`, `fs/write_text_file`, and
+  `session/request_permission` are wired through to the editor — the
+  copilot-provider uses all three to offer permissioned file editing.
 - **No MCP servers.** Servers passed in `session/new` are accepted but the
   guest doesn't connect to them.
 

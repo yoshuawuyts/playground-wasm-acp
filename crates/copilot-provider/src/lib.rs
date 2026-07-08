@@ -9,7 +9,7 @@ mod copilot;
 mod storage;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use acp_wasm_sys::provider::exports::yosh::acp::agent::{
@@ -28,6 +28,14 @@ use acp_wasm_sys::provider::yosh::acp::sessions::{
     ResumeSessionResponse, SessionConfigId, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelectOption, SessionConfigValueId, SessionModeId, SessionModelId,
 };
+
+use acp_wasm_sys::provider::yosh::acp::client;
+use acp_wasm_sys::provider::yosh::acp::filesystem::{ReadTextFileRequest, WriteTextFileRequest};
+use acp_wasm_sys::provider::yosh::acp::tools::{
+    Diff, PermissionOption, PermissionOptionKind, PermissionOutcome, RequestPermissionRequest,
+    ToolCallContent, ToolCallLocation, ToolCallSnapshot, ToolCallStatus, ToolKind,
+};
+use serde_json::{json, Value};
 
 use crate::copilot::Message;
 use crate::storage::SessionState;
@@ -253,6 +261,18 @@ thread_local! {
 
 thread_local! {
     static SESSIONS: RefCell<HashMap<String, SessionState>> = RefCell::new(HashMap::new());
+}
+
+/// Per-session "always allow / always reject" memory for tool permissions. Not
+/// persisted — it resets when the host process restarts.
+#[derive(Default)]
+struct PermState {
+    always_allow: HashSet<String>,
+    always_reject: HashSet<String>,
+}
+
+thread_local! {
+    static PERMS: RefCell<HashMap<String, PermState>> = RefCell::new(HashMap::new());
 }
 
 /// One-time system message inserted at the start of every fresh session.
@@ -656,7 +676,7 @@ async fn prompt_impl(
     // active model and thinking level) to send to Copilot. New sessions can
     // land here without going through `new-session` (e.g. tests); fall back to
     // defaults. A one-time `system` message is prepended on the first prompt.
-    let (history, model, reasoning) = SESSIONS.with(|s| {
+    let (mut working, model, reasoning, cwd) = SESSIONS.with(|s| {
         let mut sessions = s.borrow_mut();
         let entry = sessions.entry(session_id.clone()).or_insert_with(|| SessionState {
             history: Vec::new(),
@@ -674,7 +694,12 @@ async fn prompt_impl(
             entry.history.push(Message::system(prompt));
         }
         entry.history.push(Message::user(user_text.clone()));
-        (entry.history.clone(), entry.model.clone(), entry.reasoning.clone())
+        (
+            entry.history.clone(),
+            entry.model.clone(),
+            entry.reasoning.clone(),
+            entry.cwd.clone(),
+        )
     });
 
     // Apply the thinking level as the model's native `reasoning_effort`
@@ -691,25 +716,82 @@ async fn prompt_impl(
         supported.then(|| reasoning.clone())
     };
 
-    let session_id_chunk = session_id.clone();
-    let reply = copilot::chat(model, effort, history, |chunk| {
-        let sid = session_id_chunk.clone();
-        async move {
-            emit_update(
-                sid,
-                SessionUpdate::AgentMessageChunk(ContentBlock::Text(TextContent { text: chunk })),
-            )
-            .await;
-        }
-    })
-    .await
-    .map_err(|e| err(ErrorCode::InternalError, &format!("copilot: {e}")))?;
+    // Offer the model our file tools. The ACP host doesn't currently plumb the
+    // client's advertised fs capabilities through to the session instance
+    // (`initialize` runs on a throwaway instance), so we always advertise
+    // read/write and rely on the editor to accept or reject each call.
+    let tools = tool_defs();
 
-    // Append the assistant reply to history and persist.
+    // Agentic loop: stream a round; if the model asked for tools, surface each
+    // one to the client, get permission, run it through the client fs, feed the
+    // results back, and go again — until the model answers with no tool calls
+    // (or we hit the round cap).
+    const MAX_ROUNDS: usize = 8;
+    let mut stop_reason = StopReason::EndTurn;
+    for round in 0..MAX_ROUNDS {
+        let sid = session_id.clone();
+        let outcome = copilot::chat_round(
+            &model,
+            effort.as_deref(),
+            tools.as_ref(),
+            &working,
+            move |chunk| {
+                let sid = sid.clone();
+                async move {
+                    emit_update(
+                        sid,
+                        SessionUpdate::AgentMessageChunk(ContentBlock::Text(TextContent {
+                            text: chunk,
+                        })),
+                    )
+                    .await;
+                }
+            },
+        )
+        .await
+        .map_err(|e| err(ErrorCode::InternalError, &format!("copilot: {e}")))?;
+
+        if outcome.tool_calls.is_empty() {
+            working.push(Message::assistant(outcome.text));
+            // A `length` finish means the model was cut off by the token limit.
+            stop_reason = if outcome.finish_reason.as_deref() == Some("length") {
+                StopReason::MaxTokens
+            } else {
+                StopReason::EndTurn
+            };
+            break;
+        }
+
+        // Record the assistant's tool-call turn, then run each requested call.
+        working.push(Message::assistant_tool_calls(
+            outcome.text,
+            outcome.tool_calls.clone(),
+        ));
+        let mut cancelled = false;
+        for call in &outcome.tool_calls {
+            match execute_tool_call(&session_id, &cwd, call).await {
+                ToolExec::Result(text) => working.push(Message::tool_result(&call.id, text)),
+                ToolExec::Cancelled => {
+                    cancelled = true;
+                    break;
+                }
+            }
+        }
+        if cancelled {
+            stop_reason = StopReason::Cancelled;
+            break;
+        }
+        if round + 1 == MAX_ROUNDS {
+            stop_reason = StopReason::MaxTurnRequests;
+        }
+    }
+
+    // Persist the full working history — including tool-call and tool-result
+    // messages — so a resumed session keeps the model's tool context.
     let snapshot = SESSIONS.with(|s| {
         let mut sessions = s.borrow_mut();
         sessions.get_mut(&session_id).map(|entry| {
-            entry.history.push(Message::assistant(reply.clone()));
+            entry.history = working;
             entry.clone()
         })
     });
@@ -727,9 +809,374 @@ async fn prompt_impl(
         }
     }
 
-    Ok(PromptResponse {
-        stop_reason: StopReason::EndTurn,
-    })
+    Ok(PromptResponse { stop_reason })
+}
+
+// -----------------------------------------------------------------------------
+// Tool calling (read/write files), surfaced to the client with permission.
+// -----------------------------------------------------------------------------
+
+const TOOL_READ: &str = "read_text_file";
+const TOOL_WRITE: &str = "write_text_file";
+
+/// Build the OpenAI-compatible tool array advertised to the model: a
+/// `read_text_file` and a `write_text_file` function, both routed through the
+/// ACP client's filesystem. The editor authorizes and fulfils each call.
+fn tool_defs() -> Option<Value> {
+    Some(json!([
+        {
+            "type": "function",
+            "function": {
+                "name": TOOL_READ,
+                "description": "Read a UTF-8 text file from the user's workspace, \
+                    including any unsaved editor changes. Use this to inspect files \
+                    before answering questions about them.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Absolute path, or a path relative to the project directory." },
+                        "line": { "type": "integer", "description": "Optional 1-based line to start reading from." },
+                        "limit": { "type": "integer", "description": "Optional maximum number of lines to read." }
+                    },
+                    "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": TOOL_WRITE,
+                "description": "Create or overwrite a UTF-8 text file in the user's \
+                    workspace with the given contents.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Absolute path, or a path relative to the project directory." },
+                        "content": { "type": "string", "description": "The full new contents of the file." }
+                    },
+                    "required": ["path", "content"]
+                }
+            }
+        }
+    ]))
+}
+
+/// Resolve a possibly-relative path against the session cwd. ACP requires
+/// absolute paths; the model often produces relative ones.
+fn resolve_path(cwd: &str, path: &str) -> String {
+    if path.starts_with('/') || cwd.is_empty() {
+        path.to_string()
+    } else {
+        format!("{}/{}", cwd.trim_end_matches('/'), path)
+    }
+}
+
+/// A short, char-boundary-safe preview of a tool's textual output for the UI.
+fn preview(s: &str) -> String {
+    const MAX: usize = 2000;
+    if s.len() <= MAX {
+        return s.to_string();
+    }
+    let mut end = MAX;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n… ({} more bytes)", &s[..end], s.len() - end)
+}
+
+/// The user's decision on a tool-permission prompt.
+enum Decision {
+    Allow,
+    Reject,
+    Cancel,
+}
+
+/// Outcome of running a single tool call.
+enum ToolExec {
+    /// Feed this text back to the model as the `tool` result message.
+    Result(String),
+    /// The user cancelled the permission prompt; abort the whole turn.
+    Cancelled,
+}
+
+/// Tracks a tool call's display identity so we can emit consistent
+/// `tool_call` / `tool_call_update` session updates as it progresses.
+struct ToolUi {
+    session_id: String,
+    id: String,
+    title: String,
+    kind: ToolKind,
+    locations: Vec<ToolCallLocation>,
+    raw_input: String,
+}
+
+impl ToolUi {
+    fn snapshot(
+        &self,
+        status: ToolCallStatus,
+        content: Vec<ToolCallContent>,
+        raw_output: Option<String>,
+    ) -> ToolCallSnapshot {
+        ToolCallSnapshot {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            kind: self.kind,
+            status,
+            content,
+            locations: self.locations.clone(),
+            raw_input: Some(self.raw_input.clone()),
+            raw_output,
+        }
+    }
+
+    /// Announce the call to the client (status `pending`).
+    async fn announce(&self) {
+        emit_update(
+            self.session_id.clone(),
+            SessionUpdate::ToolCall(self.snapshot(ToolCallStatus::Pending, Vec::new(), None)),
+        )
+        .await;
+    }
+
+    /// Emit a `tool_call_update` carrying the call's new state.
+    async fn update(
+        &self,
+        status: ToolCallStatus,
+        content: Vec<ToolCallContent>,
+        raw_output: Option<String>,
+    ) {
+        emit_update(
+            self.session_id.clone(),
+            SessionUpdate::ToolCallUpdate(self.snapshot(status, content, raw_output)),
+        )
+        .await;
+    }
+}
+
+fn remember_permission(session_id: &str, tool_name: &str, allow: bool) {
+    PERMS.with(|p| {
+        let mut map = p.borrow_mut();
+        let st = map.entry(session_id.to_string()).or_default();
+        if allow {
+            st.always_allow.insert(tool_name.to_string());
+        } else {
+            st.always_reject.insert(tool_name.to_string());
+        }
+    });
+}
+
+/// Ask the client to authorize a tool call, honoring per-session
+/// always-allow / always-reject memory so we don't re-prompt.
+async fn request_tool_permission(session_id: &str, tool_name: &str, ui: &ToolUi) -> Decision {
+    let remembered = PERMS.with(|p| {
+        p.borrow().get(session_id).and_then(|st| {
+            if st.always_reject.contains(tool_name) {
+                Some(false)
+            } else if st.always_allow.contains(tool_name) {
+                Some(true)
+            } else {
+                None
+            }
+        })
+    });
+    match remembered {
+        Some(true) => return Decision::Allow,
+        Some(false) => return Decision::Reject,
+        None => {}
+    }
+
+    let req = RequestPermissionRequest {
+        session_id: session_id.to_string(),
+        tool_call: ui.snapshot(ToolCallStatus::Pending, Vec::new(), None),
+        options: vec![
+            PermissionOption {
+                id: "allow-once".to_string(),
+                name: "Allow".to_string(),
+                kind: PermissionOptionKind::AllowOnce,
+            },
+            PermissionOption {
+                id: "allow-always".to_string(),
+                name: "Allow for this session".to_string(),
+                kind: PermissionOptionKind::AllowAlways,
+            },
+            PermissionOption {
+                id: "reject-once".to_string(),
+                name: "Reject".to_string(),
+                kind: PermissionOptionKind::RejectOnce,
+            },
+            PermissionOption {
+                id: "reject-always".to_string(),
+                name: "Reject for this session".to_string(),
+                kind: PermissionOptionKind::RejectAlways,
+            },
+        ],
+    };
+
+    match client::request_permission(req).await {
+        Ok(resp) => match resp.outcome {
+            PermissionOutcome::Selected(id) => match id.as_str() {
+                "allow-once" => Decision::Allow,
+                "allow-always" => {
+                    remember_permission(session_id, tool_name, true);
+                    Decision::Allow
+                }
+                "reject-always" => {
+                    remember_permission(session_id, tool_name, false);
+                    Decision::Reject
+                }
+                _ => Decision::Reject,
+            },
+            PermissionOutcome::Cancelled => Decision::Cancel,
+        },
+        // No permission UI (or the client errored): fail safe by rejecting.
+        Err(_) => Decision::Reject,
+    }
+}
+
+/// Surface, authorize, and run one tool call, returning the text to feed back
+/// to the model (or [`ToolExec::Cancelled`] to abort the turn).
+async fn execute_tool_call(session_id: &str, cwd: &str, call: &copilot::ToolCall) -> ToolExec {
+    let name = call.function.name.as_str();
+    let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+    let path = resolve_path(cwd, args.get("path").and_then(Value::as_str).unwrap_or(""));
+
+    let (title, kind) = match name {
+        TOOL_READ => (format!("Read {path}"), ToolKind::Read),
+        TOOL_WRITE => (format!("Write {path}"), ToolKind::Edit),
+        other => (format!("Run {other}"), ToolKind::Other),
+    };
+    let line = args.get("line").and_then(Value::as_u64).map(|n| n as u32);
+    let locations = if path.is_empty() {
+        Vec::new()
+    } else {
+        vec![ToolCallLocation {
+            path: path.clone(),
+            line,
+        }]
+    };
+    let ui = ToolUi {
+        session_id: session_id.to_string(),
+        id: call.id.clone(),
+        title,
+        kind,
+        locations,
+        raw_input: call.function.arguments.clone(),
+    };
+
+    ui.announce().await;
+
+    match request_tool_permission(session_id, name, &ui).await {
+        Decision::Allow => {}
+        Decision::Reject => {
+            ui.update(
+                ToolCallStatus::Failed,
+                Vec::new(),
+                Some("permission denied".to_string()),
+            )
+            .await;
+            return ToolExec::Result("The user denied permission to run this tool.".to_string());
+        }
+        Decision::Cancel => {
+            ui.update(
+                ToolCallStatus::Failed,
+                Vec::new(),
+                Some("cancelled".to_string()),
+            )
+            .await;
+            return ToolExec::Cancelled;
+        }
+    }
+
+    ui.update(ToolCallStatus::InProgress, Vec::new(), None).await;
+
+    match name {
+        TOOL_READ => {
+            if path.is_empty() {
+                ui.update(
+                    ToolCallStatus::Failed,
+                    Vec::new(),
+                    Some("missing 'path'".to_string()),
+                )
+                .await;
+                return ToolExec::Result("Error: the 'path' argument is required.".to_string());
+            }
+            let req = ReadTextFileRequest {
+                session_id: session_id.to_string(),
+                path: path.clone(),
+                line,
+                limit: args.get("limit").and_then(Value::as_u64).map(|n| n as u32),
+            };
+            match client::read_text_file(req).await {
+                Ok(resp) => {
+                    let block = ContentBlock::Text(TextContent {
+                        text: preview(&resp.content),
+                    });
+                    ui.update(
+                        ToolCallStatus::Completed,
+                        vec![ToolCallContent::Content(block)],
+                        None,
+                    )
+                    .await;
+                    ToolExec::Result(resp.content)
+                }
+                Err(e) => {
+                    let msg = format!("Error reading {path}: {}", e.message);
+                    ui.update(ToolCallStatus::Failed, Vec::new(), Some(msg.clone()))
+                        .await;
+                    ToolExec::Result(msg)
+                }
+            }
+        }
+        TOOL_WRITE => {
+            if path.is_empty() {
+                ui.update(
+                    ToolCallStatus::Failed,
+                    Vec::new(),
+                    Some("missing 'path'".to_string()),
+                )
+                .await;
+                return ToolExec::Result("Error: the 'path' argument is required.".to_string());
+            }
+            let content = args
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let req = WriteTextFileRequest {
+                session_id: session_id.to_string(),
+                path: path.clone(),
+                content: content.clone(),
+            };
+            match client::write_text_file(req).await {
+                Ok(()) => {
+                    let diff = Diff {
+                        path: path.clone(),
+                        old_text: None,
+                        new_text: content.clone(),
+                    };
+                    ui.update(
+                        ToolCallStatus::Completed,
+                        vec![ToolCallContent::Diff(diff)],
+                        Some(format!("wrote {} bytes", content.len())),
+                    )
+                    .await;
+                    ToolExec::Result(format!("Wrote {} bytes to {path}.", content.len()))
+                }
+                Err(e) => {
+                    let msg = format!("Error writing {path}: {}", e.message);
+                    ui.update(ToolCallStatus::Failed, Vec::new(), Some(msg.clone()))
+                        .await;
+                    ToolExec::Result(msg)
+                }
+            }
+        }
+        other => {
+            let msg = format!("Error: unknown tool '{other}'.");
+            ui.update(ToolCallStatus::Failed, Vec::new(), Some(msg.clone()))
+                .await;
+            ToolExec::Result(msg)
+        }
+    }
 }
 
 acp_wasm_sys::provider::export!(Agent with_types_in acp_wasm_sys::provider);

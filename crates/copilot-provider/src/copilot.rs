@@ -302,29 +302,74 @@ fn derive_base_url_from_proxy_ep(token: &str) -> Option<String> {
 pub struct Message {
     pub role: String,
     pub content: String,
+    /// Tool calls requested by an `assistant` turn. OpenAI-compatible: the
+    /// assistant may return an empty `content` alongside one or more calls.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    /// Set on a `tool` message: the id of the call this message answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
-        Self {
-            role: "system".to_string(),
-            content: content.into(),
-        }
+        Self::plain("system", content)
     }
 
     pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: "user".to_string(),
-            content: content.into(),
-        }
+        Self::plain("user", content)
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
+        Self::plain("assistant", content)
+    }
+
+    fn plain(role: &str, content: impl Into<String>) -> Self {
+        Self {
+            role: role.to_string(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    /// An `assistant` turn that requested tool calls (content may be empty).
+    pub fn assistant_tool_calls(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
         Self {
             role: "assistant".to_string(),
             content: content.into(),
+            tool_calls,
+            tool_call_id: None,
         }
     }
+
+    /// A `tool` turn carrying the result of a single tool call back to the model.
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call_id.into()),
+        }
+    }
+}
+
+/// A tool call requested by the model (OpenAI `tool_calls` shape). Serialized
+/// back verbatim on the follow-up `assistant` message, and its `id` links the
+/// matching `tool` result message.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: FunctionCall,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FunctionCall {
+    pub name: String,
+    /// JSON-encoded arguments object (a string, per the OpenAI wire format).
+    pub arguments: String,
 }
 
 // -----------------------------------------------------------------------------
@@ -341,6 +386,13 @@ struct ChatRequest<'a> {
     /// sending it to a non-reasoning model (e.g. gpt-4o) is a 400.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'a str>,
+    /// OpenAI-compatible tool (function) definitions. Present only when the
+    /// client advertised a matching fs capability; absent means the model has
+    /// no tools to call and behaves as a plain chat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -353,22 +405,46 @@ struct StreamChunk {
 struct StreamChoice {
     #[serde(default)]
     delta: Delta,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 struct Delta {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<ToolCallDelta>>,
+}
+
+/// A streamed fragment of a tool call. `id`/`function.name` arrive on the
+/// first fragment for a given `index`; `function.arguments` streams in pieces
+/// that must be concatenated in order.
+#[derive(Deserialize)]
+struct ToolCallDelta {
+    #[serde(default)]
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<FunctionDelta>,
+}
+
+#[derive(Deserialize)]
+struct FunctionDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 /// The meaning of a single SSE line from the chat endpoint.
-#[derive(Debug, PartialEq)]
 enum SseEvent {
-    /// A text fragment to append to (and stream out from) the reply.
-    Content(String),
+    /// A parsed chat chunk (may carry content and/or tool-call deltas).
+    Chunk(StreamChunk),
     /// The `data: [DONE]` sentinel that terminates the stream.
     Done,
-    /// A line to skip (blank line, comment, non-content delta, unparseable).
+    /// A line to skip (blank line, comment, unparseable).
     Ignore,
 }
 
@@ -381,46 +457,103 @@ fn parse_sse_line(line: &str) -> SseEvent {
         return SseEvent::Ignore;
     };
     let data = data.trim();
+    if data.is_empty() {
+        return SseEvent::Ignore;
+    }
     if data == "[DONE]" {
         return SseEvent::Done;
     }
     match serde_json::from_str::<StreamChunk>(data) {
-        Ok(chunk) => {
-            let text: String = chunk
-                .choices
-                .into_iter()
-                .filter_map(|c| c.delta.content)
-                .collect();
-            if text.is_empty() {
-                SseEvent::Ignore
-            } else {
-                SseEvent::Content(text)
-            }
-        }
+        Ok(chunk) => SseEvent::Chunk(chunk),
         Err(_) => SseEvent::Ignore,
     }
 }
 
-/// Send a streaming chat completion. `on_chunk` is invoked once per non-empty
-/// content fragment as it arrives; the full assembled reply is returned.
+/// Accumulates one tool call across streamed deltas (keyed by `index`).
+#[derive(Default)]
+struct ToolCallAccum {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+/// Fold one chat chunk into the running tool-call accumulator and
+/// finish-reason, returning any text fragment it carried.
+fn fold_chunk(
+    chunk: StreamChunk,
+    accum: &mut Vec<ToolCallAccum>,
+    finish_reason: &mut Option<String>,
+) -> String {
+    let mut text = String::new();
+    for choice in chunk.choices {
+        if let Some(fr) = choice.finish_reason {
+            *finish_reason = Some(fr);
+        }
+        if let Some(c) = choice.delta.content {
+            text.push_str(&c);
+        }
+        let Some(calls) = choice.delta.tool_calls else {
+            continue;
+        };
+        for d in calls {
+            if accum.len() <= d.index {
+                accum.resize_with(d.index + 1, ToolCallAccum::default);
+            }
+            let slot = &mut accum[d.index];
+            if let Some(id) = d.id {
+                if !id.is_empty() {
+                    slot.id = id;
+                }
+            }
+            if let Some(f) = d.function {
+                if let Some(name) = f.name {
+                    if !name.is_empty() {
+                        slot.name = name;
+                    }
+                }
+                if let Some(args) = f.arguments {
+                    slot.arguments.push_str(&args);
+                }
+            }
+        }
+    }
+    text
+}
+
+/// The result of one streamed chat round.
+pub struct RoundOutcome {
+    /// Assembled assistant text (may be empty when the model only calls tools).
+    pub text: String,
+    /// Tool calls the model requested this round (empty when it just replied).
+    pub tool_calls: Vec<ToolCall>,
+    /// The round's `finish_reason`, if the stream reported one
+    /// (`"stop"`, `"tool_calls"`, `"length"`, …).
+    pub finish_reason: Option<String>,
+}
+
+/// Run one streamed chat round. `on_chunk` is invoked once per non-empty text
+/// fragment as it arrives; tool-call deltas are accumulated and returned in the
+/// [`RoundOutcome`]. `tools`, when set, is the OpenAI-compatible tool array
+/// (sent with `tool_choice: "auto"`).
 ///
 /// A `401`/`403` triggers a single forced token refresh and retry, to survive
-/// a Copilot token that expired mid-session.
-pub async fn chat<F, Fut>(
-    model: String,
-    reasoning_effort: Option<String>,
-    history: Vec<Message>,
+/// a Copilot token that expired mid-session. The retry is safe because an auth
+/// failure is detected on the HTTP status line, before any chunk is emitted.
+pub async fn chat_round<F, Fut>(
+    model: &str,
+    reasoning_effort: Option<&str>,
+    tools: Option<&serde_json::Value>,
+    history: &[Message],
     mut on_chunk: F,
-) -> Result<String, String>
+) -> Result<RoundOutcome, String>
 where
     F: FnMut(String) -> Fut,
     Fut: core::future::Future<Output = ()>,
 {
-    let effort = reasoning_effort.as_deref();
-    match chat_once(&model, effort, &history, &mut on_chunk).await {
+    match chat_round_once(model, reasoning_effort, tools, history, &mut on_chunk).await {
         Err(ChatError::Auth(_)) => {
             invalidate_token();
-            chat_once(&model, effort, &history, &mut on_chunk)
+            chat_round_once(model, reasoning_effort, tools, history, &mut on_chunk)
                 .await
                 .map_err(|e| e.into_string())
         }
@@ -443,12 +576,13 @@ impl ChatError {
     }
 }
 
-async fn chat_once<F, Fut>(
+async fn chat_round_once<F, Fut>(
     model: &str,
     reasoning_effort: Option<&str>,
+    tools: Option<&serde_json::Value>,
     history: &[Message],
     on_chunk: &mut F,
-) -> Result<String, ChatError>
+) -> Result<RoundOutcome, ChatError>
 where
     F: FnMut(String) -> Fut,
     Fut: core::future::Future<Output = ()>,
@@ -460,6 +594,8 @@ where
         messages: history,
         stream: true,
         reasoning_effort,
+        tools,
+        tool_choice: tools.map(|_| "auto"),
     })
     .map_err(|e| ChatError::Other(format!("encode chat request: {e}")))?;
 
@@ -500,6 +636,8 @@ where
     let mut stream = resp.into_body().into_boxed_body().into_data_stream();
     let mut buf: Vec<u8> = Vec::new();
     let mut content = String::new();
+    let mut accum: Vec<ToolCallAccum> = Vec::new();
+    let mut finish_reason: Option<String> = None;
     'outer: while let Some(frame) = stream.next().await {
         let bytes = frame.map_err(|e| ChatError::Other(format!("read chat body: {e}")))?;
         buf.extend_from_slice(&bytes);
@@ -509,9 +647,12 @@ where
                 continue;
             };
             match parse_sse_line(line) {
-                SseEvent::Content(text) => {
-                    on_chunk(text.clone()).await;
-                    content.push_str(&text);
+                SseEvent::Chunk(chunk) => {
+                    let text = fold_chunk(chunk, &mut accum, &mut finish_reason);
+                    if !text.is_empty() {
+                        on_chunk(text.clone()).await;
+                        content.push_str(&text);
+                    }
                 }
                 SseEvent::Done => break 'outer,
                 SseEvent::Ignore => {}
@@ -520,13 +661,33 @@ where
     }
     // Handle a trailing line with no terminating newline (rare).
     if let Ok(line) = std::str::from_utf8(&buf) {
-        if let SseEvent::Content(text) = parse_sse_line(line) {
-            on_chunk(text.clone()).await;
-            content.push_str(&text);
+        if let SseEvent::Chunk(chunk) = parse_sse_line(line) {
+            let text = fold_chunk(chunk, &mut accum, &mut finish_reason);
+            if !text.is_empty() {
+                on_chunk(text.clone()).await;
+                content.push_str(&text);
+            }
         }
     }
 
-    Ok(content)
+    let tool_calls = accum
+        .into_iter()
+        .filter(|a| !a.id.is_empty() || !a.name.is_empty())
+        .map(|a| ToolCall {
+            id: a.id,
+            kind: "function".to_string(),
+            function: FunctionCall {
+                name: a.name,
+                arguments: a.arguments,
+            },
+        })
+        .collect();
+
+    Ok(RoundOutcome {
+        text: content,
+        tool_calls,
+        finish_reason,
+    })
 }
 
 // -----------------------------------------------------------------------------
