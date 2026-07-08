@@ -48,7 +48,7 @@ agent-client-protocol = { version = "0.11.1", features = [
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-component-package-manager = { path = "../wasm/crates/component-package-manager", features = ["http-sync"] }
+wasm-package-manager = { version = "0.3.0", features = ["http-sync"] }
 keyring-core = "1"
 
 # Xtask
