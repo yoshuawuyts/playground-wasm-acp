@@ -20,7 +20,9 @@ use super::gate::NotificationGate;
 use super::require_session;
 use crate::install;
 use crate::translate;
-use crate::wasm::{PromptOutcome, SessionFactory, SessionRegistry, SetModeOutcome};
+use crate::wasm::{
+    PromptOutcome, SessionFactory, SessionRegistry, SetConfigOptionOutcome, SetModeOutcome,
+};
 
 pub(super) async fn handle_initialize(
     factory: &SessionFactory,
@@ -267,7 +269,43 @@ pub(super) fn handle_select_model(
     Ok(())
 }
 
-/// Spawn: see comment on `handle_set_session_mode`. Prompt is the worst
+/// `session/set_config_option` — the unified selector mechanism (model /
+/// mode / thought-level). Mirrors `handle_set_session_mode` but dispatches
+/// to the session actor's `set_config_option` path and responds with the
+/// full updated option set the wasm chain returns.
+pub(super) fn handle_set_session_config_option(
+    registry: &SessionRegistry,
+    req: schema::SetSessionConfigOptionRequest,
+    responder: Responder<schema::SetSessionConfigOptionResponse>,
+    cx: ConnectionTo<Client>,
+) -> Result<(), AcpError> {
+    let session_key = req.session_id.0.to_string();
+    debug!(session = %session_key, "session/set_config_option");
+
+    let handle = require_session(registry, &session_key)?;
+    let config_id = req.config_id.0.to_string();
+    let value = req.value.0.to_string();
+
+    cx.spawn(async move {
+        let outcome = handle.set_config_option(config_id, value).await;
+        match outcome {
+            SetConfigOptionOutcome::Done(options) => {
+                let resp = match translate::set_config_option_response(options) {
+                    Ok(r) => r,
+                    Err(e) => return responder.respond_with_error(e),
+                };
+                responder.respond(resp)
+            }
+            SetConfigOptionOutcome::Wit(e) => {
+                responder.respond_with_error(translate::wit_error_to_acp(e))
+            }
+            SetConfigOptionOutcome::Trap(e) => {
+                responder.respond_with_error(translate::trap_to_acp("set-config-option", e))
+            }
+        }
+    })?;
+    Ok(())
+}
 /// offender — a single turn can drive many `fs/*` round-trips through the
 /// editor, all of which need the incoming actor free to dequeue replies.
 pub(super) fn handle_prompt(

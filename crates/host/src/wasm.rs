@@ -345,6 +345,12 @@ pub enum SetModeOutcome {
     Trap(wasmtime::Error),
 }
 
+pub enum SetConfigOptionOutcome {
+    Done(Vec<crate::yosh::acp::sessions::SessionConfigOption>),
+    Wit(Error),
+    Trap(wasmtime::Error),
+}
+
 /// One ACP session: a shared store hosting every chain stage, plus the
 /// head index and a cancel watch. Cheap to clone (it's an `Arc`).
 #[derive(Clone)]
@@ -594,7 +600,50 @@ impl Session {
         }
     }
 
-    /// Race the chain-head `prompt` call against the cancel watch.
+    pub async fn set_config_option(
+        &self,
+        config_id: crate::yosh::acp::sessions::SessionConfigId,
+        value: crate::yosh::acp::sessions::SessionConfigValueId,
+    ) -> SetConfigOptionOutcome {
+        let head_idx = self.inner.head_idx;
+        let head_session = match *self.inner.head_session.lock().unwrap() {
+            Some(any) => any,
+            None => {
+                return SetConfigOptionOutcome::Trap(wasmtime::Error::msg(
+                    "set-config-option called before new-session",
+                ));
+            }
+        };
+        let res = self
+            .run_head(|a| {
+                Box::pin(async move {
+                    let bindings = a
+                        .with(|mut x| x.get().stages[head_idx].bindings.clone())
+                        .expect("head bindings filled");
+                    match &*bindings {
+                        Bindings::Provider(b) => {
+                            b.yosh_acp_agent()
+                                .session()
+                                .call_set_config_option(a, head_session, config_id, value)
+                                .await
+                        }
+                        Bindings::Layer(b) => {
+                            b.yosh_acp_agent()
+                                .session()
+                                .call_set_config_option(a, head_session, config_id, value)
+                                .await
+                        }
+                    }
+                })
+            })
+            .await;
+        match res {
+            Err(e) => SetConfigOptionOutcome::Trap(e),
+            Ok(Err(e)) => SetConfigOptionOutcome::Trap(e),
+            Ok(Ok(Err(e))) => SetConfigOptionOutcome::Wit(e),
+            Ok(Ok(Ok(options))) => SetConfigOptionOutcome::Done(options),
+        }
+    }
     /// Dropping the prompt future on cancel releases the store lock and
     /// wasmtime cancels any in-flight component tasks.
     ///
@@ -1384,6 +1433,49 @@ impl layer_agent::HostSessionWithStore for HasSelf<HostState> {
             })
             .await;
             flatten_downstream("session.select-model", res)
+        }
+    }
+
+    fn set_config_option<T: Send>(
+        accessor: &wasmtime::component::Accessor<T, Self>,
+        self_: wasmtime::component::Resource<layer_agent::Session>,
+        config_id: crate::yosh::acp::sessions::SessionConfigId,
+        value: crate::yosh::acp::sessions::SessionConfigValueId,
+    ) -> impl ::core::future::Future<
+        Output = Result<Vec<crate::yosh::acp::sessions::SessionConfigOption>, Error>,
+    > + Send {
+        let downstream = accessor.with(|mut a| {
+            let state = a.get();
+            let stage = state.current_stage();
+            let idx = stage.downstream_idx?;
+            let bindings = state.stages[idx].bindings.clone()?;
+            let any = state.downstream_sessions.get(&self_.rep()).copied()?;
+            Some((idx, bindings, any))
+        });
+        async move {
+            let Some((idx, bindings, any)) = downstream else {
+                return Err(translate::internal_error(
+                    "layer called `session.set-config-option` but no downstream session is mapped",
+                ));
+            };
+            let res = downstream_call(accessor, idx, || async {
+                match &*bindings {
+                    Bindings::Provider(b) => {
+                        b.yosh_acp_agent()
+                            .session()
+                            .call_set_config_option(accessor, any, config_id, value)
+                            .await
+                    }
+                    Bindings::Layer(b) => {
+                        b.yosh_acp_agent()
+                            .session()
+                            .call_set_config_option(accessor, any, config_id, value)
+                            .await
+                    }
+                }
+            })
+            .await;
+            flatten_downstream("session.set-config-option", res)
         }
     }
 }

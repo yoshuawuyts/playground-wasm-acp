@@ -24,8 +24,8 @@ use crate::yosh::acp::prompts::{PromptResponse, SessionUpdate, StopReason};
 use crate::yosh::acp::sessions::{
     ComponentSource, EnvVar, HttpHeader, LoadSessionRequest, LoadSessionResponse, McpServer,
     McpServerHttp, McpServerSse, McpServerStdio, NewSessionRequest, NewSessionResponse,
-    SessionId, SessionMode, SessionModeId, SessionModeState, SessionModel,
-    SessionModelState,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption, SessionId,
+    SessionMode, SessionModeId, SessionModeState, SessionModel, SessionModelState,
 };
 use crate::yosh::acp::tools::{
     ToolCallContent, ToolCallSnapshot, ToolCallStatus, ToolKind,
@@ -195,8 +195,12 @@ pub fn new_session_response_wit_to_schema(
     // schema::NewSessionResponse is `non_exhaustive`. Roundtrip via JSON to
     // construct it without depending on the (unstable) field set.
     let mut json = serde_json::json!({ "sessionId": resp.session_id });
-    let modes = ensure_host_default_mode(resp.modes);
-    if let Some(modes) = modes {
+    // `config_options` (the unified selector mechanism) is XOR with the legacy
+    // `modes` field client-side: when present it fully replaces modes, so skip
+    // the host-injected default mode to avoid advertising a phantom selector.
+    if let Some(config_options) = resp.config_options {
+        json["configOptions"] = session_config_options_to_json(config_options);
+    } else if let Some(modes) = ensure_host_default_mode(resp.modes) {
         json["modes"] = session_mode_state_to_json(modes, component_id);
     }
     if let Some(models) = resp.models {
@@ -225,8 +229,9 @@ pub fn load_session_response_wit_to_schema(
     component_id: &str,
 ) -> Result<schema::LoadSessionResponse, AcpError> {
     let mut json = serde_json::json!({});
-    let modes = ensure_host_default_mode(resp.modes);
-    if let Some(modes) = modes {
+    if let Some(config_options) = resp.config_options {
+        json["configOptions"] = session_config_options_to_json(config_options);
+    } else if let Some(modes) = ensure_host_default_mode(resp.modes) {
         json["modes"] = session_mode_state_to_json(modes, component_id);
     }
     if let Some(models) = resp.models {
@@ -381,6 +386,92 @@ fn session_mode_to_json(mode: SessionMode, _component_id: &str) -> serde_json::V
 /// Suppress the unused-import lint for `SessionModeId` — it's part of the
 /// public WIT surface but not directly referenced in this module.
 const _: fn(SessionModeId) = |_| {};
+
+// -----------------------------------------------------------------------------
+// Session config options (the unified selector mechanism: model / mode /
+// thought-level, rendered client-side from a single `configOptions` list)
+// -----------------------------------------------------------------------------
+
+/// Build the `{ configOptions: [...] }` response to `session/set_config_option`.
+pub fn set_config_option_response(
+    options: Vec<SessionConfigOption>,
+) -> Result<schema::SetSessionConfigOptionResponse, AcpError> {
+    let json = serde_json::json!({ "configOptions": session_config_options_to_json(options) });
+    synth("set-config-option response", json)
+}
+
+fn session_config_options_to_json(options: Vec<SessionConfigOption>) -> serde_json::Value {
+    serde_json::Value::Array(
+        options
+            .into_iter()
+            .map(session_config_option_to_json)
+            .collect(),
+    )
+}
+
+fn session_config_option_to_json(option: SessionConfigOption) -> serde_json::Value {
+    let SessionConfigOption {
+        id,
+        name,
+        description,
+        category,
+        current_value,
+        options,
+        // Upstream ACP's `SessionConfigOption` carries no provenance field;
+        // these are top-level category selectors, so provenance would just be
+        // display noise. Drop it, mirroring how the host handles its own modes.
+        provided_by: _,
+    } = option;
+    // The schema flattens `kind` via a `type` discriminator; we only emit
+    // `select` options. `SessionConfigSelectOptions` is untagged, so a flat
+    // array deserializes as the ungrouped variant.
+    let mut entry = serde_json::json!({
+        "id": id,
+        "name": name,
+        "type": "select",
+        "currentValue": current_value,
+        "options": options
+            .into_iter()
+            .map(session_config_select_option_to_json)
+            .collect::<Vec<_>>(),
+    });
+    if let Some(d) = description {
+        entry["description"] = serde_json::Value::String(d);
+    }
+    if let Some(cat) = category {
+        entry["category"] = session_config_category_to_json(cat);
+    }
+    entry
+}
+
+fn session_config_category_to_json(category: SessionConfigOptionCategory) -> serde_json::Value {
+    match category {
+        SessionConfigOptionCategory::Mode => serde_json::Value::String("mode".to_string()),
+        SessionConfigOptionCategory::Model => serde_json::Value::String("model".to_string()),
+        SessionConfigOptionCategory::ThoughtLevel => {
+            serde_json::Value::String("thought_level".to_string())
+        }
+        // Free-form categories serialize as their raw string (schema's
+        // `#[serde(untagged)] Other(String)`).
+        SessionConfigOptionCategory::Other(s) => serde_json::Value::String(s),
+    }
+}
+
+fn session_config_select_option_to_json(option: SessionConfigSelectOption) -> serde_json::Value {
+    let SessionConfigSelectOption {
+        value,
+        name,
+        description,
+    } = option;
+    let mut entry = serde_json::json!({
+        "value": value,
+        "name": name,
+    });
+    if let Some(d) = description {
+        entry["description"] = serde_json::Value::String(d);
+    }
+    entry
+}
 
 // -----------------------------------------------------------------------------
 // Prompt

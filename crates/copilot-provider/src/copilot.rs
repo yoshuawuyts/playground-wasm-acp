@@ -525,6 +525,7 @@ where
 // -----------------------------------------------------------------------------
 
 /// A chat-capable model advertised by the account.
+#[derive(Clone)]
 pub struct CopilotModel {
     pub id: String,
     pub name: String,

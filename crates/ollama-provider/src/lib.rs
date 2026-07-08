@@ -21,7 +21,8 @@ use acp_wasm_sys::provider::yosh::acp::prompts::{PromptResponse, SessionUpdate, 
 use acp_wasm_sys::provider::yosh::acp::sessions::{
     ComponentSource, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, NewSessionRequest, NewSessionResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SessionModeId, SessionModel, SessionModelId, SessionModelState,
+    ResumeSessionResponse, SessionConfigId, SessionConfigOption, SessionConfigValueId,
+    SessionModeId, SessionModel, SessionModelId, SessionModelState,
 };
 use acp_wasm_sys::provider::yosh::acp::tools::ToolKind;
 
@@ -89,6 +90,20 @@ impl GuestSession for ProviderSession {
                 }
             })
             .map_err(|e| err(ErrorCode::InvalidParams, &e))
+    }
+
+    async fn set_config_option(
+        &self,
+        _config_id: SessionConfigId,
+        _value: SessionConfigValueId,
+    ) -> Result<Vec<SessionConfigOption>, Error> {
+        // Provider advertises no config-option selectors; the slot is
+        // reserved for layers. Anything reaching the provider is an
+        // unknown config id.
+        Err(err(
+            ErrorCode::InvalidParams,
+            "ollama provider does not advertise any config options",
+        ))
     }
 }
 
@@ -370,6 +385,7 @@ impl Guest for Agent {
                 session_id: id,
                 modes: None,
                 models: Some(models),
+                config_options: None,
             },
         ))
     }
@@ -419,6 +435,7 @@ impl Guest for Agent {
             LoadSessionResponse {
                 modes: None,
                 models: Some(models),
+                config_options: None,
             },
         ))
     }
@@ -463,6 +480,7 @@ impl Guest for Agent {
             ResumeSessionResponse {
                 modes: None,
                 models: Some(models),
+                config_options: None,
             },
         ))
     }

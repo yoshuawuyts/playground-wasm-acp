@@ -33,7 +33,8 @@ use acp_wasm_sys::layer::yosh::acp::prompts::{
 use acp_wasm_sys::layer::yosh::acp::sessions::{
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
     NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse,
-    SessionId, SessionModeId, SessionModelId,
+    SessionConfigId, SessionConfigOption, SessionConfigValueId, SessionId, SessionModeId,
+    SessionModelId,
 };
 use acp_wasm_sys::layer::yosh::acp::tools::{RequestPermissionRequest, RequestPermissionResponse};
 use acp_wasm_sys::layer::yosh::acp::{agent, client};
@@ -80,6 +81,14 @@ impl GuestSession for LayerSession {
 
     async fn select_model(&self, model_id: SessionModelId) -> Result<(), Error> {
         self.downstream.select_model(model_id).await
+    }
+
+    async fn set_config_option(
+        &self,
+        config_id: SessionConfigId,
+        value: SessionConfigValueId,
+    ) -> Result<Vec<SessionConfigOption>, Error> {
+        self.downstream.set_config_option(config_id, value).await
     }
 }
 

@@ -25,7 +25,8 @@ use acp_wasm_sys::provider::yosh::acp::prompts::{PromptResponse, SessionUpdate, 
 use acp_wasm_sys::provider::yosh::acp::sessions::{
     ComponentSource, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, NewSessionRequest, NewSessionResponse, ResumeSessionRequest,
-    ResumeSessionResponse, SessionModeId, SessionModel, SessionModelId, SessionModelState,
+    ResumeSessionResponse, SessionConfigId, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionConfigValueId, SessionModeId, SessionModelId,
 };
 
 use crate::copilot::Message;
@@ -63,10 +64,13 @@ impl GuestSession for ProviderSession {
     }
 
     async fn set_mode(&self, _mode_id: SessionModeId) -> Result<(), Error> {
-        // Provider advertises no modes; the slot is reserved for layers.
+        // The provider advertises modes via `config-options` (the unified
+        // selector mechanism), not the legacy `modes` field, so clients
+        // drive mode changes through `set-config-option` instead. The
+        // legacy `set-mode` slot is reserved for layers.
         Err(err(
             ErrorCode::InvalidParams,
-            "copilot provider does not advertise any modes",
+            "copilot provider drives modes through set-config-option, not set-mode",
         ))
     }
 
@@ -84,6 +88,66 @@ impl GuestSession for ProviderSession {
                 }
             })
             .map_err(|e| err(ErrorCode::InvalidParams, &e))
+    }
+
+    async fn set_config_option(
+        &self,
+        config_id: SessionConfigId,
+        value: SessionConfigValueId,
+    ) -> Result<Vec<SessionConfigOption>, Error> {
+        let session_id = self.id.clone();
+
+        // Apply the change to the addressed option, validating the value
+        // against the option's advertised set.
+        let snapshot = SESSIONS
+            .with(|s| {
+                let mut sessions = s.borrow_mut();
+                let Some(session) = sessions.get_mut(&session_id) else {
+                    return Err(format!("unknown session id: {session_id}"));
+                };
+                match config_id.as_str() {
+                    CONFIG_MODEL => {
+                        // Accept any id the account currently advertises; if
+                        // the cache is empty (e.g. the models endpoint was
+                        // unreachable) accept optimistically.
+                        let known = MODELS_CACHE.with(|c| {
+                            let cache = c.borrow();
+                            cache.is_empty() || cache.iter().any(|m| m.id == value)
+                        });
+                        if !known {
+                            return Err(format!("unknown model: {value}"));
+                        }
+                        session.model = value.clone();
+                    }
+                    CONFIG_MODE => {
+                        if !MODES.iter().any(|(id, _, _)| *id == value) {
+                            return Err(format!("unknown mode: {value}"));
+                        }
+                        session.mode = value.clone();
+                    }
+                    CONFIG_REASONING => {
+                        if !REASONING_LEVELS.iter().any(|(id, _, _)| *id == value) {
+                            return Err(format!("unknown thinking level: {value}"));
+                        }
+                        session.reasoning = value.clone();
+                    }
+                    other => return Err(format!("unknown config option: {other}")),
+                }
+                Ok(session.clone())
+            })
+            .map_err(|e| err(ErrorCode::InvalidParams, &e))?;
+
+        // Persistence is best-effort; a failed save shouldn't fail the switch.
+        let _ = storage::save(&session_id, &snapshot);
+
+        // Rebuild the full option set from the cached model list — no network.
+        let models = cached_models(&snapshot.model);
+        Ok(build_config_options(
+            &models,
+            &snapshot.model,
+            &snapshot.mode,
+            &snapshot.reasoning,
+        ))
     }
 }
 
@@ -157,6 +221,50 @@ async fn emit_update(_session_id: String, update: SessionUpdate) {
 
 // Wasm components are single-threaded; thread-local + RefCell avoids any
 // synchronization cost while keeping interior mutability.
+/// Component id stamped on every config option this provider contributes.
+const COMPONENT_ID: &str = "local:copilot-provider";
+
+// Config option ids. Stable identifiers the editor echoes back on
+// `set-config-option`.
+const CONFIG_MODEL: &str = "model";
+const CONFIG_MODE: &str = "mode";
+const CONFIG_REASONING: &str = "reasoning-effort";
+
+/// Chat modes: `(id, display-name, description)`. Each selects a
+/// system-prompt posture applied on every turn. The first entry is the
+/// default for fresh sessions.
+const MODES: &[(&str, &str, &str)] = &[
+    ("chat", "Chat", "Concise, direct answers."),
+    (
+        "plan",
+        "Plan",
+        "Think step by step and outline a short plan before acting.",
+    ),
+];
+const DEFAULT_MODE: &str = "chat";
+
+/// Thinking levels: `(id, display-name, description)`. Scale how much
+/// deliberation the assistant is asked to apply on each turn.
+const REASONING_LEVELS: &[(&str, &str, &str)] = &[
+    ("none", "None", "No extra deliberation."),
+    ("low", "Low", "Answer quickly and directly."),
+    ("medium", "Medium", "Balanced reasoning."),
+    (
+        "high",
+        "High",
+        "Reason carefully and thoroughly before answering.",
+    ),
+];
+const DEFAULT_REASONING: &str = "medium";
+
+thread_local! {
+    /// The account's chat-capable model list, cached per host process the
+    /// first time a session lifecycle response is built. Lets
+    /// `set-config-option` rebuild the full option set without re-hitting
+    /// the models endpoint on every switch.
+    static MODELS_CACHE: RefCell<Vec<copilot::CopilotModel>> = const { RefCell::new(Vec::new()) };
+}
+
 thread_local! {
     static SESSIONS: RefCell<HashMap<String, SessionState>> = RefCell::new(HashMap::new());
 }
@@ -164,48 +272,106 @@ thread_local! {
 /// One-time system message inserted at the start of every fresh session.
 const SYSTEM_PROMPT: &str = "You are GitHub Copilot, an AI coding assistant connected to the user's editor. Answer concisely and helpfully. When you include code, use fenced code blocks tagged with the language.";
 
-/// Build the [`SessionModelState`] from a listing of chat-capable models.
-///
-/// The current model defaults to `preferred_model` when present in the list,
-/// otherwise [`copilot::default_model`], otherwise the first model listed.
-fn build_models_state_from_listed(
-    listed: Vec<copilot::CopilotModel>,
-    preferred_model: Option<&str>,
-) -> (SessionModelState, String) {
-    let default = copilot::default_model();
-
-    let pick = |want: &str| listed.iter().any(|m| m.id == want);
-    let current = preferred_model
-        .filter(|m| pick(m))
-        .map(|s| s.to_string())
-        .or_else(|| if pick(&default) { Some(default.clone()) } else { None })
-        .unwrap_or_else(|| listed[0].id.clone());
-
-    let available_models = listed
-        .into_iter()
-        .map(|m| SessionModel {
-            id: m.id,
-            name: m.name,
-            description: None,
-            provided_by: ComponentSource {
-                component_id: "local:copilot-provider".to_string(),
-            },
-        })
-        .collect();
-
-    (
-        SessionModelState {
-            current_model_id: current.clone(),
-            available_models,
-        },
-        current,
-    )
+fn component_source() -> ComponentSource {
+    ComponentSource {
+        component_id: COMPONENT_ID.to_string(),
+    }
 }
 
-/// List chat-capable Copilot models for the ACP model picker. Falls back to a
-/// single entry for [`copilot::default_model`] if the API is unreachable or
-/// returns nothing, so session creation still succeeds; the failure is logged.
-async fn build_models_state(preferred_model: Option<&str>) -> (SessionModelState, String) {
+/// Build the three config-option selectors (model, mode, thinking level)
+/// advertised on every session lifecycle response and returned from
+/// `set-config-option`.
+fn build_config_options(
+    models: &[copilot::CopilotModel],
+    current_model: &str,
+    current_mode: &str,
+    current_reasoning: &str,
+) -> Vec<SessionConfigOption> {
+    let model_options = models
+        .iter()
+        .map(|m| SessionConfigSelectOption {
+            value: m.id.clone(),
+            name: m.name.clone(),
+            description: None,
+        })
+        .collect();
+    let static_options = |entries: &[(&str, &str, &str)]| {
+        entries
+            .iter()
+            .map(|(id, name, desc)| SessionConfigSelectOption {
+                value: id.to_string(),
+                name: name.to_string(),
+                description: Some(desc.to_string()),
+            })
+            .collect()
+    };
+    vec![
+        SessionConfigOption {
+            id: CONFIG_MODEL.to_string(),
+            name: "Model".to_string(),
+            description: Some("Which Copilot model backs this session.".to_string()),
+            category: Some(SessionConfigOptionCategory::Model),
+            current_value: current_model.to_string(),
+            options: model_options,
+            provided_by: component_source(),
+        },
+        SessionConfigOption {
+            id: CONFIG_MODE.to_string(),
+            name: "Mode".to_string(),
+            description: Some("How the assistant approaches the conversation.".to_string()),
+            category: Some(SessionConfigOptionCategory::Mode),
+            current_value: current_mode.to_string(),
+            options: static_options(MODES),
+            provided_by: component_source(),
+        },
+        SessionConfigOption {
+            id: CONFIG_REASONING.to_string(),
+            name: "Thinking".to_string(),
+            description: Some("How much deliberation the assistant applies.".to_string()),
+            category: Some(SessionConfigOptionCategory::ThoughtLevel),
+            current_value: current_reasoning.to_string(),
+            options: static_options(REASONING_LEVELS),
+            provided_by: component_source(),
+        },
+    ]
+}
+
+/// Pick the current model: `preferred` if advertised, else
+/// [`copilot::default_model`] if advertised, else the first model listed.
+fn pick_current_model(models: &[copilot::CopilotModel], preferred: Option<&str>) -> String {
+    let default = copilot::default_model();
+    let has = |want: &str| models.iter().any(|m| m.id == want);
+    preferred
+        .filter(|m| has(m))
+        .map(|s| s.to_string())
+        .or_else(|| if has(&default) { Some(default.clone()) } else { None })
+        .unwrap_or_else(|| models[0].id.clone())
+}
+
+/// Read the cached model list, falling back to a single entry for
+/// `current_model` when the cache is empty (e.g. the models endpoint was
+/// unreachable). Keeps `set-config-option` offline.
+fn cached_models(current_model: &str) -> Vec<copilot::CopilotModel> {
+    let cached = MODELS_CACHE.with(|c| c.borrow().clone());
+    if cached.is_empty() {
+        vec![copilot::CopilotModel {
+            id: current_model.to_string(),
+            name: current_model.to_string(),
+        }]
+    } else {
+        cached
+    }
+}
+
+/// List chat-capable Copilot models (populating [`MODELS_CACHE`]) and build the
+/// session's config-option selectors plus the resolved current model. Falls
+/// back to a single entry for [`copilot::default_model`] if the API is
+/// unreachable or returns nothing, so session creation still succeeds.
+async fn build_session_config(
+    preferred_model: Option<&str>,
+    mode: &str,
+    reasoning: &str,
+) -> (Vec<SessionConfigOption>, String) {
     let default = copilot::default_model();
     let listed = match copilot::list_models().await {
         Ok(models) if !models.is_empty() => models,
@@ -224,7 +390,43 @@ async fn build_models_state(preferred_model: Option<&str>) -> (SessionModelState
             }]
         }
     };
-    build_models_state_from_listed(listed, preferred_model)
+    MODELS_CACHE.with(|c| *c.borrow_mut() = listed.clone());
+    let current = pick_current_model(&listed, preferred_model);
+    let options = build_config_options(&listed, &current, mode, reasoning);
+    (options, current)
+}
+
+/// Assemble an ephemeral system directive from the active mode and thinking
+/// level, or `None` when both are neutral. Prepended to the message list on
+/// each turn (never persisted) so switching mode/thinking takes effect on the
+/// very next prompt.
+fn turn_directive(mode: &str, reasoning: &str) -> Option<String> {
+    let mut out = String::new();
+    if mode == "plan" {
+        out.push_str(
+            "Operate in planning mode: before answering, think step by step and outline a short \
+             plan, then carry it out.",
+        );
+    }
+    let reasoning_line = match reasoning {
+        "low" => Some("Prefer brevity: answer quickly and directly with minimal deliberation."),
+        "high" => Some(
+            "Reason carefully and thoroughly, considering edge cases, before giving your final \
+             answer.",
+        ),
+        _ => None,
+    };
+    if let Some(line) = reasoning_line {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 fn next_session_id() -> String {
@@ -303,13 +505,16 @@ impl Guest for Agent {
 
     async fn new_session(req: NewSessionRequest) -> Result<(Session, NewSessionResponse), Error> {
         let id = next_session_id();
-        let (models, current_model) = build_models_state(None).await;
+        let (config_options, current_model) =
+            build_session_config(None, DEFAULT_MODE, DEFAULT_REASONING).await;
         SESSIONS.with(|s| {
             s.borrow_mut().insert(
                 id.clone(),
                 SessionState {
                     history: Vec::new(),
                     model: current_model,
+                    mode: DEFAULT_MODE.to_string(),
+                    reasoning: DEFAULT_REASONING.to_string(),
                     cwd: req.cwd,
                 },
             )
@@ -320,7 +525,8 @@ impl Guest for Agent {
             NewSessionResponse {
                 session_id: id,
                 modes: None,
-                models: Some(models),
+                models: None,
+                config_options: Some(config_options),
             },
         ))
     }
@@ -342,7 +548,18 @@ impl Guest for Agent {
             .map(|s| s.history.clone())
             .unwrap_or_default();
         let preferred = stored.as_ref().map(|s| s.model.clone());
-        let (models, current_model) = build_models_state(preferred.as_deref()).await;
+        let mode = stored
+            .as_ref()
+            .map(|s| s.mode.clone())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| DEFAULT_MODE.to_string());
+        let reasoning = stored
+            .as_ref()
+            .map(|s| s.reasoning.clone())
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| DEFAULT_REASONING.to_string());
+        let (config_options, current_model) =
+            build_session_config(preferred.as_deref(), &mode, &reasoning).await;
         for msg in &history {
             let block = ContentBlock::Text(TextContent {
                 text: msg.content.clone(),
@@ -360,6 +577,8 @@ impl Guest for Agent {
                 SessionState {
                     history,
                     model: current_model,
+                    mode,
+                    reasoning,
                     cwd: req.cwd,
                 },
             );
@@ -369,7 +588,8 @@ impl Guest for Agent {
             resource,
             LoadSessionResponse {
                 modes: None,
-                models: Some(models),
+                models: None,
+                config_options: Some(config_options),
             },
         ))
     }
@@ -394,13 +614,26 @@ impl Guest for Agent {
             .map(|s| s.history.clone())
             .unwrap_or_default();
         let preferred = stored.as_ref().map(|s| s.model.clone());
-        let (models, current_model) = build_models_state(preferred.as_deref()).await;
+        let mode = stored
+            .as_ref()
+            .map(|s| s.mode.clone())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| DEFAULT_MODE.to_string());
+        let reasoning = stored
+            .as_ref()
+            .map(|s| s.reasoning.clone())
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| DEFAULT_REASONING.to_string());
+        let (config_options, current_model) =
+            build_session_config(preferred.as_deref(), &mode, &reasoning).await;
         SESSIONS.with(|s| {
             s.borrow_mut().insert(
                 session_id.clone(),
                 SessionState {
                     history,
                     model: current_model,
+                    mode,
+                    reasoning,
                     cwd: req.cwd,
                 },
             );
@@ -410,7 +643,8 @@ impl Guest for Agent {
             resource,
             ResumeSessionResponse {
                 modes: None,
-                models: Some(models),
+                models: None,
+                config_options: Some(config_options),
             },
         ))
     }
@@ -429,14 +663,16 @@ async fn prompt_impl(
     }
 
     // Append the user turn to this session's history and grab a copy (plus the
-    // active model) to send to Copilot. New sessions can land here without
-    // going through `new-session` (e.g. tests); fall back to the default model.
-    // A one-time `system` message is prepended on the first prompt.
-    let (history, model) = SESSIONS.with(|s| {
+    // active model, mode, and thinking level) to send to Copilot. New sessions
+    // can land here without going through `new-session` (e.g. tests); fall back
+    // to defaults. A one-time `system` message is prepended on the first prompt.
+    let (history, model, mode, reasoning) = SESSIONS.with(|s| {
         let mut sessions = s.borrow_mut();
         let entry = sessions.entry(session_id.clone()).or_insert_with(|| SessionState {
             history: Vec::new(),
             model: copilot::default_model(),
+            mode: DEFAULT_MODE.to_string(),
+            reasoning: DEFAULT_REASONING.to_string(),
             cwd: String::new(),
         });
         if entry.history.is_empty() {
@@ -449,11 +685,34 @@ async fn prompt_impl(
             entry.history.push(Message::system(prompt));
         }
         entry.history.push(Message::user(user_text.clone()));
-        (entry.history.clone(), entry.model.clone())
+        let mode = if entry.mode.is_empty() {
+            DEFAULT_MODE.to_string()
+        } else {
+            entry.mode.clone()
+        };
+        let reasoning = if entry.reasoning.is_empty() {
+            DEFAULT_REASONING.to_string()
+        } else {
+            entry.reasoning.clone()
+        };
+        (entry.history.clone(), entry.model.clone(), mode, reasoning)
     });
 
+    // Prepend an ephemeral directive derived from the current mode + thinking
+    // level. It is sent to the API but never persisted, so mid-session switches
+    // take effect on the very next turn without rewriting stored history.
+    let messages = match turn_directive(&mode, &reasoning) {
+        Some(directive) => {
+            let mut msgs = Vec::with_capacity(history.len() + 1);
+            msgs.push(Message::system(directive));
+            msgs.extend(history);
+            msgs
+        }
+        None => history,
+    };
+
     let session_id_chunk = session_id.clone();
-    let reply = copilot::chat(model, history, |chunk| {
+    let reply = copilot::chat(model, messages, |chunk| {
         let sid = session_id_chunk.clone();
         async move {
             emit_update(

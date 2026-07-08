@@ -20,6 +20,7 @@ interface agent {
     use init.{initialize-request, initialize-response, authenticate-request};
     use sessions.{
         session-mode-id, session-model-id,
+        session-config-id, session-config-value-id, session-config-option,
         new-session-request, new-session-response,
         load-session-request, load-session-response,
         list-sessions-request, list-sessions-response,
@@ -57,6 +58,15 @@ interface agent {
         /// The `model-id` MUST be one of the models returned in the
         /// session's lifecycle response.
         select-model: async func(model-id: session-model-id) -> result<_, error>;
+
+        /// Set a configuration option (model / mode / thought-level) for
+        /// this session. The `config-id` and `value` MUST come from the
+        /// option set advertised in the session's lifecycle response.
+        /// Returns the full updated option set (mirroring the ACP
+        /// `session/set_config_option` response).
+        ///
+        /// See: <https://agentclientprotocol.com/protocol/session-config>
+        set-config-option: async func(config-id: session-config-id, value: session-config-value-id) -> result<list<session-config-option>, error>;
     }
 
     /// An in-flight prompt turn.

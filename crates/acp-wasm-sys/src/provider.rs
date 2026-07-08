@@ -964,6 +964,122 @@ pub mod yosh {
                 }
             }
             /// ------------------------------------------------------------------
+            /// Session configuration options
+            ///
+            /// The unified selector mechanism that supersedes the legacy
+            /// `modes`/`models` fields. Each option is a labelled dropdown with a
+            /// semantic `category` (mode / model / thought-level) that clients use
+            /// for UX placement and keyboard shortcuts. Setting a value
+            /// round-trips through `set-config-option`, which returns the full
+            /// updated option set.
+            ///
+            /// See: https://agentclientprotocol.com/protocol/session-config
+            /// ------------------------------------------------------------------
+            /// Unique identifier for a configuration option (e.g. `"model"`,
+            /// `"reasoning-effort"`).
+            pub type SessionConfigId = _rt::String;
+            /// Unique identifier for one selectable value of a configuration
+            /// option (e.g. `"gpt-4o"`, `"high"`).
+            pub type SessionConfigValueId = _rt::String;
+            /// Semantic category for a configuration option. Clients use this to
+            /// place the selector and bind shortcuts; it MUST NOT be required for
+            /// correctness, and clients MUST handle unknown categories
+            /// gracefully.
+            #[derive(Clone)]
+            pub enum SessionConfigOptionCategory {
+                /// Session mode selector.
+                Mode,
+                /// Model selector.
+                Model,
+                /// Thought / reasoning level selector.
+                ThoughtLevel,
+                /// Uncategorized selector, carrying its raw category string.
+                Other(_rt::String),
+            }
+            impl ::core::fmt::Debug for SessionConfigOptionCategory {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    match self {
+                        SessionConfigOptionCategory::Mode => {
+                            f.debug_tuple("SessionConfigOptionCategory::Mode").finish()
+                        }
+                        SessionConfigOptionCategory::Model => {
+                            f.debug_tuple("SessionConfigOptionCategory::Model").finish()
+                        }
+                        SessionConfigOptionCategory::ThoughtLevel => {
+                            f.debug_tuple("SessionConfigOptionCategory::ThoughtLevel")
+                                .finish()
+                        }
+                        SessionConfigOptionCategory::Other(e) => {
+                            f.debug_tuple("SessionConfigOptionCategory::Other")
+                                .field(e)
+                                .finish()
+                        }
+                    }
+                }
+            }
+            /// One selectable value of a `select`-type configuration option.
+            #[derive(Clone)]
+            pub struct SessionConfigSelectOption {
+                /// Stable identifier for this value.
+                pub value: SessionConfigValueId,
+                /// Human-readable label.
+                pub name: _rt::String,
+                /// Optional longer description.
+                pub description: Option<_rt::String>,
+            }
+            impl ::core::fmt::Debug for SessionConfigSelectOption {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("SessionConfigSelectOption")
+                        .field("value", &self.value)
+                        .field("name", &self.name)
+                        .field("description", &self.description)
+                        .finish()
+                }
+            }
+            /// A single-value selector (dropdown) configuration option and its
+            /// current state.
+            #[derive(Clone)]
+            pub struct SessionConfigOption {
+                /// Stable identifier for this option.
+                pub id: SessionConfigId,
+                /// Human-readable label.
+                pub name: _rt::String,
+                /// Optional longer description.
+                pub description: Option<_rt::String>,
+                /// Optional semantic category (UX only).
+                pub category: Option<SessionConfigOptionCategory>,
+                /// The currently selected value. MUST be one of `options`.
+                pub current_value: SessionConfigValueId,
+                /// The selectable values.
+                pub options: _rt::Vec<SessionConfigSelectOption>,
+                /// Which component contributed this option. Providers set it to
+                /// their own component id; layers pass downstream entries through
+                /// unchanged.
+                pub provided_by: ComponentSource,
+            }
+            impl ::core::fmt::Debug for SessionConfigOption {
+                fn fmt(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.debug_struct("SessionConfigOption")
+                        .field("id", &self.id)
+                        .field("name", &self.name)
+                        .field("description", &self.description)
+                        .field("category", &self.category)
+                        .field("current-value", &self.current_value)
+                        .field("options", &self.options)
+                        .field("provided-by", &self.provided_by)
+                        .finish()
+                }
+            }
+            /// ------------------------------------------------------------------
             /// New / load
             ///
             /// See: https://agentclientprotocol.com/protocol/session-setup
@@ -997,6 +1113,10 @@ pub mod yosh {
                 /// Models the agent can run for this session, if any.
                 /// **UNSTABLE**.
                 pub models: Option<SessionModelState>,
+                /// Configuration option selectors (model / mode / thought-level)
+                /// for this session, if any. Supersedes `modes`/`models` on
+                /// clients that support it.
+                pub config_options: Option<_rt::Vec<SessionConfigOption>>,
             }
             impl ::core::fmt::Debug for NewSessionResponse {
                 fn fmt(
@@ -1007,6 +1127,7 @@ pub mod yosh {
                         .field("session-id", &self.session_id)
                         .field("modes", &self.modes)
                         .field("models", &self.models)
+                        .field("config-options", &self.config_options)
                         .finish()
                 }
             }
@@ -1041,6 +1162,10 @@ pub mod yosh {
                 /// Models the agent can run for this session, if any.
                 /// **UNSTABLE**.
                 pub models: Option<SessionModelState>,
+                /// Configuration option selectors (model / mode / thought-level)
+                /// for this session, if any. Supersedes `modes`/`models` on
+                /// clients that support it.
+                pub config_options: Option<_rt::Vec<SessionConfigOption>>,
             }
             impl ::core::fmt::Debug for LoadSessionResponse {
                 fn fmt(
@@ -1050,6 +1175,7 @@ pub mod yosh {
                     f.debug_struct("LoadSessionResponse")
                         .field("modes", &self.modes)
                         .field("models", &self.models)
+                        .field("config-options", &self.config_options)
                         .finish()
                 }
             }
@@ -1152,6 +1278,10 @@ pub mod yosh {
                 /// Models the agent can run for this session, if any.
                 /// **UNSTABLE**.
                 pub models: Option<SessionModelState>,
+                /// Configuration option selectors (model / mode / thought-level)
+                /// for this session, if any. Supersedes `modes`/`models` on
+                /// clients that support it.
+                pub config_options: Option<_rt::Vec<SessionConfigOption>>,
             }
             impl ::core::fmt::Debug for ResumeSessionResponse {
                 fn fmt(
@@ -1161,6 +1291,7 @@ pub mod yosh {
                     f.debug_struct("ResumeSessionResponse")
                         .field("modes", &self.modes)
                         .field("models", &self.models)
+                        .field("config-options", &self.config_options)
                         .finish()
                 }
             }
@@ -4127,6 +4258,9 @@ pub mod yosh {
             pub type AuthenticateRequest = super::super::super::yosh::acp::init::AuthenticateRequest;
             pub type SessionModeId = super::super::super::yosh::acp::sessions::SessionModeId;
             pub type SessionModelId = super::super::super::yosh::acp::sessions::SessionModelId;
+            pub type SessionConfigId = super::super::super::yosh::acp::sessions::SessionConfigId;
+            pub type SessionConfigValueId = super::super::super::yosh::acp::sessions::SessionConfigValueId;
+            pub type SessionConfigOption = super::super::super::yosh::acp::sessions::SessionConfigOption;
             pub type NewSessionRequest = super::super::super::yosh::acp::sessions::NewSessionRequest;
             pub type NewSessionResponse = super::super::super::yosh::acp::sessions::NewSessionResponse;
             pub type LoadSessionRequest = super::super::super::yosh::acp::sessions::LoadSessionRequest;
@@ -5391,6 +5525,446 @@ pub mod yosh {
                     }
                 }
             }
+            impl Session {
+                #[allow(unused_unsafe, clippy::all)]
+                /// Set a configuration option (model / mode / thought-level) for
+                /// this session. The `config-id` and `value` MUST come from the
+                /// option set advertised in the session's lifecycle response.
+                /// Returns the full updated option set (mirroring the ACP
+                /// `session/set_config_option` response).
+                ///
+                /// See: <https://agentclientprotocol.com/protocol/session-config>
+                #[allow(async_fn_in_trait)]
+                pub async fn set_config_option(
+                    &self,
+                    config_id: SessionConfigId,
+                    value: SessionConfigValueId,
+                ) -> Result<_rt::Vec<SessionConfigOption>, Error> {
+                    unsafe {
+                        #[derive(Copy, Clone)]
+                        struct ParamsLower(*mut u8);
+                        unsafe impl Send for ParamsLower {}
+                        use wit_bindgen::rt::async_support::Subtask as _Subtask;
+                        struct _MySubtask<'a> {
+                            _unused: core::marker::PhantomData<&'a ()>,
+                        }
+                        #[allow(unused_parens)]
+                        unsafe impl<'a> _Subtask for _MySubtask<'a> {
+                            type Params = (
+                                &'a Session,
+                                SessionConfigId,
+                                SessionConfigValueId,
+                            );
+                            type Results = Result<_rt::Vec<SessionConfigOption>, Error>;
+                            type ParamsLower = ParamsLower;
+                            fn abi_layout(&mut self) -> ::core::alloc::Layout {
+                                unsafe {
+                                    ::core::alloc::Layout::from_size_align_unchecked(
+                                        (8 + 8 * ::core::mem::size_of::<*const u8>()),
+                                        ::core::mem::size_of::<*const u8>(),
+                                    )
+                                }
+                            }
+                            fn results_offset(&mut self) -> usize {
+                                (5 * ::core::mem::size_of::<*const u8>())
+                            }
+                            unsafe fn call_import(
+                                &mut self,
+                                _params: Self::ParamsLower,
+                                _results: *mut u8,
+                            ) -> u32 {
+                                #[cfg(target_arch = "wasm32")]
+                                #[link(wasm_import_module = "yosh:acp/agent@7.0.0")]
+                                unsafe extern "C" {
+                                    #[link_name = "[async-lower][method]session.set-config-option"]
+                                    fn call(_: *mut u8, _: *mut u8) -> i32;
+                                }
+                                #[cfg(not(target_arch = "wasm32"))]
+                                unsafe extern "C" fn call(_: *mut u8, _: *mut u8) -> i32 {
+                                    unreachable!()
+                                }
+                                unsafe { call(_params.0, _results) as u32 }
+                            }
+                            unsafe fn params_dealloc_lists(
+                                &mut self,
+                                _params: Self::ParamsLower,
+                            ) {
+                                unsafe {
+                                    let l0 = *_params
+                                        .0
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l1 = *_params
+                                        .0
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    _rt::cabi_dealloc(l0, l1, 1);
+                                    let l2 = *_params
+                                        .0
+                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l3 = *_params
+                                        .0
+                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    _rt::cabi_dealloc(l2, l3, 1);
+                                }
+                            }
+                            unsafe fn params_dealloc_lists_and_own(
+                                &mut self,
+                                _params: Self::ParamsLower,
+                            ) {
+                                unsafe {
+                                    let l0 = *_params
+                                        .0
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l1 = *_params
+                                        .0
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    _rt::cabi_dealloc(l0, l1, 1);
+                                    let l2 = *_params
+                                        .0
+                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>();
+                                    let l3 = *_params
+                                        .0
+                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>();
+                                    _rt::cabi_dealloc(l2, l3, 1);
+                                }
+                            }
+                            unsafe fn params_lower(
+                                &mut self,
+                                (_lower0, _lower1, _lower2): Self::Params,
+                                _ptr: *mut u8,
+                            ) -> Self::ParamsLower {
+                                let _param_ptr = unsafe { _ptr.add(0) };
+                                unsafe {
+                                    *_param_ptr.add(0).cast::<i32>() = (_lower0).handle()
+                                        as i32;
+                                }
+                                let _param_ptr = unsafe {
+                                    _ptr.add(::core::mem::size_of::<*const u8>())
+                                };
+                                unsafe {
+                                    let vec0 = (_lower1.into_bytes()).into_boxed_slice();
+                                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                                    let len0 = vec0.len();
+                                    ::core::mem::forget(vec0);
+                                    *_param_ptr
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len0;
+                                    *_param_ptr.add(0).cast::<*mut u8>() = ptr0.cast_mut();
+                                }
+                                let _param_ptr = unsafe {
+                                    _ptr.add((3 * ::core::mem::size_of::<*const u8>()))
+                                };
+                                unsafe {
+                                    let vec0 = (_lower2.into_bytes()).into_boxed_slice();
+                                    let ptr0 = vec0.as_ptr().cast::<u8>();
+                                    let len0 = vec0.len();
+                                    ::core::mem::forget(vec0);
+                                    *_param_ptr
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len0;
+                                    *_param_ptr.add(0).cast::<*mut u8>() = ptr0.cast_mut();
+                                }
+                                ParamsLower(_ptr)
+                            }
+                            unsafe fn results_lift(
+                                &mut self,
+                                _ptr: *mut u8,
+                            ) -> Self::Results {
+                                unsafe {
+                                    let l0 = i32::from(*_ptr.add(0).cast::<u8>());
+                                    match l0 {
+                                        0 => {
+                                            let e = {
+                                                let l1 = *_ptr
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l2 = *_ptr
+                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                let base38 = l1;
+                                                let len38 = l2;
+                                                let mut result38 = _rt::Vec::with_capacity(len38);
+                                                for i in 0..len38 {
+                                                    let base = base38
+                                                        .add(i * (17 * ::core::mem::size_of::<*const u8>()));
+                                                    let e38 = {
+                                                        let l3 = *base.add(0).cast::<*mut u8>();
+                                                        let l4 = *base
+                                                            .add(::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        let len5 = l4;
+                                                        let bytes5 = _rt::Vec::from_raw_parts(
+                                                            l3.cast(),
+                                                            len5,
+                                                            len5,
+                                                        );
+                                                        let l6 = *base
+                                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l7 = *base
+                                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        let len8 = l7;
+                                                        let bytes8 = _rt::Vec::from_raw_parts(
+                                                            l6.cast(),
+                                                            len8,
+                                                            len8,
+                                                        );
+                                                        let l9 = i32::from(
+                                                            *base
+                                                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        let l13 = i32::from(
+                                                            *base
+                                                                .add(7 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        let l19 = *base
+                                                            .add(11 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l20 = *base
+                                                            .add(12 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        let len21 = l20;
+                                                        let bytes21 = _rt::Vec::from_raw_parts(
+                                                            l19.cast(),
+                                                            len21,
+                                                            len21,
+                                                        );
+                                                        let l22 = *base
+                                                            .add(13 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l23 = *base
+                                                            .add(14 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        let base34 = l22;
+                                                        let len34 = l23;
+                                                        let mut result34 = _rt::Vec::with_capacity(len34);
+                                                        for i in 0..len34 {
+                                                            let base = base34
+                                                                .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                                            let e34 = {
+                                                                let l24 = *base.add(0).cast::<*mut u8>();
+                                                                let l25 = *base
+                                                                    .add(::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                let len26 = l25;
+                                                                let bytes26 = _rt::Vec::from_raw_parts(
+                                                                    l24.cast(),
+                                                                    len26,
+                                                                    len26,
+                                                                );
+                                                                let l27 = *base
+                                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l28 = *base
+                                                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                let len29 = l28;
+                                                                let bytes29 = _rt::Vec::from_raw_parts(
+                                                                    l27.cast(),
+                                                                    len29,
+                                                                    len29,
+                                                                );
+                                                                let l30 = i32::from(
+                                                                    *base
+                                                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>(),
+                                                                );
+                                                                super::super::super::yosh::acp::sessions::SessionConfigSelectOption {
+                                                                    value: _rt::string_lift(bytes26),
+                                                                    name: _rt::string_lift(bytes29),
+                                                                    description: match l30 {
+                                                                        0 => None,
+                                                                        1 => {
+                                                                            let e = {
+                                                                                let l31 = *base
+                                                                                    .add(5 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<*mut u8>();
+                                                                                let l32 = *base
+                                                                                    .add(6 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>();
+                                                                                let len33 = l32;
+                                                                                let bytes33 = _rt::Vec::from_raw_parts(
+                                                                                    l31.cast(),
+                                                                                    len33,
+                                                                                    len33,
+                                                                                );
+                                                                                _rt::string_lift(bytes33)
+                                                                            };
+                                                                            Some(e)
+                                                                        }
+                                                                        _ => _rt::invalid_enum_discriminant(),
+                                                                    },
+                                                                }
+                                                            };
+                                                            result34.push(e34);
+                                                        }
+                                                        _rt::cabi_dealloc(
+                                                            base34,
+                                                            len34 * (7 * ::core::mem::size_of::<*const u8>()),
+                                                            ::core::mem::size_of::<*const u8>(),
+                                                        );
+                                                        let l35 = *base
+                                                            .add(15 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l36 = *base
+                                                            .add(16 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        let len37 = l36;
+                                                        let bytes37 = _rt::Vec::from_raw_parts(
+                                                            l35.cast(),
+                                                            len37,
+                                                            len37,
+                                                        );
+                                                        super::super::super::yosh::acp::sessions::SessionConfigOption {
+                                                            id: _rt::string_lift(bytes5),
+                                                            name: _rt::string_lift(bytes8),
+                                                            description: match l9 {
+                                                                0 => None,
+                                                                1 => {
+                                                                    let e = {
+                                                                        let l10 = *base
+                                                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l11 = *base
+                                                                            .add(6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        let len12 = l11;
+                                                                        let bytes12 = _rt::Vec::from_raw_parts(
+                                                                            l10.cast(),
+                                                                            len12,
+                                                                            len12,
+                                                                        );
+                                                                        _rt::string_lift(bytes12)
+                                                                    };
+                                                                    Some(e)
+                                                                }
+                                                                _ => _rt::invalid_enum_discriminant(),
+                                                            },
+                                                            category: match l13 {
+                                                                0 => None,
+                                                                1 => {
+                                                                    let e = {
+                                                                        let l14 = i32::from(
+                                                                            *base
+                                                                                .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                                .cast::<u8>(),
+                                                                        );
+                                                                        use super::super::super::yosh::acp::sessions::SessionConfigOptionCategory as V18;
+                                                                        let v18 = match l14 {
+                                                                            0 => V18::Mode,
+                                                                            1 => V18::Model,
+                                                                            2 => V18::ThoughtLevel,
+                                                                            n => {
+                                                                                debug_assert_eq!(n, 3, "invalid enum discriminant");
+                                                                                let e18 = {
+                                                                                    let l15 = *base
+                                                                                        .add(9 * ::core::mem::size_of::<*const u8>())
+                                                                                        .cast::<*mut u8>();
+                                                                                    let l16 = *base
+                                                                                        .add(10 * ::core::mem::size_of::<*const u8>())
+                                                                                        .cast::<usize>();
+                                                                                    let len17 = l16;
+                                                                                    let bytes17 = _rt::Vec::from_raw_parts(
+                                                                                        l15.cast(),
+                                                                                        len17,
+                                                                                        len17,
+                                                                                    );
+                                                                                    _rt::string_lift(bytes17)
+                                                                                };
+                                                                                V18::Other(e18)
+                                                                            }
+                                                                        };
+                                                                        v18
+                                                                    };
+                                                                    Some(e)
+                                                                }
+                                                                _ => _rt::invalid_enum_discriminant(),
+                                                            },
+                                                            current_value: _rt::string_lift(bytes21),
+                                                            options: result34,
+                                                            provided_by: super::super::super::yosh::acp::sessions::ComponentSource {
+                                                                component_id: _rt::string_lift(bytes37),
+                                                            },
+                                                        }
+                                                    };
+                                                    result38.push(e38);
+                                                }
+                                                _rt::cabi_dealloc(
+                                                    base38,
+                                                    len38 * (17 * ::core::mem::size_of::<*const u8>()),
+                                                    ::core::mem::size_of::<*const u8>(),
+                                                );
+                                                result38
+                                            };
+                                            Ok(e)
+                                        }
+                                        1 => {
+                                            let e = {
+                                                let l39 = i32::from(
+                                                    *_ptr.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
+                                                );
+                                                use super::super::super::yosh::acp::errors::ErrorCode as V41;
+                                                let v41 = match l39 {
+                                                    0 => V41::ParseError,
+                                                    1 => V41::InvalidRequest,
+                                                    2 => V41::MethodNotFound,
+                                                    3 => V41::InvalidParams,
+                                                    4 => V41::InternalError,
+                                                    5 => V41::AuthRequired,
+                                                    6 => V41::ResourceNotFound,
+                                                    n => {
+                                                        debug_assert_eq!(n, 7, "invalid enum discriminant");
+                                                        let e41 = {
+                                                            let l40 = *_ptr
+                                                                .add(4 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<i32>();
+                                                            l40
+                                                        };
+                                                        V41::Other(e41)
+                                                    }
+                                                };
+                                                let l42 = *_ptr
+                                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l43 = *_ptr
+                                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                let len44 = l43;
+                                                let bytes44 = _rt::Vec::from_raw_parts(
+                                                    l42.cast(),
+                                                    len44,
+                                                    len44,
+                                                );
+                                                super::super::super::yosh::acp::errors::Error {
+                                                    code: v41,
+                                                    message: _rt::string_lift(bytes44),
+                                                }
+                                            };
+                                            Err(e)
+                                        }
+                                        _ => _rt::invalid_enum_discriminant(),
+                                    }
+                                }
+                            }
+                        }
+                        _MySubtask {
+                            _unused: core::marker::PhantomData,
+                        }
+                            .call((self, config_id, value))
+                            .await
+                    }
+                }
+            }
             impl PromptTurn {
                 #[allow(unused_unsafe, clippy::all)]
                 /// The streaming body of the turn: every `session-update` the
@@ -6329,7 +6903,7 @@ pub mod yosh {
                         fn abi_layout(&mut self) -> ::core::alloc::Layout {
                             unsafe {
                                 ::core::alloc::Layout::from_size_align_unchecked(
-                                    (14 * ::core::mem::size_of::<*const u8>()),
+                                    (17 * ::core::mem::size_of::<*const u8>()),
                                     ::core::mem::size_of::<*const u8>(),
                                 )
                             }
@@ -7079,6 +7653,11 @@ pub mod yosh {
                                                     .add(9 * ::core::mem::size_of::<*const u8>())
                                                     .cast::<u8>(),
                                             );
+                                            let l45 = i32::from(
+                                                *_ptr
+                                                    .add(14 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>(),
+                                            );
                                             (
                                                 Session::from_handle(l1 as u32),
                                                 super::super::super::yosh::acp::sessions::NewSessionResponse {
@@ -7311,6 +7890,238 @@ pub mod yosh {
                                                         }
                                                         _ => _rt::invalid_enum_discriminant(),
                                                     },
+                                                    config_options: match l45 {
+                                                        0 => None,
+                                                        1 => {
+                                                            let e = {
+                                                                let l46 = *_ptr
+                                                                    .add(15 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l47 = *_ptr
+                                                                    .add(16 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                let base83 = l46;
+                                                                let len83 = l47;
+                                                                let mut result83 = _rt::Vec::with_capacity(len83);
+                                                                for i in 0..len83 {
+                                                                    let base = base83
+                                                                        .add(i * (17 * ::core::mem::size_of::<*const u8>()));
+                                                                    let e83 = {
+                                                                        let l48 = *base.add(0).cast::<*mut u8>();
+                                                                        let l49 = *base
+                                                                            .add(::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        let len50 = l49;
+                                                                        let bytes50 = _rt::Vec::from_raw_parts(
+                                                                            l48.cast(),
+                                                                            len50,
+                                                                            len50,
+                                                                        );
+                                                                        let l51 = *base
+                                                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l52 = *base
+                                                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        let len53 = l52;
+                                                                        let bytes53 = _rt::Vec::from_raw_parts(
+                                                                            l51.cast(),
+                                                                            len53,
+                                                                            len53,
+                                                                        );
+                                                                        let l54 = i32::from(
+                                                                            *base
+                                                                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                                .cast::<u8>(),
+                                                                        );
+                                                                        let l58 = i32::from(
+                                                                            *base
+                                                                                .add(7 * ::core::mem::size_of::<*const u8>())
+                                                                                .cast::<u8>(),
+                                                                        );
+                                                                        let l64 = *base
+                                                                            .add(11 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l65 = *base
+                                                                            .add(12 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        let len66 = l65;
+                                                                        let bytes66 = _rt::Vec::from_raw_parts(
+                                                                            l64.cast(),
+                                                                            len66,
+                                                                            len66,
+                                                                        );
+                                                                        let l67 = *base
+                                                                            .add(13 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l68 = *base
+                                                                            .add(14 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        let base79 = l67;
+                                                                        let len79 = l68;
+                                                                        let mut result79 = _rt::Vec::with_capacity(len79);
+                                                                        for i in 0..len79 {
+                                                                            let base = base79
+                                                                                .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                                                            let e79 = {
+                                                                                let l69 = *base.add(0).cast::<*mut u8>();
+                                                                                let l70 = *base
+                                                                                    .add(::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>();
+                                                                                let len71 = l70;
+                                                                                let bytes71 = _rt::Vec::from_raw_parts(
+                                                                                    l69.cast(),
+                                                                                    len71,
+                                                                                    len71,
+                                                                                );
+                                                                                let l72 = *base
+                                                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<*mut u8>();
+                                                                                let l73 = *base
+                                                                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>();
+                                                                                let len74 = l73;
+                                                                                let bytes74 = _rt::Vec::from_raw_parts(
+                                                                                    l72.cast(),
+                                                                                    len74,
+                                                                                    len74,
+                                                                                );
+                                                                                let l75 = i32::from(
+                                                                                    *base
+                                                                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                                        .cast::<u8>(),
+                                                                                );
+                                                                                super::super::super::yosh::acp::sessions::SessionConfigSelectOption {
+                                                                                    value: _rt::string_lift(bytes71),
+                                                                                    name: _rt::string_lift(bytes74),
+                                                                                    description: match l75 {
+                                                                                        0 => None,
+                                                                                        1 => {
+                                                                                            let e = {
+                                                                                                let l76 = *base
+                                                                                                    .add(5 * ::core::mem::size_of::<*const u8>())
+                                                                                                    .cast::<*mut u8>();
+                                                                                                let l77 = *base
+                                                                                                    .add(6 * ::core::mem::size_of::<*const u8>())
+                                                                                                    .cast::<usize>();
+                                                                                                let len78 = l77;
+                                                                                                let bytes78 = _rt::Vec::from_raw_parts(
+                                                                                                    l76.cast(),
+                                                                                                    len78,
+                                                                                                    len78,
+                                                                                                );
+                                                                                                _rt::string_lift(bytes78)
+                                                                                            };
+                                                                                            Some(e)
+                                                                                        }
+                                                                                        _ => _rt::invalid_enum_discriminant(),
+                                                                                    },
+                                                                                }
+                                                                            };
+                                                                            result79.push(e79);
+                                                                        }
+                                                                        _rt::cabi_dealloc(
+                                                                            base79,
+                                                                            len79 * (7 * ::core::mem::size_of::<*const u8>()),
+                                                                            ::core::mem::size_of::<*const u8>(),
+                                                                        );
+                                                                        let l80 = *base
+                                                                            .add(15 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l81 = *base
+                                                                            .add(16 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        let len82 = l81;
+                                                                        let bytes82 = _rt::Vec::from_raw_parts(
+                                                                            l80.cast(),
+                                                                            len82,
+                                                                            len82,
+                                                                        );
+                                                                        super::super::super::yosh::acp::sessions::SessionConfigOption {
+                                                                            id: _rt::string_lift(bytes50),
+                                                                            name: _rt::string_lift(bytes53),
+                                                                            description: match l54 {
+                                                                                0 => None,
+                                                                                1 => {
+                                                                                    let e = {
+                                                                                        let l55 = *base
+                                                                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                                                                            .cast::<*mut u8>();
+                                                                                        let l56 = *base
+                                                                                            .add(6 * ::core::mem::size_of::<*const u8>())
+                                                                                            .cast::<usize>();
+                                                                                        let len57 = l56;
+                                                                                        let bytes57 = _rt::Vec::from_raw_parts(
+                                                                                            l55.cast(),
+                                                                                            len57,
+                                                                                            len57,
+                                                                                        );
+                                                                                        _rt::string_lift(bytes57)
+                                                                                    };
+                                                                                    Some(e)
+                                                                                }
+                                                                                _ => _rt::invalid_enum_discriminant(),
+                                                                            },
+                                                                            category: match l58 {
+                                                                                0 => None,
+                                                                                1 => {
+                                                                                    let e = {
+                                                                                        let l59 = i32::from(
+                                                                                            *base
+                                                                                                .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                                                .cast::<u8>(),
+                                                                                        );
+                                                                                        use super::super::super::yosh::acp::sessions::SessionConfigOptionCategory as V63;
+                                                                                        let v63 = match l59 {
+                                                                                            0 => V63::Mode,
+                                                                                            1 => V63::Model,
+                                                                                            2 => V63::ThoughtLevel,
+                                                                                            n => {
+                                                                                                debug_assert_eq!(n, 3, "invalid enum discriminant");
+                                                                                                let e63 = {
+                                                                                                    let l60 = *base
+                                                                                                        .add(9 * ::core::mem::size_of::<*const u8>())
+                                                                                                        .cast::<*mut u8>();
+                                                                                                    let l61 = *base
+                                                                                                        .add(10 * ::core::mem::size_of::<*const u8>())
+                                                                                                        .cast::<usize>();
+                                                                                                    let len62 = l61;
+                                                                                                    let bytes62 = _rt::Vec::from_raw_parts(
+                                                                                                        l60.cast(),
+                                                                                                        len62,
+                                                                                                        len62,
+                                                                                                    );
+                                                                                                    _rt::string_lift(bytes62)
+                                                                                                };
+                                                                                                V63::Other(e63)
+                                                                                            }
+                                                                                        };
+                                                                                        v63
+                                                                                    };
+                                                                                    Some(e)
+                                                                                }
+                                                                                _ => _rt::invalid_enum_discriminant(),
+                                                                            },
+                                                                            current_value: _rt::string_lift(bytes66),
+                                                                            options: result79,
+                                                                            provided_by: super::super::super::yosh::acp::sessions::ComponentSource {
+                                                                                component_id: _rt::string_lift(bytes82),
+                                                                            },
+                                                                        }
+                                                                    };
+                                                                    result83.push(e83);
+                                                                }
+                                                                _rt::cabi_dealloc(
+                                                                    base83,
+                                                                    len83 * (17 * ::core::mem::size_of::<*const u8>()),
+                                                                    ::core::mem::size_of::<*const u8>(),
+                                                                );
+                                                                result83
+                                                            };
+                                                            Some(e)
+                                                        }
+                                                        _ => _rt::invalid_enum_discriminant(),
+                                                    },
                                                 },
                                             )
                                         };
@@ -7318,44 +8129,44 @@ pub mod yosh {
                                     }
                                     1 => {
                                         let e = {
-                                            let l45 = i32::from(
+                                            let l84 = i32::from(
                                                 *_ptr.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
                                             );
-                                            use super::super::super::yosh::acp::errors::ErrorCode as V47;
-                                            let v47 = match l45 {
-                                                0 => V47::ParseError,
-                                                1 => V47::InvalidRequest,
-                                                2 => V47::MethodNotFound,
-                                                3 => V47::InvalidParams,
-                                                4 => V47::InternalError,
-                                                5 => V47::AuthRequired,
-                                                6 => V47::ResourceNotFound,
+                                            use super::super::super::yosh::acp::errors::ErrorCode as V86;
+                                            let v86 = match l84 {
+                                                0 => V86::ParseError,
+                                                1 => V86::InvalidRequest,
+                                                2 => V86::MethodNotFound,
+                                                3 => V86::InvalidParams,
+                                                4 => V86::InternalError,
+                                                5 => V86::AuthRequired,
+                                                6 => V86::ResourceNotFound,
                                                 n => {
                                                     debug_assert_eq!(n, 7, "invalid enum discriminant");
-                                                    let e47 = {
-                                                        let l46 = *_ptr
+                                                    let e86 = {
+                                                        let l85 = *_ptr
                                                             .add(4 + 1 * ::core::mem::size_of::<*const u8>())
                                                             .cast::<i32>();
-                                                        l46
+                                                        l85
                                                     };
-                                                    V47::Other(e47)
+                                                    V86::Other(e86)
                                                 }
                                             };
-                                            let l48 = *_ptr
+                                            let l87 = *_ptr
                                                 .add(8 + 1 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<*mut u8>();
-                                            let l49 = *_ptr
+                                            let l88 = *_ptr
                                                 .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<usize>();
-                                            let len50 = l49;
-                                            let bytes50 = _rt::Vec::from_raw_parts(
-                                                l48.cast(),
-                                                len50,
-                                                len50,
+                                            let len89 = l88;
+                                            let bytes89 = _rt::Vec::from_raw_parts(
+                                                l87.cast(),
+                                                len89,
+                                                len89,
                                             );
                                             super::super::super::yosh::acp::errors::Error {
-                                                code: v47,
-                                                message: _rt::string_lift(bytes50),
+                                                code: v86,
+                                                message: _rt::string_lift(bytes89),
                                             }
                                         };
                                         Err(e)
@@ -7400,7 +8211,7 @@ pub mod yosh {
                         fn abi_layout(&mut self) -> ::core::alloc::Layout {
                             unsafe {
                                 ::core::alloc::Layout::from_size_align_unchecked(
-                                    (18 * ::core::mem::size_of::<*const u8>()),
+                                    (21 * ::core::mem::size_of::<*const u8>()),
                                     ::core::mem::size_of::<*const u8>(),
                                 )
                             }
@@ -8189,6 +9000,11 @@ pub mod yosh {
                                                     .add(7 * ::core::mem::size_of::<*const u8>())
                                                     .cast::<u8>(),
                                             );
+                                            let l42 = i32::from(
+                                                *_ptr
+                                                    .add(12 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>(),
+                                            );
                                             (
                                                 Session::from_handle(l1 as u32),
                                                 super::super::super::yosh::acp::sessions::LoadSessionResponse {
@@ -8420,6 +9236,238 @@ pub mod yosh {
                                                         }
                                                         _ => _rt::invalid_enum_discriminant(),
                                                     },
+                                                    config_options: match l42 {
+                                                        0 => None,
+                                                        1 => {
+                                                            let e = {
+                                                                let l43 = *_ptr
+                                                                    .add(13 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l44 = *_ptr
+                                                                    .add(14 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                let base80 = l43;
+                                                                let len80 = l44;
+                                                                let mut result80 = _rt::Vec::with_capacity(len80);
+                                                                for i in 0..len80 {
+                                                                    let base = base80
+                                                                        .add(i * (17 * ::core::mem::size_of::<*const u8>()));
+                                                                    let e80 = {
+                                                                        let l45 = *base.add(0).cast::<*mut u8>();
+                                                                        let l46 = *base
+                                                                            .add(::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        let len47 = l46;
+                                                                        let bytes47 = _rt::Vec::from_raw_parts(
+                                                                            l45.cast(),
+                                                                            len47,
+                                                                            len47,
+                                                                        );
+                                                                        let l48 = *base
+                                                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l49 = *base
+                                                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        let len50 = l49;
+                                                                        let bytes50 = _rt::Vec::from_raw_parts(
+                                                                            l48.cast(),
+                                                                            len50,
+                                                                            len50,
+                                                                        );
+                                                                        let l51 = i32::from(
+                                                                            *base
+                                                                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                                .cast::<u8>(),
+                                                                        );
+                                                                        let l55 = i32::from(
+                                                                            *base
+                                                                                .add(7 * ::core::mem::size_of::<*const u8>())
+                                                                                .cast::<u8>(),
+                                                                        );
+                                                                        let l61 = *base
+                                                                            .add(11 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l62 = *base
+                                                                            .add(12 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        let len63 = l62;
+                                                                        let bytes63 = _rt::Vec::from_raw_parts(
+                                                                            l61.cast(),
+                                                                            len63,
+                                                                            len63,
+                                                                        );
+                                                                        let l64 = *base
+                                                                            .add(13 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l65 = *base
+                                                                            .add(14 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        let base76 = l64;
+                                                                        let len76 = l65;
+                                                                        let mut result76 = _rt::Vec::with_capacity(len76);
+                                                                        for i in 0..len76 {
+                                                                            let base = base76
+                                                                                .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                                                            let e76 = {
+                                                                                let l66 = *base.add(0).cast::<*mut u8>();
+                                                                                let l67 = *base
+                                                                                    .add(::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>();
+                                                                                let len68 = l67;
+                                                                                let bytes68 = _rt::Vec::from_raw_parts(
+                                                                                    l66.cast(),
+                                                                                    len68,
+                                                                                    len68,
+                                                                                );
+                                                                                let l69 = *base
+                                                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<*mut u8>();
+                                                                                let l70 = *base
+                                                                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>();
+                                                                                let len71 = l70;
+                                                                                let bytes71 = _rt::Vec::from_raw_parts(
+                                                                                    l69.cast(),
+                                                                                    len71,
+                                                                                    len71,
+                                                                                );
+                                                                                let l72 = i32::from(
+                                                                                    *base
+                                                                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                                        .cast::<u8>(),
+                                                                                );
+                                                                                super::super::super::yosh::acp::sessions::SessionConfigSelectOption {
+                                                                                    value: _rt::string_lift(bytes68),
+                                                                                    name: _rt::string_lift(bytes71),
+                                                                                    description: match l72 {
+                                                                                        0 => None,
+                                                                                        1 => {
+                                                                                            let e = {
+                                                                                                let l73 = *base
+                                                                                                    .add(5 * ::core::mem::size_of::<*const u8>())
+                                                                                                    .cast::<*mut u8>();
+                                                                                                let l74 = *base
+                                                                                                    .add(6 * ::core::mem::size_of::<*const u8>())
+                                                                                                    .cast::<usize>();
+                                                                                                let len75 = l74;
+                                                                                                let bytes75 = _rt::Vec::from_raw_parts(
+                                                                                                    l73.cast(),
+                                                                                                    len75,
+                                                                                                    len75,
+                                                                                                );
+                                                                                                _rt::string_lift(bytes75)
+                                                                                            };
+                                                                                            Some(e)
+                                                                                        }
+                                                                                        _ => _rt::invalid_enum_discriminant(),
+                                                                                    },
+                                                                                }
+                                                                            };
+                                                                            result76.push(e76);
+                                                                        }
+                                                                        _rt::cabi_dealloc(
+                                                                            base76,
+                                                                            len76 * (7 * ::core::mem::size_of::<*const u8>()),
+                                                                            ::core::mem::size_of::<*const u8>(),
+                                                                        );
+                                                                        let l77 = *base
+                                                                            .add(15 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l78 = *base
+                                                                            .add(16 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        let len79 = l78;
+                                                                        let bytes79 = _rt::Vec::from_raw_parts(
+                                                                            l77.cast(),
+                                                                            len79,
+                                                                            len79,
+                                                                        );
+                                                                        super::super::super::yosh::acp::sessions::SessionConfigOption {
+                                                                            id: _rt::string_lift(bytes47),
+                                                                            name: _rt::string_lift(bytes50),
+                                                                            description: match l51 {
+                                                                                0 => None,
+                                                                                1 => {
+                                                                                    let e = {
+                                                                                        let l52 = *base
+                                                                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                                                                            .cast::<*mut u8>();
+                                                                                        let l53 = *base
+                                                                                            .add(6 * ::core::mem::size_of::<*const u8>())
+                                                                                            .cast::<usize>();
+                                                                                        let len54 = l53;
+                                                                                        let bytes54 = _rt::Vec::from_raw_parts(
+                                                                                            l52.cast(),
+                                                                                            len54,
+                                                                                            len54,
+                                                                                        );
+                                                                                        _rt::string_lift(bytes54)
+                                                                                    };
+                                                                                    Some(e)
+                                                                                }
+                                                                                _ => _rt::invalid_enum_discriminant(),
+                                                                            },
+                                                                            category: match l55 {
+                                                                                0 => None,
+                                                                                1 => {
+                                                                                    let e = {
+                                                                                        let l56 = i32::from(
+                                                                                            *base
+                                                                                                .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                                                .cast::<u8>(),
+                                                                                        );
+                                                                                        use super::super::super::yosh::acp::sessions::SessionConfigOptionCategory as V60;
+                                                                                        let v60 = match l56 {
+                                                                                            0 => V60::Mode,
+                                                                                            1 => V60::Model,
+                                                                                            2 => V60::ThoughtLevel,
+                                                                                            n => {
+                                                                                                debug_assert_eq!(n, 3, "invalid enum discriminant");
+                                                                                                let e60 = {
+                                                                                                    let l57 = *base
+                                                                                                        .add(9 * ::core::mem::size_of::<*const u8>())
+                                                                                                        .cast::<*mut u8>();
+                                                                                                    let l58 = *base
+                                                                                                        .add(10 * ::core::mem::size_of::<*const u8>())
+                                                                                                        .cast::<usize>();
+                                                                                                    let len59 = l58;
+                                                                                                    let bytes59 = _rt::Vec::from_raw_parts(
+                                                                                                        l57.cast(),
+                                                                                                        len59,
+                                                                                                        len59,
+                                                                                                    );
+                                                                                                    _rt::string_lift(bytes59)
+                                                                                                };
+                                                                                                V60::Other(e60)
+                                                                                            }
+                                                                                        };
+                                                                                        v60
+                                                                                    };
+                                                                                    Some(e)
+                                                                                }
+                                                                                _ => _rt::invalid_enum_discriminant(),
+                                                                            },
+                                                                            current_value: _rt::string_lift(bytes63),
+                                                                            options: result76,
+                                                                            provided_by: super::super::super::yosh::acp::sessions::ComponentSource {
+                                                                                component_id: _rt::string_lift(bytes79),
+                                                                            },
+                                                                        }
+                                                                    };
+                                                                    result80.push(e80);
+                                                                }
+                                                                _rt::cabi_dealloc(
+                                                                    base80,
+                                                                    len80 * (17 * ::core::mem::size_of::<*const u8>()),
+                                                                    ::core::mem::size_of::<*const u8>(),
+                                                                );
+                                                                result80
+                                                            };
+                                                            Some(e)
+                                                        }
+                                                        _ => _rt::invalid_enum_discriminant(),
+                                                    },
                                                 },
                                             )
                                         };
@@ -8427,44 +9475,44 @@ pub mod yosh {
                                     }
                                     1 => {
                                         let e = {
-                                            let l42 = i32::from(
+                                            let l81 = i32::from(
                                                 *_ptr.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
                                             );
-                                            use super::super::super::yosh::acp::errors::ErrorCode as V44;
-                                            let v44 = match l42 {
-                                                0 => V44::ParseError,
-                                                1 => V44::InvalidRequest,
-                                                2 => V44::MethodNotFound,
-                                                3 => V44::InvalidParams,
-                                                4 => V44::InternalError,
-                                                5 => V44::AuthRequired,
-                                                6 => V44::ResourceNotFound,
+                                            use super::super::super::yosh::acp::errors::ErrorCode as V83;
+                                            let v83 = match l81 {
+                                                0 => V83::ParseError,
+                                                1 => V83::InvalidRequest,
+                                                2 => V83::MethodNotFound,
+                                                3 => V83::InvalidParams,
+                                                4 => V83::InternalError,
+                                                5 => V83::AuthRequired,
+                                                6 => V83::ResourceNotFound,
                                                 n => {
                                                     debug_assert_eq!(n, 7, "invalid enum discriminant");
-                                                    let e44 = {
-                                                        let l43 = *_ptr
+                                                    let e83 = {
+                                                        let l82 = *_ptr
                                                             .add(4 + 1 * ::core::mem::size_of::<*const u8>())
                                                             .cast::<i32>();
-                                                        l43
+                                                        l82
                                                     };
-                                                    V44::Other(e44)
+                                                    V83::Other(e83)
                                                 }
                                             };
-                                            let l45 = *_ptr
+                                            let l84 = *_ptr
                                                 .add(8 + 1 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<*mut u8>();
-                                            let l46 = *_ptr
+                                            let l85 = *_ptr
                                                 .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<usize>();
-                                            let len47 = l46;
-                                            let bytes47 = _rt::Vec::from_raw_parts(
-                                                l45.cast(),
-                                                len47,
-                                                len47,
+                                            let len86 = l85;
+                                            let bytes86 = _rt::Vec::from_raw_parts(
+                                                l84.cast(),
+                                                len86,
+                                                len86,
                                             );
                                             super::super::super::yosh::acp::errors::Error {
-                                                code: v44,
-                                                message: _rt::string_lift(bytes47),
+                                                code: v83,
+                                                message: _rt::string_lift(bytes86),
                                             }
                                         };
                                         Err(e)
@@ -8893,7 +9941,7 @@ pub mod yosh {
                         fn abi_layout(&mut self) -> ::core::alloc::Layout {
                             unsafe {
                                 ::core::alloc::Layout::from_size_align_unchecked(
-                                    (18 * ::core::mem::size_of::<*const u8>()),
+                                    (21 * ::core::mem::size_of::<*const u8>()),
                                     ::core::mem::size_of::<*const u8>(),
                                 )
                             }
@@ -9682,6 +10730,11 @@ pub mod yosh {
                                                     .add(7 * ::core::mem::size_of::<*const u8>())
                                                     .cast::<u8>(),
                                             );
+                                            let l42 = i32::from(
+                                                *_ptr
+                                                    .add(12 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>(),
+                                            );
                                             (
                                                 Session::from_handle(l1 as u32),
                                                 super::super::super::yosh::acp::sessions::ResumeSessionResponse {
@@ -9913,6 +10966,238 @@ pub mod yosh {
                                                         }
                                                         _ => _rt::invalid_enum_discriminant(),
                                                     },
+                                                    config_options: match l42 {
+                                                        0 => None,
+                                                        1 => {
+                                                            let e = {
+                                                                let l43 = *_ptr
+                                                                    .add(13 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l44 = *_ptr
+                                                                    .add(14 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                let base80 = l43;
+                                                                let len80 = l44;
+                                                                let mut result80 = _rt::Vec::with_capacity(len80);
+                                                                for i in 0..len80 {
+                                                                    let base = base80
+                                                                        .add(i * (17 * ::core::mem::size_of::<*const u8>()));
+                                                                    let e80 = {
+                                                                        let l45 = *base.add(0).cast::<*mut u8>();
+                                                                        let l46 = *base
+                                                                            .add(::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        let len47 = l46;
+                                                                        let bytes47 = _rt::Vec::from_raw_parts(
+                                                                            l45.cast(),
+                                                                            len47,
+                                                                            len47,
+                                                                        );
+                                                                        let l48 = *base
+                                                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l49 = *base
+                                                                            .add(3 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        let len50 = l49;
+                                                                        let bytes50 = _rt::Vec::from_raw_parts(
+                                                                            l48.cast(),
+                                                                            len50,
+                                                                            len50,
+                                                                        );
+                                                                        let l51 = i32::from(
+                                                                            *base
+                                                                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                                .cast::<u8>(),
+                                                                        );
+                                                                        let l55 = i32::from(
+                                                                            *base
+                                                                                .add(7 * ::core::mem::size_of::<*const u8>())
+                                                                                .cast::<u8>(),
+                                                                        );
+                                                                        let l61 = *base
+                                                                            .add(11 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l62 = *base
+                                                                            .add(12 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        let len63 = l62;
+                                                                        let bytes63 = _rt::Vec::from_raw_parts(
+                                                                            l61.cast(),
+                                                                            len63,
+                                                                            len63,
+                                                                        );
+                                                                        let l64 = *base
+                                                                            .add(13 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l65 = *base
+                                                                            .add(14 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        let base76 = l64;
+                                                                        let len76 = l65;
+                                                                        let mut result76 = _rt::Vec::with_capacity(len76);
+                                                                        for i in 0..len76 {
+                                                                            let base = base76
+                                                                                .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                                                            let e76 = {
+                                                                                let l66 = *base.add(0).cast::<*mut u8>();
+                                                                                let l67 = *base
+                                                                                    .add(::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>();
+                                                                                let len68 = l67;
+                                                                                let bytes68 = _rt::Vec::from_raw_parts(
+                                                                                    l66.cast(),
+                                                                                    len68,
+                                                                                    len68,
+                                                                                );
+                                                                                let l69 = *base
+                                                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<*mut u8>();
+                                                                                let l70 = *base
+                                                                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>();
+                                                                                let len71 = l70;
+                                                                                let bytes71 = _rt::Vec::from_raw_parts(
+                                                                                    l69.cast(),
+                                                                                    len71,
+                                                                                    len71,
+                                                                                );
+                                                                                let l72 = i32::from(
+                                                                                    *base
+                                                                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                                        .cast::<u8>(),
+                                                                                );
+                                                                                super::super::super::yosh::acp::sessions::SessionConfigSelectOption {
+                                                                                    value: _rt::string_lift(bytes68),
+                                                                                    name: _rt::string_lift(bytes71),
+                                                                                    description: match l72 {
+                                                                                        0 => None,
+                                                                                        1 => {
+                                                                                            let e = {
+                                                                                                let l73 = *base
+                                                                                                    .add(5 * ::core::mem::size_of::<*const u8>())
+                                                                                                    .cast::<*mut u8>();
+                                                                                                let l74 = *base
+                                                                                                    .add(6 * ::core::mem::size_of::<*const u8>())
+                                                                                                    .cast::<usize>();
+                                                                                                let len75 = l74;
+                                                                                                let bytes75 = _rt::Vec::from_raw_parts(
+                                                                                                    l73.cast(),
+                                                                                                    len75,
+                                                                                                    len75,
+                                                                                                );
+                                                                                                _rt::string_lift(bytes75)
+                                                                                            };
+                                                                                            Some(e)
+                                                                                        }
+                                                                                        _ => _rt::invalid_enum_discriminant(),
+                                                                                    },
+                                                                                }
+                                                                            };
+                                                                            result76.push(e76);
+                                                                        }
+                                                                        _rt::cabi_dealloc(
+                                                                            base76,
+                                                                            len76 * (7 * ::core::mem::size_of::<*const u8>()),
+                                                                            ::core::mem::size_of::<*const u8>(),
+                                                                        );
+                                                                        let l77 = *base
+                                                                            .add(15 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l78 = *base
+                                                                            .add(16 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        let len79 = l78;
+                                                                        let bytes79 = _rt::Vec::from_raw_parts(
+                                                                            l77.cast(),
+                                                                            len79,
+                                                                            len79,
+                                                                        );
+                                                                        super::super::super::yosh::acp::sessions::SessionConfigOption {
+                                                                            id: _rt::string_lift(bytes47),
+                                                                            name: _rt::string_lift(bytes50),
+                                                                            description: match l51 {
+                                                                                0 => None,
+                                                                                1 => {
+                                                                                    let e = {
+                                                                                        let l52 = *base
+                                                                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                                                                            .cast::<*mut u8>();
+                                                                                        let l53 = *base
+                                                                                            .add(6 * ::core::mem::size_of::<*const u8>())
+                                                                                            .cast::<usize>();
+                                                                                        let len54 = l53;
+                                                                                        let bytes54 = _rt::Vec::from_raw_parts(
+                                                                                            l52.cast(),
+                                                                                            len54,
+                                                                                            len54,
+                                                                                        );
+                                                                                        _rt::string_lift(bytes54)
+                                                                                    };
+                                                                                    Some(e)
+                                                                                }
+                                                                                _ => _rt::invalid_enum_discriminant(),
+                                                                            },
+                                                                            category: match l55 {
+                                                                                0 => None,
+                                                                                1 => {
+                                                                                    let e = {
+                                                                                        let l56 = i32::from(
+                                                                                            *base
+                                                                                                .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                                                .cast::<u8>(),
+                                                                                        );
+                                                                                        use super::super::super::yosh::acp::sessions::SessionConfigOptionCategory as V60;
+                                                                                        let v60 = match l56 {
+                                                                                            0 => V60::Mode,
+                                                                                            1 => V60::Model,
+                                                                                            2 => V60::ThoughtLevel,
+                                                                                            n => {
+                                                                                                debug_assert_eq!(n, 3, "invalid enum discriminant");
+                                                                                                let e60 = {
+                                                                                                    let l57 = *base
+                                                                                                        .add(9 * ::core::mem::size_of::<*const u8>())
+                                                                                                        .cast::<*mut u8>();
+                                                                                                    let l58 = *base
+                                                                                                        .add(10 * ::core::mem::size_of::<*const u8>())
+                                                                                                        .cast::<usize>();
+                                                                                                    let len59 = l58;
+                                                                                                    let bytes59 = _rt::Vec::from_raw_parts(
+                                                                                                        l57.cast(),
+                                                                                                        len59,
+                                                                                                        len59,
+                                                                                                    );
+                                                                                                    _rt::string_lift(bytes59)
+                                                                                                };
+                                                                                                V60::Other(e60)
+                                                                                            }
+                                                                                        };
+                                                                                        v60
+                                                                                    };
+                                                                                    Some(e)
+                                                                                }
+                                                                                _ => _rt::invalid_enum_discriminant(),
+                                                                            },
+                                                                            current_value: _rt::string_lift(bytes63),
+                                                                            options: result76,
+                                                                            provided_by: super::super::super::yosh::acp::sessions::ComponentSource {
+                                                                                component_id: _rt::string_lift(bytes79),
+                                                                            },
+                                                                        }
+                                                                    };
+                                                                    result80.push(e80);
+                                                                }
+                                                                _rt::cabi_dealloc(
+                                                                    base80,
+                                                                    len80 * (17 * ::core::mem::size_of::<*const u8>()),
+                                                                    ::core::mem::size_of::<*const u8>(),
+                                                                );
+                                                                result80
+                                                            };
+                                                            Some(e)
+                                                        }
+                                                        _ => _rt::invalid_enum_discriminant(),
+                                                    },
                                                 },
                                             )
                                         };
@@ -9920,44 +11205,44 @@ pub mod yosh {
                                     }
                                     1 => {
                                         let e = {
-                                            let l42 = i32::from(
+                                            let l81 = i32::from(
                                                 *_ptr.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
                                             );
-                                            use super::super::super::yosh::acp::errors::ErrorCode as V44;
-                                            let v44 = match l42 {
-                                                0 => V44::ParseError,
-                                                1 => V44::InvalidRequest,
-                                                2 => V44::MethodNotFound,
-                                                3 => V44::InvalidParams,
-                                                4 => V44::InternalError,
-                                                5 => V44::AuthRequired,
-                                                6 => V44::ResourceNotFound,
+                                            use super::super::super::yosh::acp::errors::ErrorCode as V83;
+                                            let v83 = match l81 {
+                                                0 => V83::ParseError,
+                                                1 => V83::InvalidRequest,
+                                                2 => V83::MethodNotFound,
+                                                3 => V83::InvalidParams,
+                                                4 => V83::InternalError,
+                                                5 => V83::AuthRequired,
+                                                6 => V83::ResourceNotFound,
                                                 n => {
                                                     debug_assert_eq!(n, 7, "invalid enum discriminant");
-                                                    let e44 = {
-                                                        let l43 = *_ptr
+                                                    let e83 = {
+                                                        let l82 = *_ptr
                                                             .add(4 + 1 * ::core::mem::size_of::<*const u8>())
                                                             .cast::<i32>();
-                                                        l43
+                                                        l82
                                                     };
-                                                    V44::Other(e44)
+                                                    V83::Other(e83)
                                                 }
                                             };
-                                            let l45 = *_ptr
+                                            let l84 = *_ptr
                                                 .add(8 + 1 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<*mut u8>();
-                                            let l46 = *_ptr
+                                            let l85 = *_ptr
                                                 .add(8 + 2 * ::core::mem::size_of::<*const u8>())
                                                 .cast::<usize>();
-                                            let len47 = l46;
-                                            let bytes47 = _rt::Vec::from_raw_parts(
-                                                l45.cast(),
-                                                len47,
-                                                len47,
+                                            let len86 = l85;
+                                            let bytes86 = _rt::Vec::from_raw_parts(
+                                                l84.cast(),
+                                                len86,
+                                                len86,
                                             );
                                             super::super::super::yosh::acp::errors::Error {
-                                                code: v44,
-                                                message: _rt::string_lift(bytes47),
+                                                code: v83,
+                                                message: _rt::string_lift(bytes86),
                                             }
                                         };
                                         Err(e)
@@ -12541,6 +13826,9 @@ pub mod exports {
                 pub type AuthenticateRequest = super::super::super::super::yosh::acp::init::AuthenticateRequest;
                 pub type SessionModeId = super::super::super::super::yosh::acp::sessions::SessionModeId;
                 pub type SessionModelId = super::super::super::super::yosh::acp::sessions::SessionModelId;
+                pub type SessionConfigId = super::super::super::super::yosh::acp::sessions::SessionConfigId;
+                pub type SessionConfigValueId = super::super::super::super::yosh::acp::sessions::SessionConfigValueId;
+                pub type SessionConfigOption = super::super::super::super::yosh::acp::sessions::SessionConfigOption;
                 pub type NewSessionRequest = super::super::super::super::yosh::acp::sessions::NewSessionRequest;
                 pub type NewSessionResponse = super::super::super::super::yosh::acp::sessions::NewSessionResponse;
                 pub type LoadSessionRequest = super::super::super::super::yosh::acp::sessions::LoadSessionRequest;
@@ -13436,6 +14724,317 @@ pub mod exports {
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
                 pub unsafe fn __callback_method_session_select_model(
+                    event0: u32,
+                    event1: u32,
+                    event2: u32,
+                ) -> u32 {
+                    unsafe {
+                        wit_bindgen::rt::async_support::callback(event0, event1, event2)
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case, unused_unsafe)]
+                pub unsafe fn _export_method_session_set_config_option_cabi<
+                    T_: GuestSession,
+                >(
+                    arg0: *mut u8,
+                    arg1: *mut u8,
+                    arg2: usize,
+                    arg3: *mut u8,
+                    arg4: usize,
+                ) -> i32 {
+                    unsafe {
+                        #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
+                        wit_bindgen::rt::async_support::start_task(async move {
+                            let _task_cancel = wit_bindgen::rt::async_support::TaskCancelOnDrop::new();
+                            let mut cleanup_list = _rt::Vec::new();
+                            let result2 = &{
+                                let len0 = arg2;
+                                let bytes0 = _rt::Vec::from_raw_parts(
+                                    arg1.cast(),
+                                    len0,
+                                    len0,
+                                );
+                                let len1 = arg4;
+                                let bytes1 = _rt::Vec::from_raw_parts(
+                                    arg3.cast(),
+                                    len1,
+                                    len1,
+                                );
+                                T_::set_config_option(
+                                        SessionBorrow::lift(arg0 as u32 as usize).get(),
+                                        _rt::string_lift(bytes0),
+                                        _rt::string_lift(bytes1),
+                                    )
+                                    .await
+                            };
+                            let (
+                                result22_0,
+                                result22_1,
+                                result22_2,
+                                result22_3,
+                                result22_4,
+                            ) = match result2 {
+                                Ok(e) => {
+                                    let vec17 = e;
+                                    let len17 = vec17.len();
+                                    let layout17 = _rt::alloc::Layout::from_size_align(
+                                            vec17.len() * (17 * ::core::mem::size_of::<*const u8>()),
+                                            ::core::mem::size_of::<*const u8>(),
+                                        )
+                                        .unwrap();
+                                    let (result17, _cleanup17) = wit_bindgen::rt::Cleanup::new(
+                                        layout17,
+                                    );
+                                    cleanup_list.extend(_cleanup17);
+                                    for (i, e) in vec17.into_iter().enumerate() {
+                                        let base = result17
+                                            .add(i * (17 * ::core::mem::size_of::<*const u8>()));
+                                        {
+                                            let super::super::super::super::yosh::acp::sessions::SessionConfigOption {
+                                                id: id3,
+                                                name: name3,
+                                                description: description3,
+                                                category: category3,
+                                                current_value: current_value3,
+                                                options: options3,
+                                                provided_by: provided_by3,
+                                            } = e;
+                                            let vec4 = id3;
+                                            let ptr4 = vec4.as_ptr().cast::<u8>();
+                                            let len4 = vec4.len();
+                                            *base
+                                                .add(::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len4;
+                                            *base.add(0).cast::<*mut u8>() = ptr4.cast_mut();
+                                            let vec5 = name3;
+                                            let ptr5 = vec5.as_ptr().cast::<u8>();
+                                            let len5 = vec5.len();
+                                            *base
+                                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len5;
+                                            *base
+                                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = ptr5.cast_mut();
+                                            match description3 {
+                                                Some(e) => {
+                                                    *base
+                                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>() = (1i32) as u8;
+                                                    let vec6 = e;
+                                                    let ptr6 = vec6.as_ptr().cast::<u8>();
+                                                    let len6 = vec6.len();
+                                                    *base
+                                                        .add(6 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len6;
+                                                    *base
+                                                        .add(5 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<*mut u8>() = ptr6.cast_mut();
+                                                }
+                                                None => {
+                                                    *base
+                                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>() = (0i32) as u8;
+                                                }
+                                            };
+                                            match category3 {
+                                                Some(e) => {
+                                                    *base
+                                                        .add(7 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>() = (1i32) as u8;
+                                                    use super::super::super::super::yosh::acp::sessions::SessionConfigOptionCategory as V8;
+                                                    match e {
+                                                        V8::Mode => {
+                                                            *base
+                                                                .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (0i32) as u8;
+                                                        }
+                                                        V8::Model => {
+                                                            *base
+                                                                .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (1i32) as u8;
+                                                        }
+                                                        V8::ThoughtLevel => {
+                                                            *base
+                                                                .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (2i32) as u8;
+                                                        }
+                                                        V8::Other(e) => {
+                                                            *base
+                                                                .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (3i32) as u8;
+                                                            let vec7 = e;
+                                                            let ptr7 = vec7.as_ptr().cast::<u8>();
+                                                            let len7 = vec7.len();
+                                                            *base
+                                                                .add(10 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<usize>() = len7;
+                                                            *base
+                                                                .add(9 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<*mut u8>() = ptr7.cast_mut();
+                                                        }
+                                                    }
+                                                }
+                                                None => {
+                                                    *base
+                                                        .add(7 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>() = (0i32) as u8;
+                                                }
+                                            };
+                                            let vec9 = current_value3;
+                                            let ptr9 = vec9.as_ptr().cast::<u8>();
+                                            let len9 = vec9.len();
+                                            *base
+                                                .add(12 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len9;
+                                            *base
+                                                .add(11 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = ptr9.cast_mut();
+                                            let vec14 = options3;
+                                            let len14 = vec14.len();
+                                            let layout14 = _rt::alloc::Layout::from_size_align(
+                                                    vec14.len() * (7 * ::core::mem::size_of::<*const u8>()),
+                                                    ::core::mem::size_of::<*const u8>(),
+                                                )
+                                                .unwrap();
+                                            let (result14, _cleanup14) = wit_bindgen::rt::Cleanup::new(
+                                                layout14,
+                                            );
+                                            cleanup_list.extend(_cleanup14);
+                                            for (i, e) in vec14.into_iter().enumerate() {
+                                                let base = result14
+                                                    .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                                {
+                                                    let super::super::super::super::yosh::acp::sessions::SessionConfigSelectOption {
+                                                        value: value10,
+                                                        name: name10,
+                                                        description: description10,
+                                                    } = e;
+                                                    let vec11 = value10;
+                                                    let ptr11 = vec11.as_ptr().cast::<u8>();
+                                                    let len11 = vec11.len();
+                                                    *base
+                                                        .add(::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len11;
+                                                    *base.add(0).cast::<*mut u8>() = ptr11.cast_mut();
+                                                    let vec12 = name10;
+                                                    let ptr12 = vec12.as_ptr().cast::<u8>();
+                                                    let len12 = vec12.len();
+                                                    *base
+                                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len12;
+                                                    *base
+                                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<*mut u8>() = ptr12.cast_mut();
+                                                    match description10 {
+                                                        Some(e) => {
+                                                            *base
+                                                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (1i32) as u8;
+                                                            let vec13 = e;
+                                                            let ptr13 = vec13.as_ptr().cast::<u8>();
+                                                            let len13 = vec13.len();
+                                                            *base
+                                                                .add(6 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<usize>() = len13;
+                                                            *base
+                                                                .add(5 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<*mut u8>() = ptr13.cast_mut();
+                                                        }
+                                                        None => {
+                                                            *base
+                                                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (0i32) as u8;
+                                                        }
+                                                    };
+                                                }
+                                            }
+                                            *base
+                                                .add(14 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len14;
+                                            *base
+                                                .add(13 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = result14;
+                                            let super::super::super::super::yosh::acp::sessions::ComponentSource {
+                                                component_id: component_id15,
+                                            } = provided_by3;
+                                            let vec16 = component_id15;
+                                            let ptr16 = vec16.as_ptr().cast::<u8>();
+                                            let len16 = vec16.len();
+                                            *base
+                                                .add(16 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len16;
+                                            *base
+                                                .add(15 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = ptr16.cast_mut();
+                                        }
+                                    }
+                                    (0i32, result17, len17, ::core::ptr::null_mut(), 0usize)
+                                }
+                                Err(e) => {
+                                    let super::super::super::super::yosh::acp::errors::Error {
+                                        code: code18,
+                                        message: message18,
+                                    } = e;
+                                    use super::super::super::super::yosh::acp::errors::ErrorCode as V19;
+                                    let (result20_0, result20_1) = match code18 {
+                                        V19::ParseError => (0i32, 0i32),
+                                        V19::InvalidRequest => (1i32, 0i32),
+                                        V19::MethodNotFound => (2i32, 0i32),
+                                        V19::InvalidParams => (3i32, 0i32),
+                                        V19::InternalError => (4i32, 0i32),
+                                        V19::AuthRequired => (5i32, 0i32),
+                                        V19::ResourceNotFound => (6i32, 0i32),
+                                        V19::Other(e) => (7i32, _rt::as_i32(e)),
+                                    };
+                                    let vec21 = message18;
+                                    let ptr21 = vec21.as_ptr().cast::<u8>();
+                                    let len21 = vec21.len();
+                                    (
+                                        1i32,
+                                        result20_0 as *mut u8,
+                                        result20_1 as usize,
+                                        ptr21.cast_mut(),
+                                        len21,
+                                    )
+                                }
+                            };
+                            #[cfg(target_arch = "wasm32")]
+                            #[link(wasm_import_module = "[export]yosh:acp/agent@7.0.0")]
+                            unsafe extern "C" {
+                                #[link_name = "[task-return][method]session.set-config-option"]
+                                fn wit_import23(
+                                    _: i32,
+                                    _: *mut u8,
+                                    _: usize,
+                                    _: *mut u8,
+                                    _: usize,
+                                );
+                            }
+                            #[cfg(not(target_arch = "wasm32"))]
+                            unsafe extern "C" fn wit_import23(
+                                _: i32,
+                                _: *mut u8,
+                                _: usize,
+                                _: *mut u8,
+                                _: usize,
+                            ) {
+                                unreachable!()
+                            }
+                            _task_cancel.forget();
+                            wit_import23(
+                                result22_0,
+                                result22_1,
+                                result22_2,
+                                result22_3,
+                                result22_4,
+                            );
+                        })
+                    }
+                }
+                #[doc(hidden)]
+                #[allow(non_snake_case)]
+                pub unsafe fn __callback_method_session_set_config_option(
                     event0: u32,
                     event1: u32,
                     event2: u32,
@@ -14377,98 +15976,98 @@ pub mod exports {
                                     })
                                     .await
                             };
-                            let (
-                                result83_0,
-                                result83_1,
-                                result83_2,
-                                result83_3,
-                                result83_4,
-                                result83_5,
-                                result83_6,
-                                result83_7,
-                                result83_8,
-                                result83_9,
-                                result83_10,
-                                result83_11,
-                                result83_12,
-                                result83_13,
-                            ) = match result55 {
+                            let ptr56 = (&raw mut _RET_AREA.0).cast::<u8>();
+                            match result55 {
                                 Ok(e) => {
-                                    let (t56_0, t56_1) = e;
+                                    *ptr56.add(0).cast::<u8>() = (0i32) as u8;
+                                    let (t57_0, t57_1) = e;
+                                    *ptr56
+                                        .add(::core::mem::size_of::<*const u8>())
+                                        .cast::<i32>() = (t57_0).take_handle() as i32;
                                     let super::super::super::super::yosh::acp::sessions::NewSessionResponse {
-                                        session_id: session_id57,
-                                        modes: modes57,
-                                        models: models57,
-                                    } = t56_1;
-                                    let vec58 = session_id57;
-                                    let ptr58 = vec58.as_ptr().cast::<u8>();
-                                    let len58 = vec58.len();
-                                    let (
-                                        result68_0,
-                                        result68_1,
-                                        result68_2,
-                                        result68_3,
-                                        result68_4,
-                                    ) = match modes57 {
+                                        session_id: session_id58,
+                                        modes: modes58,
+                                        models: models58,
+                                        config_options: config_options58,
+                                    } = t57_1;
+                                    let vec59 = session_id58;
+                                    let ptr59 = vec59.as_ptr().cast::<u8>();
+                                    let len59 = vec59.len();
+                                    *ptr56
+                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len59;
+                                    *ptr56
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>() = ptr59.cast_mut();
+                                    match modes58 {
                                         Some(e) => {
+                                            *ptr56
+                                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (1i32) as u8;
                                             let super::super::super::super::yosh::acp::sessions::SessionModeState {
-                                                current_mode_id: current_mode_id59,
-                                                available_modes: available_modes59,
+                                                current_mode_id: current_mode_id60,
+                                                available_modes: available_modes60,
                                             } = e;
-                                            let vec60 = current_mode_id59;
-                                            let ptr60 = vec60.as_ptr().cast::<u8>();
-                                            let len60 = vec60.len();
-                                            let vec67 = available_modes59;
-                                            let len67 = vec67.len();
-                                            let layout67 = _rt::alloc::Layout::from_size_align(
-                                                    vec67.len() * (9 * ::core::mem::size_of::<*const u8>()),
+                                            let vec61 = current_mode_id60;
+                                            let ptr61 = vec61.as_ptr().cast::<u8>();
+                                            let len61 = vec61.len();
+                                            *ptr56
+                                                .add(6 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len61;
+                                            *ptr56
+                                                .add(5 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = ptr61.cast_mut();
+                                            let vec68 = available_modes60;
+                                            let len68 = vec68.len();
+                                            let layout68 = _rt::alloc::Layout::from_size_align(
+                                                    vec68.len() * (9 * ::core::mem::size_of::<*const u8>()),
                                                     ::core::mem::size_of::<*const u8>(),
                                                 )
                                                 .unwrap();
-                                            let (result67, _cleanup67) = wit_bindgen::rt::Cleanup::new(
-                                                layout67,
+                                            let (result68, _cleanup68) = wit_bindgen::rt::Cleanup::new(
+                                                layout68,
                                             );
-                                            cleanup_list.extend(_cleanup67);
-                                            for (i, e) in vec67.into_iter().enumerate() {
-                                                let base = result67
+                                            cleanup_list.extend(_cleanup68);
+                                            for (i, e) in vec68.into_iter().enumerate() {
+                                                let base = result68
                                                     .add(i * (9 * ::core::mem::size_of::<*const u8>()));
                                                 {
                                                     let super::super::super::super::yosh::acp::sessions::SessionMode {
-                                                        id: id61,
-                                                        name: name61,
-                                                        description: description61,
-                                                        provided_by: provided_by61,
+                                                        id: id62,
+                                                        name: name62,
+                                                        description: description62,
+                                                        provided_by: provided_by62,
                                                     } = e;
-                                                    let vec62 = id61;
-                                                    let ptr62 = vec62.as_ptr().cast::<u8>();
-                                                    let len62 = vec62.len();
-                                                    *base
-                                                        .add(::core::mem::size_of::<*const u8>())
-                                                        .cast::<usize>() = len62;
-                                                    *base.add(0).cast::<*mut u8>() = ptr62.cast_mut();
-                                                    let vec63 = name61;
+                                                    let vec63 = id62;
                                                     let ptr63 = vec63.as_ptr().cast::<u8>();
                                                     let len63 = vec63.len();
                                                     *base
-                                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                                        .add(::core::mem::size_of::<*const u8>())
                                                         .cast::<usize>() = len63;
+                                                    *base.add(0).cast::<*mut u8>() = ptr63.cast_mut();
+                                                    let vec64 = name62;
+                                                    let ptr64 = vec64.as_ptr().cast::<u8>();
+                                                    let len64 = vec64.len();
+                                                    *base
+                                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len64;
                                                     *base
                                                         .add(2 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<*mut u8>() = ptr63.cast_mut();
-                                                    match description61 {
+                                                        .cast::<*mut u8>() = ptr64.cast_mut();
+                                                    match description62 {
                                                         Some(e) => {
                                                             *base
                                                                 .add(4 * ::core::mem::size_of::<*const u8>())
                                                                 .cast::<u8>() = (1i32) as u8;
-                                                            let vec64 = e;
-                                                            let ptr64 = vec64.as_ptr().cast::<u8>();
-                                                            let len64 = vec64.len();
+                                                            let vec65 = e;
+                                                            let ptr65 = vec65.as_ptr().cast::<u8>();
+                                                            let len65 = vec65.len();
                                                             *base
                                                                 .add(6 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<usize>() = len64;
+                                                                .cast::<usize>() = len65;
                                                             *base
                                                                 .add(5 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<*mut u8>() = ptr64.cast_mut();
+                                                                .cast::<*mut u8>() = ptr65.cast_mut();
                                                         }
                                                         None => {
                                                             *base
@@ -14477,39 +16076,37 @@ pub mod exports {
                                                         }
                                                     };
                                                     let super::super::super::super::yosh::acp::sessions::ComponentSource {
-                                                        component_id: component_id65,
-                                                    } = provided_by61;
-                                                    let vec66 = component_id65;
-                                                    let ptr66 = vec66.as_ptr().cast::<u8>();
-                                                    let len66 = vec66.len();
+                                                        component_id: component_id66,
+                                                    } = provided_by62;
+                                                    let vec67 = component_id66;
+                                                    let ptr67 = vec67.as_ptr().cast::<u8>();
+                                                    let len67 = vec67.len();
                                                     *base
                                                         .add(8 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<usize>() = len66;
+                                                        .cast::<usize>() = len67;
                                                     *base
                                                         .add(7 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<*mut u8>() = ptr66.cast_mut();
+                                                        .cast::<*mut u8>() = ptr67.cast_mut();
                                                 }
                                             }
-                                            (1i32, ptr60.cast_mut(), len60, result67, len67)
+                                            *ptr56
+                                                .add(8 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len68;
+                                            *ptr56
+                                                .add(7 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = result68;
                                         }
                                         None => {
-                                            (
-                                                0i32,
-                                                ::core::ptr::null_mut(),
-                                                0usize,
-                                                ::core::ptr::null_mut(),
-                                                0usize,
-                                            )
+                                            *ptr56
+                                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (0i32) as u8;
                                         }
                                     };
-                                    let (
-                                        result78_0,
-                                        result78_1,
-                                        result78_2,
-                                        result78_3,
-                                        result78_4,
-                                    ) = match models57 {
+                                    match models58 {
                                         Some(e) => {
+                                            *ptr56
+                                                .add(9 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (1i32) as u8;
                                             let super::super::super::super::yosh::acp::sessions::SessionModelState {
                                                 current_model_id: current_model_id69,
                                                 available_models: available_models69,
@@ -14517,6 +16114,12 @@ pub mod exports {
                                             let vec70 = current_model_id69;
                                             let ptr70 = vec70.as_ptr().cast::<u8>();
                                             let len70 = vec70.len();
+                                            *ptr56
+                                                .add(11 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len70;
+                                            *ptr56
+                                                .add(10 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = ptr70.cast_mut();
                                             let vec77 = available_models69;
                                             let len77 = vec77.len();
                                             let layout77 = _rt::alloc::Layout::from_size_align(
@@ -14589,129 +16192,306 @@ pub mod exports {
                                                         .cast::<*mut u8>() = ptr76.cast_mut();
                                                 }
                                             }
-                                            (1i32, ptr70.cast_mut(), len70, result77, len77)
+                                            *ptr56
+                                                .add(13 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len77;
+                                            *ptr56
+                                                .add(12 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = result77;
                                         }
                                         None => {
-                                            (
-                                                0i32,
-                                                ::core::ptr::null_mut(),
-                                                0usize,
-                                                ::core::ptr::null_mut(),
-                                                0usize,
-                                            )
+                                            *ptr56
+                                                .add(9 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (0i32) as u8;
                                         }
                                     };
-                                    (
-                                        0i32,
-                                        (t56_0).take_handle() as i32,
-                                        ptr58.cast_mut(),
-                                        len58 as *mut u8,
-                                        result68_0 as usize,
-                                        result68_1,
-                                        result68_2,
-                                        result68_3,
-                                        result68_4,
-                                        result78_0,
-                                        result78_1,
-                                        result78_2,
-                                        result78_3,
-                                        result78_4,
-                                    )
+                                    match config_options58 {
+                                        Some(e) => {
+                                            *ptr56
+                                                .add(14 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (1i32) as u8;
+                                            let vec92 = e;
+                                            let len92 = vec92.len();
+                                            let layout92 = _rt::alloc::Layout::from_size_align(
+                                                    vec92.len() * (17 * ::core::mem::size_of::<*const u8>()),
+                                                    ::core::mem::size_of::<*const u8>(),
+                                                )
+                                                .unwrap();
+                                            let (result92, _cleanup92) = wit_bindgen::rt::Cleanup::new(
+                                                layout92,
+                                            );
+                                            cleanup_list.extend(_cleanup92);
+                                            for (i, e) in vec92.into_iter().enumerate() {
+                                                let base = result92
+                                                    .add(i * (17 * ::core::mem::size_of::<*const u8>()));
+                                                {
+                                                    let super::super::super::super::yosh::acp::sessions::SessionConfigOption {
+                                                        id: id78,
+                                                        name: name78,
+                                                        description: description78,
+                                                        category: category78,
+                                                        current_value: current_value78,
+                                                        options: options78,
+                                                        provided_by: provided_by78,
+                                                    } = e;
+                                                    let vec79 = id78;
+                                                    let ptr79 = vec79.as_ptr().cast::<u8>();
+                                                    let len79 = vec79.len();
+                                                    *base
+                                                        .add(::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len79;
+                                                    *base.add(0).cast::<*mut u8>() = ptr79.cast_mut();
+                                                    let vec80 = name78;
+                                                    let ptr80 = vec80.as_ptr().cast::<u8>();
+                                                    let len80 = vec80.len();
+                                                    *base
+                                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len80;
+                                                    *base
+                                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<*mut u8>() = ptr80.cast_mut();
+                                                    match description78 {
+                                                        Some(e) => {
+                                                            *base
+                                                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (1i32) as u8;
+                                                            let vec81 = e;
+                                                            let ptr81 = vec81.as_ptr().cast::<u8>();
+                                                            let len81 = vec81.len();
+                                                            *base
+                                                                .add(6 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<usize>() = len81;
+                                                            *base
+                                                                .add(5 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<*mut u8>() = ptr81.cast_mut();
+                                                        }
+                                                        None => {
+                                                            *base
+                                                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (0i32) as u8;
+                                                        }
+                                                    };
+                                                    match category78 {
+                                                        Some(e) => {
+                                                            *base
+                                                                .add(7 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (1i32) as u8;
+                                                            use super::super::super::super::yosh::acp::sessions::SessionConfigOptionCategory as V83;
+                                                            match e {
+                                                                V83::Mode => {
+                                                                    *base
+                                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (0i32) as u8;
+                                                                }
+                                                                V83::Model => {
+                                                                    *base
+                                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (1i32) as u8;
+                                                                }
+                                                                V83::ThoughtLevel => {
+                                                                    *base
+                                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (2i32) as u8;
+                                                                }
+                                                                V83::Other(e) => {
+                                                                    *base
+                                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (3i32) as u8;
+                                                                    let vec82 = e;
+                                                                    let ptr82 = vec82.as_ptr().cast::<u8>();
+                                                                    let len82 = vec82.len();
+                                                                    *base
+                                                                        .add(10 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<usize>() = len82;
+                                                                    *base
+                                                                        .add(9 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<*mut u8>() = ptr82.cast_mut();
+                                                                }
+                                                            }
+                                                        }
+                                                        None => {
+                                                            *base
+                                                                .add(7 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (0i32) as u8;
+                                                        }
+                                                    };
+                                                    let vec84 = current_value78;
+                                                    let ptr84 = vec84.as_ptr().cast::<u8>();
+                                                    let len84 = vec84.len();
+                                                    *base
+                                                        .add(12 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len84;
+                                                    *base
+                                                        .add(11 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<*mut u8>() = ptr84.cast_mut();
+                                                    let vec89 = options78;
+                                                    let len89 = vec89.len();
+                                                    let layout89 = _rt::alloc::Layout::from_size_align(
+                                                            vec89.len() * (7 * ::core::mem::size_of::<*const u8>()),
+                                                            ::core::mem::size_of::<*const u8>(),
+                                                        )
+                                                        .unwrap();
+                                                    let (result89, _cleanup89) = wit_bindgen::rt::Cleanup::new(
+                                                        layout89,
+                                                    );
+                                                    cleanup_list.extend(_cleanup89);
+                                                    for (i, e) in vec89.into_iter().enumerate() {
+                                                        let base = result89
+                                                            .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                                        {
+                                                            let super::super::super::super::yosh::acp::sessions::SessionConfigSelectOption {
+                                                                value: value85,
+                                                                name: name85,
+                                                                description: description85,
+                                                            } = e;
+                                                            let vec86 = value85;
+                                                            let ptr86 = vec86.as_ptr().cast::<u8>();
+                                                            let len86 = vec86.len();
+                                                            *base
+                                                                .add(::core::mem::size_of::<*const u8>())
+                                                                .cast::<usize>() = len86;
+                                                            *base.add(0).cast::<*mut u8>() = ptr86.cast_mut();
+                                                            let vec87 = name85;
+                                                            let ptr87 = vec87.as_ptr().cast::<u8>();
+                                                            let len87 = vec87.len();
+                                                            *base
+                                                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<usize>() = len87;
+                                                            *base
+                                                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<*mut u8>() = ptr87.cast_mut();
+                                                            match description85 {
+                                                                Some(e) => {
+                                                                    *base
+                                                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (1i32) as u8;
+                                                                    let vec88 = e;
+                                                                    let ptr88 = vec88.as_ptr().cast::<u8>();
+                                                                    let len88 = vec88.len();
+                                                                    *base
+                                                                        .add(6 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<usize>() = len88;
+                                                                    *base
+                                                                        .add(5 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<*mut u8>() = ptr88.cast_mut();
+                                                                }
+                                                                None => {
+                                                                    *base
+                                                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (0i32) as u8;
+                                                                }
+                                                            };
+                                                        }
+                                                    }
+                                                    *base
+                                                        .add(14 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len89;
+                                                    *base
+                                                        .add(13 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<*mut u8>() = result89;
+                                                    let super::super::super::super::yosh::acp::sessions::ComponentSource {
+                                                        component_id: component_id90,
+                                                    } = provided_by78;
+                                                    let vec91 = component_id90;
+                                                    let ptr91 = vec91.as_ptr().cast::<u8>();
+                                                    let len91 = vec91.len();
+                                                    *base
+                                                        .add(16 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len91;
+                                                    *base
+                                                        .add(15 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<*mut u8>() = ptr91.cast_mut();
+                                                }
+                                            }
+                                            *ptr56
+                                                .add(16 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<usize>() = len92;
+                                            *ptr56
+                                                .add(15 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<*mut u8>() = result92;
+                                        }
+                                        None => {
+                                            *ptr56
+                                                .add(14 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (0i32) as u8;
+                                        }
+                                    };
                                 }
                                 Err(e) => {
+                                    *ptr56.add(0).cast::<u8>() = (1i32) as u8;
                                     let super::super::super::super::yosh::acp::errors::Error {
-                                        code: code79,
-                                        message: message79,
+                                        code: code93,
+                                        message: message93,
                                     } = e;
-                                    use super::super::super::super::yosh::acp::errors::ErrorCode as V80;
-                                    let (result81_0, result81_1) = match code79 {
-                                        V80::ParseError => (0i32, 0i32),
-                                        V80::InvalidRequest => (1i32, 0i32),
-                                        V80::MethodNotFound => (2i32, 0i32),
-                                        V80::InvalidParams => (3i32, 0i32),
-                                        V80::InternalError => (4i32, 0i32),
-                                        V80::AuthRequired => (5i32, 0i32),
-                                        V80::ResourceNotFound => (6i32, 0i32),
-                                        V80::Other(e) => (7i32, _rt::as_i32(e)),
-                                    };
-                                    let vec82 = message79;
-                                    let ptr82 = vec82.as_ptr().cast::<u8>();
-                                    let len82 = vec82.len();
-                                    (
-                                        1i32,
-                                        result81_0,
-                                        result81_1 as *mut u8,
-                                        ptr82.cast_mut(),
-                                        len82,
-                                        ::core::ptr::null_mut(),
-                                        0usize,
-                                        ::core::ptr::null_mut(),
-                                        0usize,
-                                        0i32,
-                                        ::core::ptr::null_mut(),
-                                        0usize,
-                                        ::core::ptr::null_mut(),
-                                        0usize,
-                                    )
+                                    use super::super::super::super::yosh::acp::errors::ErrorCode as V94;
+                                    match code93 {
+                                        V94::ParseError => {
+                                            *ptr56
+                                                .add(::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (0i32) as u8;
+                                        }
+                                        V94::InvalidRequest => {
+                                            *ptr56
+                                                .add(::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (1i32) as u8;
+                                        }
+                                        V94::MethodNotFound => {
+                                            *ptr56
+                                                .add(::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (2i32) as u8;
+                                        }
+                                        V94::InvalidParams => {
+                                            *ptr56
+                                                .add(::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (3i32) as u8;
+                                        }
+                                        V94::InternalError => {
+                                            *ptr56
+                                                .add(::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (4i32) as u8;
+                                        }
+                                        V94::AuthRequired => {
+                                            *ptr56
+                                                .add(::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (5i32) as u8;
+                                        }
+                                        V94::ResourceNotFound => {
+                                            *ptr56
+                                                .add(::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (6i32) as u8;
+                                        }
+                                        V94::Other(e) => {
+                                            *ptr56
+                                                .add(::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>() = (7i32) as u8;
+                                            *ptr56
+                                                .add(4 + 1 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<i32>() = _rt::as_i32(e);
+                                        }
+                                    }
+                                    let vec95 = message93;
+                                    let ptr95 = vec95.as_ptr().cast::<u8>();
+                                    let len95 = vec95.len();
+                                    *ptr56
+                                        .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<usize>() = len95;
+                                    *ptr56
+                                        .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<*mut u8>() = ptr95.cast_mut();
                                 }
                             };
                             #[cfg(target_arch = "wasm32")]
                             #[link(wasm_import_module = "[export]yosh:acp/agent@7.0.0")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]new-session"]
-                                fn wit_import84(
-                                    _: i32,
-                                    _: i32,
-                                    _: *mut u8,
-                                    _: *mut u8,
-                                    _: usize,
-                                    _: *mut u8,
-                                    _: usize,
-                                    _: *mut u8,
-                                    _: usize,
-                                    _: i32,
-                                    _: *mut u8,
-                                    _: usize,
-                                    _: *mut u8,
-                                    _: usize,
-                                );
+                                fn wit_import96(_: *mut u8);
                             }
                             #[cfg(not(target_arch = "wasm32"))]
-                            unsafe extern "C" fn wit_import84(
-                                _: i32,
-                                _: i32,
-                                _: *mut u8,
-                                _: *mut u8,
-                                _: usize,
-                                _: *mut u8,
-                                _: usize,
-                                _: *mut u8,
-                                _: usize,
-                                _: i32,
-                                _: *mut u8,
-                                _: usize,
-                                _: *mut u8,
-                                _: usize,
-                            ) {
+                            unsafe extern "C" fn wit_import96(_: *mut u8) {
                                 unreachable!()
                             }
                             _task_cancel.forget();
-                            wit_import84(
-                                result83_0,
-                                result83_1,
-                                result83_2,
-                                result83_3,
-                                result83_4,
-                                result83_5,
-                                result83_6,
-                                result83_7,
-                                result83_8,
-                                result83_9,
-                                result83_10,
-                                result83_11,
-                                result83_12,
-                                result83_13,
-                            );
+                            wit_import96(ptr56);
                         })
                     }
                 }
@@ -15059,24 +16839,28 @@ pub mod exports {
                                     .await
                             };
                             let (
-                                result83_0,
-                                result83_1,
-                                result83_2,
-                                result83_3,
-                                result83_4,
-                                result83_5,
-                                result83_6,
-                                result83_7,
-                                result83_8,
-                                result83_9,
-                                result83_10,
-                                result83_11,
+                                result99_0,
+                                result99_1,
+                                result99_2,
+                                result99_3,
+                                result99_4,
+                                result99_5,
+                                result99_6,
+                                result99_7,
+                                result99_8,
+                                result99_9,
+                                result99_10,
+                                result99_11,
+                                result99_12,
+                                result99_13,
+                                result99_14,
                             ) = match result56 {
                                 Ok(e) => {
                                     let (t57_0, t57_1) = e;
                                     let super::super::super::super::yosh::acp::sessions::LoadSessionResponse {
                                         modes: modes58,
                                         models: models58,
+                                        config_options: config_options58,
                                     } = t57_1;
                                     let (
                                         result68_0,
@@ -15276,6 +17060,205 @@ pub mod exports {
                                             )
                                         }
                                     };
+                                    let (result94_0, result94_1, result94_2) = match config_options58 {
+                                        Some(e) => {
+                                            let vec93 = e;
+                                            let len93 = vec93.len();
+                                            let layout93 = _rt::alloc::Layout::from_size_align(
+                                                    vec93.len() * (17 * ::core::mem::size_of::<*const u8>()),
+                                                    ::core::mem::size_of::<*const u8>(),
+                                                )
+                                                .unwrap();
+                                            let (result93, _cleanup93) = wit_bindgen::rt::Cleanup::new(
+                                                layout93,
+                                            );
+                                            cleanup_list.extend(_cleanup93);
+                                            for (i, e) in vec93.into_iter().enumerate() {
+                                                let base = result93
+                                                    .add(i * (17 * ::core::mem::size_of::<*const u8>()));
+                                                {
+                                                    let super::super::super::super::yosh::acp::sessions::SessionConfigOption {
+                                                        id: id79,
+                                                        name: name79,
+                                                        description: description79,
+                                                        category: category79,
+                                                        current_value: current_value79,
+                                                        options: options79,
+                                                        provided_by: provided_by79,
+                                                    } = e;
+                                                    let vec80 = id79;
+                                                    let ptr80 = vec80.as_ptr().cast::<u8>();
+                                                    let len80 = vec80.len();
+                                                    *base
+                                                        .add(::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len80;
+                                                    *base.add(0).cast::<*mut u8>() = ptr80.cast_mut();
+                                                    let vec81 = name79;
+                                                    let ptr81 = vec81.as_ptr().cast::<u8>();
+                                                    let len81 = vec81.len();
+                                                    *base
+                                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len81;
+                                                    *base
+                                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<*mut u8>() = ptr81.cast_mut();
+                                                    match description79 {
+                                                        Some(e) => {
+                                                            *base
+                                                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (1i32) as u8;
+                                                            let vec82 = e;
+                                                            let ptr82 = vec82.as_ptr().cast::<u8>();
+                                                            let len82 = vec82.len();
+                                                            *base
+                                                                .add(6 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<usize>() = len82;
+                                                            *base
+                                                                .add(5 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<*mut u8>() = ptr82.cast_mut();
+                                                        }
+                                                        None => {
+                                                            *base
+                                                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (0i32) as u8;
+                                                        }
+                                                    };
+                                                    match category79 {
+                                                        Some(e) => {
+                                                            *base
+                                                                .add(7 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (1i32) as u8;
+                                                            use super::super::super::super::yosh::acp::sessions::SessionConfigOptionCategory as V84;
+                                                            match e {
+                                                                V84::Mode => {
+                                                                    *base
+                                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (0i32) as u8;
+                                                                }
+                                                                V84::Model => {
+                                                                    *base
+                                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (1i32) as u8;
+                                                                }
+                                                                V84::ThoughtLevel => {
+                                                                    *base
+                                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (2i32) as u8;
+                                                                }
+                                                                V84::Other(e) => {
+                                                                    *base
+                                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (3i32) as u8;
+                                                                    let vec83 = e;
+                                                                    let ptr83 = vec83.as_ptr().cast::<u8>();
+                                                                    let len83 = vec83.len();
+                                                                    *base
+                                                                        .add(10 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<usize>() = len83;
+                                                                    *base
+                                                                        .add(9 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<*mut u8>() = ptr83.cast_mut();
+                                                                }
+                                                            }
+                                                        }
+                                                        None => {
+                                                            *base
+                                                                .add(7 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (0i32) as u8;
+                                                        }
+                                                    };
+                                                    let vec85 = current_value79;
+                                                    let ptr85 = vec85.as_ptr().cast::<u8>();
+                                                    let len85 = vec85.len();
+                                                    *base
+                                                        .add(12 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len85;
+                                                    *base
+                                                        .add(11 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<*mut u8>() = ptr85.cast_mut();
+                                                    let vec90 = options79;
+                                                    let len90 = vec90.len();
+                                                    let layout90 = _rt::alloc::Layout::from_size_align(
+                                                            vec90.len() * (7 * ::core::mem::size_of::<*const u8>()),
+                                                            ::core::mem::size_of::<*const u8>(),
+                                                        )
+                                                        .unwrap();
+                                                    let (result90, _cleanup90) = wit_bindgen::rt::Cleanup::new(
+                                                        layout90,
+                                                    );
+                                                    cleanup_list.extend(_cleanup90);
+                                                    for (i, e) in vec90.into_iter().enumerate() {
+                                                        let base = result90
+                                                            .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                                        {
+                                                            let super::super::super::super::yosh::acp::sessions::SessionConfigSelectOption {
+                                                                value: value86,
+                                                                name: name86,
+                                                                description: description86,
+                                                            } = e;
+                                                            let vec87 = value86;
+                                                            let ptr87 = vec87.as_ptr().cast::<u8>();
+                                                            let len87 = vec87.len();
+                                                            *base
+                                                                .add(::core::mem::size_of::<*const u8>())
+                                                                .cast::<usize>() = len87;
+                                                            *base.add(0).cast::<*mut u8>() = ptr87.cast_mut();
+                                                            let vec88 = name86;
+                                                            let ptr88 = vec88.as_ptr().cast::<u8>();
+                                                            let len88 = vec88.len();
+                                                            *base
+                                                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<usize>() = len88;
+                                                            *base
+                                                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<*mut u8>() = ptr88.cast_mut();
+                                                            match description86 {
+                                                                Some(e) => {
+                                                                    *base
+                                                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (1i32) as u8;
+                                                                    let vec89 = e;
+                                                                    let ptr89 = vec89.as_ptr().cast::<u8>();
+                                                                    let len89 = vec89.len();
+                                                                    *base
+                                                                        .add(6 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<usize>() = len89;
+                                                                    *base
+                                                                        .add(5 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<*mut u8>() = ptr89.cast_mut();
+                                                                }
+                                                                None => {
+                                                                    *base
+                                                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (0i32) as u8;
+                                                                }
+                                                            };
+                                                        }
+                                                    }
+                                                    *base
+                                                        .add(14 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len90;
+                                                    *base
+                                                        .add(13 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<*mut u8>() = result90;
+                                                    let super::super::super::super::yosh::acp::sessions::ComponentSource {
+                                                        component_id: component_id91,
+                                                    } = provided_by79;
+                                                    let vec92 = component_id91;
+                                                    let ptr92 = vec92.as_ptr().cast::<u8>();
+                                                    let len92 = vec92.len();
+                                                    *base
+                                                        .add(16 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len92;
+                                                    *base
+                                                        .add(15 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<*mut u8>() = ptr92.cast_mut();
+                                                }
+                                            }
+                                            (1i32, result93, len93)
+                                        }
+                                        None => (0i32, ::core::ptr::null_mut(), 0usize),
+                                    };
                                     (
                                         0i32,
                                         (t57_0).take_handle() as i32,
@@ -15289,38 +17272,44 @@ pub mod exports {
                                         result78_2,
                                         result78_3,
                                         result78_4,
+                                        result94_0,
+                                        result94_1,
+                                        result94_2,
                                     )
                                 }
                                 Err(e) => {
                                     let super::super::super::super::yosh::acp::errors::Error {
-                                        code: code79,
-                                        message: message79,
+                                        code: code95,
+                                        message: message95,
                                     } = e;
-                                    use super::super::super::super::yosh::acp::errors::ErrorCode as V80;
-                                    let (result81_0, result81_1) = match code79 {
-                                        V80::ParseError => (0i32, 0i32),
-                                        V80::InvalidRequest => (1i32, 0i32),
-                                        V80::MethodNotFound => (2i32, 0i32),
-                                        V80::InvalidParams => (3i32, 0i32),
-                                        V80::InternalError => (4i32, 0i32),
-                                        V80::AuthRequired => (5i32, 0i32),
-                                        V80::ResourceNotFound => (6i32, 0i32),
-                                        V80::Other(e) => (7i32, _rt::as_i32(e)),
+                                    use super::super::super::super::yosh::acp::errors::ErrorCode as V96;
+                                    let (result97_0, result97_1) = match code95 {
+                                        V96::ParseError => (0i32, 0i32),
+                                        V96::InvalidRequest => (1i32, 0i32),
+                                        V96::MethodNotFound => (2i32, 0i32),
+                                        V96::InvalidParams => (3i32, 0i32),
+                                        V96::InternalError => (4i32, 0i32),
+                                        V96::AuthRequired => (5i32, 0i32),
+                                        V96::ResourceNotFound => (6i32, 0i32),
+                                        V96::Other(e) => (7i32, _rt::as_i32(e)),
                                     };
-                                    let vec82 = message79;
-                                    let ptr82 = vec82.as_ptr().cast::<u8>();
-                                    let len82 = vec82.len();
+                                    let vec98 = message95;
+                                    let ptr98 = vec98.as_ptr().cast::<u8>();
+                                    let len98 = vec98.len();
                                     (
                                         1i32,
-                                        result81_0,
-                                        result81_1,
-                                        ptr82.cast_mut(),
-                                        len82,
+                                        result97_0,
+                                        result97_1,
+                                        ptr98.cast_mut(),
+                                        len98,
                                         ::core::ptr::null_mut(),
                                         0usize,
                                         0i32,
                                         ::core::ptr::null_mut(),
                                         0usize,
+                                        ::core::ptr::null_mut(),
+                                        0usize,
+                                        0i32,
                                         ::core::ptr::null_mut(),
                                         0usize,
                                     )
@@ -15330,7 +17319,7 @@ pub mod exports {
                             #[link(wasm_import_module = "[export]yosh:acp/agent@7.0.0")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]load-session"]
-                                fn wit_import84(
+                                fn wit_import100(
                                     _: i32,
                                     _: i32,
                                     _: i32,
@@ -15341,12 +17330,15 @@ pub mod exports {
                                     _: i32,
                                     _: *mut u8,
                                     _: usize,
+                                    _: *mut u8,
+                                    _: usize,
+                                    _: i32,
                                     _: *mut u8,
                                     _: usize,
                                 );
                             }
                             #[cfg(not(target_arch = "wasm32"))]
-                            unsafe extern "C" fn wit_import84(
+                            unsafe extern "C" fn wit_import100(
                                 _: i32,
                                 _: i32,
                                 _: i32,
@@ -15357,25 +17349,31 @@ pub mod exports {
                                 _: i32,
                                 _: *mut u8,
                                 _: usize,
+                                _: *mut u8,
+                                _: usize,
+                                _: i32,
                                 _: *mut u8,
                                 _: usize,
                             ) {
                                 unreachable!()
                             }
                             _task_cancel.forget();
-                            wit_import84(
-                                result83_0,
-                                result83_1,
-                                result83_2,
-                                result83_3,
-                                result83_4,
-                                result83_5,
-                                result83_6,
-                                result83_7,
-                                result83_8,
-                                result83_9,
-                                result83_10,
-                                result83_11,
+                            wit_import100(
+                                result99_0,
+                                result99_1,
+                                result99_2,
+                                result99_3,
+                                result99_4,
+                                result99_5,
+                                result99_6,
+                                result99_7,
+                                result99_8,
+                                result99_9,
+                                result99_10,
+                                result99_11,
+                                result99_12,
+                                result99_13,
+                                result99_14,
                             );
                         })
                     }
@@ -15964,24 +17962,28 @@ pub mod exports {
                                     .await
                             };
                             let (
-                                result83_0,
-                                result83_1,
-                                result83_2,
-                                result83_3,
-                                result83_4,
-                                result83_5,
-                                result83_6,
-                                result83_7,
-                                result83_8,
-                                result83_9,
-                                result83_10,
-                                result83_11,
+                                result99_0,
+                                result99_1,
+                                result99_2,
+                                result99_3,
+                                result99_4,
+                                result99_5,
+                                result99_6,
+                                result99_7,
+                                result99_8,
+                                result99_9,
+                                result99_10,
+                                result99_11,
+                                result99_12,
+                                result99_13,
+                                result99_14,
                             ) = match result56 {
                                 Ok(e) => {
                                     let (t57_0, t57_1) = e;
                                     let super::super::super::super::yosh::acp::sessions::ResumeSessionResponse {
                                         modes: modes58,
                                         models: models58,
+                                        config_options: config_options58,
                                     } = t57_1;
                                     let (
                                         result68_0,
@@ -16181,6 +18183,205 @@ pub mod exports {
                                             )
                                         }
                                     };
+                                    let (result94_0, result94_1, result94_2) = match config_options58 {
+                                        Some(e) => {
+                                            let vec93 = e;
+                                            let len93 = vec93.len();
+                                            let layout93 = _rt::alloc::Layout::from_size_align(
+                                                    vec93.len() * (17 * ::core::mem::size_of::<*const u8>()),
+                                                    ::core::mem::size_of::<*const u8>(),
+                                                )
+                                                .unwrap();
+                                            let (result93, _cleanup93) = wit_bindgen::rt::Cleanup::new(
+                                                layout93,
+                                            );
+                                            cleanup_list.extend(_cleanup93);
+                                            for (i, e) in vec93.into_iter().enumerate() {
+                                                let base = result93
+                                                    .add(i * (17 * ::core::mem::size_of::<*const u8>()));
+                                                {
+                                                    let super::super::super::super::yosh::acp::sessions::SessionConfigOption {
+                                                        id: id79,
+                                                        name: name79,
+                                                        description: description79,
+                                                        category: category79,
+                                                        current_value: current_value79,
+                                                        options: options79,
+                                                        provided_by: provided_by79,
+                                                    } = e;
+                                                    let vec80 = id79;
+                                                    let ptr80 = vec80.as_ptr().cast::<u8>();
+                                                    let len80 = vec80.len();
+                                                    *base
+                                                        .add(::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len80;
+                                                    *base.add(0).cast::<*mut u8>() = ptr80.cast_mut();
+                                                    let vec81 = name79;
+                                                    let ptr81 = vec81.as_ptr().cast::<u8>();
+                                                    let len81 = vec81.len();
+                                                    *base
+                                                        .add(3 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len81;
+                                                    *base
+                                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<*mut u8>() = ptr81.cast_mut();
+                                                    match description79 {
+                                                        Some(e) => {
+                                                            *base
+                                                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (1i32) as u8;
+                                                            let vec82 = e;
+                                                            let ptr82 = vec82.as_ptr().cast::<u8>();
+                                                            let len82 = vec82.len();
+                                                            *base
+                                                                .add(6 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<usize>() = len82;
+                                                            *base
+                                                                .add(5 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<*mut u8>() = ptr82.cast_mut();
+                                                        }
+                                                        None => {
+                                                            *base
+                                                                .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (0i32) as u8;
+                                                        }
+                                                    };
+                                                    match category79 {
+                                                        Some(e) => {
+                                                            *base
+                                                                .add(7 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (1i32) as u8;
+                                                            use super::super::super::super::yosh::acp::sessions::SessionConfigOptionCategory as V84;
+                                                            match e {
+                                                                V84::Mode => {
+                                                                    *base
+                                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (0i32) as u8;
+                                                                }
+                                                                V84::Model => {
+                                                                    *base
+                                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (1i32) as u8;
+                                                                }
+                                                                V84::ThoughtLevel => {
+                                                                    *base
+                                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (2i32) as u8;
+                                                                }
+                                                                V84::Other(e) => {
+                                                                    *base
+                                                                        .add(8 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (3i32) as u8;
+                                                                    let vec83 = e;
+                                                                    let ptr83 = vec83.as_ptr().cast::<u8>();
+                                                                    let len83 = vec83.len();
+                                                                    *base
+                                                                        .add(10 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<usize>() = len83;
+                                                                    *base
+                                                                        .add(9 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<*mut u8>() = ptr83.cast_mut();
+                                                                }
+                                                            }
+                                                        }
+                                                        None => {
+                                                            *base
+                                                                .add(7 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>() = (0i32) as u8;
+                                                        }
+                                                    };
+                                                    let vec85 = current_value79;
+                                                    let ptr85 = vec85.as_ptr().cast::<u8>();
+                                                    let len85 = vec85.len();
+                                                    *base
+                                                        .add(12 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len85;
+                                                    *base
+                                                        .add(11 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<*mut u8>() = ptr85.cast_mut();
+                                                    let vec90 = options79;
+                                                    let len90 = vec90.len();
+                                                    let layout90 = _rt::alloc::Layout::from_size_align(
+                                                            vec90.len() * (7 * ::core::mem::size_of::<*const u8>()),
+                                                            ::core::mem::size_of::<*const u8>(),
+                                                        )
+                                                        .unwrap();
+                                                    let (result90, _cleanup90) = wit_bindgen::rt::Cleanup::new(
+                                                        layout90,
+                                                    );
+                                                    cleanup_list.extend(_cleanup90);
+                                                    for (i, e) in vec90.into_iter().enumerate() {
+                                                        let base = result90
+                                                            .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                                        {
+                                                            let super::super::super::super::yosh::acp::sessions::SessionConfigSelectOption {
+                                                                value: value86,
+                                                                name: name86,
+                                                                description: description86,
+                                                            } = e;
+                                                            let vec87 = value86;
+                                                            let ptr87 = vec87.as_ptr().cast::<u8>();
+                                                            let len87 = vec87.len();
+                                                            *base
+                                                                .add(::core::mem::size_of::<*const u8>())
+                                                                .cast::<usize>() = len87;
+                                                            *base.add(0).cast::<*mut u8>() = ptr87.cast_mut();
+                                                            let vec88 = name86;
+                                                            let ptr88 = vec88.as_ptr().cast::<u8>();
+                                                            let len88 = vec88.len();
+                                                            *base
+                                                                .add(3 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<usize>() = len88;
+                                                            *base
+                                                                .add(2 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<*mut u8>() = ptr88.cast_mut();
+                                                            match description86 {
+                                                                Some(e) => {
+                                                                    *base
+                                                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (1i32) as u8;
+                                                                    let vec89 = e;
+                                                                    let ptr89 = vec89.as_ptr().cast::<u8>();
+                                                                    let len89 = vec89.len();
+                                                                    *base
+                                                                        .add(6 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<usize>() = len89;
+                                                                    *base
+                                                                        .add(5 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<*mut u8>() = ptr89.cast_mut();
+                                                                }
+                                                                None => {
+                                                                    *base
+                                                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>() = (0i32) as u8;
+                                                                }
+                                                            };
+                                                        }
+                                                    }
+                                                    *base
+                                                        .add(14 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len90;
+                                                    *base
+                                                        .add(13 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<*mut u8>() = result90;
+                                                    let super::super::super::super::yosh::acp::sessions::ComponentSource {
+                                                        component_id: component_id91,
+                                                    } = provided_by79;
+                                                    let vec92 = component_id91;
+                                                    let ptr92 = vec92.as_ptr().cast::<u8>();
+                                                    let len92 = vec92.len();
+                                                    *base
+                                                        .add(16 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<usize>() = len92;
+                                                    *base
+                                                        .add(15 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<*mut u8>() = ptr92.cast_mut();
+                                                }
+                                            }
+                                            (1i32, result93, len93)
+                                        }
+                                        None => (0i32, ::core::ptr::null_mut(), 0usize),
+                                    };
                                     (
                                         0i32,
                                         (t57_0).take_handle() as i32,
@@ -16194,38 +18395,44 @@ pub mod exports {
                                         result78_2,
                                         result78_3,
                                         result78_4,
+                                        result94_0,
+                                        result94_1,
+                                        result94_2,
                                     )
                                 }
                                 Err(e) => {
                                     let super::super::super::super::yosh::acp::errors::Error {
-                                        code: code79,
-                                        message: message79,
+                                        code: code95,
+                                        message: message95,
                                     } = e;
-                                    use super::super::super::super::yosh::acp::errors::ErrorCode as V80;
-                                    let (result81_0, result81_1) = match code79 {
-                                        V80::ParseError => (0i32, 0i32),
-                                        V80::InvalidRequest => (1i32, 0i32),
-                                        V80::MethodNotFound => (2i32, 0i32),
-                                        V80::InvalidParams => (3i32, 0i32),
-                                        V80::InternalError => (4i32, 0i32),
-                                        V80::AuthRequired => (5i32, 0i32),
-                                        V80::ResourceNotFound => (6i32, 0i32),
-                                        V80::Other(e) => (7i32, _rt::as_i32(e)),
+                                    use super::super::super::super::yosh::acp::errors::ErrorCode as V96;
+                                    let (result97_0, result97_1) = match code95 {
+                                        V96::ParseError => (0i32, 0i32),
+                                        V96::InvalidRequest => (1i32, 0i32),
+                                        V96::MethodNotFound => (2i32, 0i32),
+                                        V96::InvalidParams => (3i32, 0i32),
+                                        V96::InternalError => (4i32, 0i32),
+                                        V96::AuthRequired => (5i32, 0i32),
+                                        V96::ResourceNotFound => (6i32, 0i32),
+                                        V96::Other(e) => (7i32, _rt::as_i32(e)),
                                     };
-                                    let vec82 = message79;
-                                    let ptr82 = vec82.as_ptr().cast::<u8>();
-                                    let len82 = vec82.len();
+                                    let vec98 = message95;
+                                    let ptr98 = vec98.as_ptr().cast::<u8>();
+                                    let len98 = vec98.len();
                                     (
                                         1i32,
-                                        result81_0,
-                                        result81_1,
-                                        ptr82.cast_mut(),
-                                        len82,
+                                        result97_0,
+                                        result97_1,
+                                        ptr98.cast_mut(),
+                                        len98,
                                         ::core::ptr::null_mut(),
                                         0usize,
                                         0i32,
                                         ::core::ptr::null_mut(),
                                         0usize,
+                                        ::core::ptr::null_mut(),
+                                        0usize,
+                                        0i32,
                                         ::core::ptr::null_mut(),
                                         0usize,
                                     )
@@ -16235,7 +18442,7 @@ pub mod exports {
                             #[link(wasm_import_module = "[export]yosh:acp/agent@7.0.0")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return]resume-session"]
-                                fn wit_import84(
+                                fn wit_import100(
                                     _: i32,
                                     _: i32,
                                     _: i32,
@@ -16246,12 +18453,15 @@ pub mod exports {
                                     _: i32,
                                     _: *mut u8,
                                     _: usize,
+                                    _: *mut u8,
+                                    _: usize,
+                                    _: i32,
                                     _: *mut u8,
                                     _: usize,
                                 );
                             }
                             #[cfg(not(target_arch = "wasm32"))]
-                            unsafe extern "C" fn wit_import84(
+                            unsafe extern "C" fn wit_import100(
                                 _: i32,
                                 _: i32,
                                 _: i32,
@@ -16262,25 +18472,31 @@ pub mod exports {
                                 _: i32,
                                 _: *mut u8,
                                 _: usize,
+                                _: *mut u8,
+                                _: usize,
+                                _: i32,
                                 _: *mut u8,
                                 _: usize,
                             ) {
                                 unreachable!()
                             }
                             _task_cancel.forget();
-                            wit_import84(
-                                result83_0,
-                                result83_1,
-                                result83_2,
-                                result83_3,
-                                result83_4,
-                                result83_5,
-                                result83_6,
-                                result83_7,
-                                result83_8,
-                                result83_9,
-                                result83_10,
-                                result83_11,
+                            wit_import100(
+                                result99_0,
+                                result99_1,
+                                result99_2,
+                                result99_3,
+                                result99_4,
+                                result99_5,
+                                result99_6,
+                                result99_7,
+                                result99_8,
+                                result99_9,
+                                result99_10,
+                                result99_11,
+                                result99_12,
+                                result99_13,
+                                result99_14,
                             );
                         })
                     }
@@ -16417,6 +18633,19 @@ pub mod exports {
                         &self,
                         model_id: SessionModelId,
                     ) -> Result<(), Error>;
+                    /// Set a configuration option (model / mode / thought-level) for
+                    /// this session. The `config-id` and `value` MUST come from the
+                    /// option set advertised in the session's lifecycle response.
+                    /// Returns the full updated option set (mirroring the ACP
+                    /// `session/set_config_option` response).
+                    ///
+                    /// See: <https://agentclientprotocol.com/protocol/session-config>
+                    #[allow(async_fn_in_trait)]
+                    async fn set_config_option(
+                        &self,
+                        config_id: SessionConfigId,
+                        value: SessionConfigValueId,
+                    ) -> Result<_rt::Vec<SessionConfigOption>, Error>;
                 }
                 pub trait GuestPromptTurn: 'static {
                     #[doc(hidden)]
@@ -16507,6 +18736,19 @@ pub mod exports {
                         $($path_to_types)*::
                         __callback_method_session_select_model(event0, event1, event2) }
                         } #[unsafe (export_name =
+                        "[async-lift]yosh:acp/agent@7.0.0#[method]session.set-config-option")]
+                        unsafe extern "C" fn export_method_session_set_config_option(arg0
+                        : * mut u8, arg1 : * mut u8, arg2 : usize, arg3 : * mut u8, arg4
+                        : usize,) -> i32 { unsafe { $($path_to_types)*::
+                        _export_method_session_set_config_option_cabi::<<$ty as
+                        $($path_to_types)*:: Guest >::Session > (arg0, arg1, arg2, arg3,
+                        arg4) } } #[unsafe (export_name =
+                        "[callback][async-lift]yosh:acp/agent@7.0.0#[method]session.set-config-option")]
+                        unsafe extern "C" fn
+                        _callback_method_session_set_config_option(event0 : u32, event1 :
+                        u32, event2 : u32) -> u32 { unsafe { $($path_to_types)*::
+                        __callback_method_session_set_config_option(event0, event1,
+                        event2) } } #[unsafe (export_name =
                         "[async-lift]yosh:acp/agent@7.0.0#[method]prompt-turn.updates")]
                         unsafe extern "C" fn export_method_prompt_turn_updates(arg0 : *
                         mut u8,) -> i32 { unsafe { $($path_to_types)*::
@@ -16609,11 +18851,11 @@ pub mod exports {
                 struct _RetArea(
                     [::core::mem::MaybeUninit<
                         u8,
-                    >; 16 + 11 * ::core::mem::size_of::<*const u8>()],
+                    >; 17 * ::core::mem::size_of::<*const u8>()],
                 );
                 static mut _RET_AREA: _RetArea = _RetArea(
-                    [::core::mem::MaybeUninit::uninit(); 16
-                        + 11 * ::core::mem::size_of::<*const u8>()],
+                    [::core::mem::MaybeUninit::uninit(); 17
+                        * ::core::mem::size_of::<*const u8>()],
                 );
             }
         }
@@ -23193,9 +25435,9 @@ macro_rules! __export_provider_impl {
         #[rustfmt::skip] #[cfg(target_arch = "wasm32")] #[unsafe (link_section =
         "component-type:wit-bindgen:0.54.0:yosh:acp@7.0.0:provider:imports and exports")]
         #[doc(hidden)] #[allow(clippy::octal_escapes)] pub static
-        __WIT_BINDGEN_COMPONENT_TYPE : [u8; 8742] = *
+        __WIT_BINDGEN_COMPONENT_TYPE : [u8; 9528] = *
         b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xa7C\x01A\x02\x01A:\x01\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xb9I\x01A\x02\x01A=\x01\
 B\x04\x01q\x08\x0bparse-error\0\0\x0finvalid-request\0\0\x10method-not-found\0\0\
 \x0einvalid-params\0\0\x0einternal-error\0\0\x0dauth-required\0\0\x12resource-no\
 t-found\0\0\x05other\x01z\0\x04\0\x0aerror-code\x03\0\0\x01r\x02\x04code\x01\x07\
@@ -23213,7 +25455,7 @@ pabilities\x0a\x14session-capabilities\x0c\x04\0\x12agent-capabilities\x03\0\x0d
 ocol-versiony\x13client-capabilities\x06\x0bclient-info\x13\x04\0\x12initialize-\
 request\x03\0\x14\x01p\x10\x01r\x04\x10protocol-versiony\x12agent-capabilities\x0e\
 \x0aagent-info\x13\x0cauth-methods\x16\x04\0\x13initialize-response\x03\0\x17\x03\
-\0\x13yosh:acp/init@7.0.0\x05\x01\x01B>\x01s\x04\0\x0asession-id\x03\0\0\x01s\x04\
+\0\x13yosh:acp/init@7.0.0\x05\x01\x01BL\x01s\x04\0\x0asession-id\x03\0\0\x01s\x04\
 \0\x0fsession-mode-id\x03\0\x02\x01s\x04\0\x10session-model-id\x03\0\x04\x01r\x02\
 \x04names\x05values\x04\0\x07env-var\x03\0\x06\x01r\x02\x04names\x05values\x04\0\
 \x0bhttp-header\x03\0\x08\x01ps\x01p\x07\x01r\x04\x04names\x07commands\x04args\x0a\
@@ -23228,162 +25470,177 @@ scription\x17\x0bprovided-by\x16\x04\0\x0csession-mode\x03\0\x18\x01p\x19\x01r\x
 \x03\0\x1d\x01r\x04\x02id\x05\x04names\x0bdescription\x17\x0bprovided-by\x16\x04\
 \0\x0dsession-model\x03\0\x1f\x01p\x20\x01r\x02\x10current-model-id\x05\x10avail\
 able-models!\x04\0\x13session-model-state\x03\0\"\x01r\x02\x0asession-id\x01\x08\
-model-id\x05\x04\0\x14select-model-request\x03\0$\x01p\x14\x01r\x02\x03cwds\x0bm\
-cp-servers&\x04\0\x13new-session-request\x03\0'\x01k\x1c\x01k#\x01r\x03\x0asessi\
-on-id\x01\x05modes)\x06models*\x04\0\x14new-session-response\x03\0+\x01r\x03\x0a\
-session-id\x01\x03cwds\x0bmcp-servers&\x04\0\x14load-session-request\x03\0-\x01r\
-\x02\x05modes)\x06models*\x04\0\x15load-session-response\x03\0/\x01r\x04\x0asess\
-ion-id\x01\x03cwds\x05title\x17\x0aupdated-at\x17\x04\0\x0csession-info\x03\01\x01\
-r\x02\x03cwd\x17\x06cursor\x17\x04\0\x15list-sessions-request\x03\03\x01p2\x01r\x02\
-\x08sessions5\x0bnext-cursor\x17\x04\0\x16list-sessions-response\x03\06\x01r\x03\
-\x0asession-id\x01\x03cwds\x0bmcp-servers&\x04\0\x16resume-session-request\x03\0\
-8\x01r\x02\x05modes)\x06models*\x04\0\x17resume-session-response\x03\0:\x01r\x02\
-\x05title\x17\x0aupdated-at\x17\x04\0\x13session-info-update\x03\0<\x03\0\x17yos\
-h:acp/sessions@7.0.0\x05\x02\x01B\x14\x01r\x01\x04texts\x04\0\x0ctext-content\x03\
-\0\0\x01ks\x01r\x03\x04datas\x09mime-types\x03uri\x02\x04\0\x0dimage-content\x03\
-\0\x03\x01r\x02\x04datas\x09mime-types\x04\0\x0daudio-content\x03\0\x05\x01kw\x01\
-r\x06\x03uris\x04names\x09mime-type\x02\x05title\x02\x0bdescription\x02\x04size\x07\
-\x04\0\x0dresource-link\x03\0\x08\x01r\x03\x03uris\x09mime-type\x02\x04texts\x04\
-\0\x16text-resource-contents\x03\0\x0a\x01r\x03\x03uris\x09mime-type\x02\x04blob\
-s\x04\0\x16blob-resource-contents\x03\0\x0c\x01q\x02\x04text\x01\x0b\0\x04blob\x01\
-\x0d\0\x04\0\x11resource-contents\x03\0\x0e\x01r\x01\x08resource\x0f\x04\0\x11em\
-bedded-resource\x03\0\x10\x01q\x05\x04text\x01\x01\0\x05image\x01\x04\0\x05audio\
-\x01\x06\0\x0dresource-link\x01\x09\0\x08resource\x01\x11\0\x04\0\x0dcontent-blo\
-ck\x03\0\x12\x03\0\x16yosh:acp/content@7.0.0\x05\x03\x02\x03\0\x02\x0asession-id\
-\x02\x03\0\x02\x07env-var\x01B\x14\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\
-\0\x02\x03\x02\x01\x05\x04\0\x07env-var\x03\0\x02\x01s\x04\0\x0bterminal-id\x03\0\
-\x04\x01ps\x01p\x03\x01ks\x01kw\x01r\x06\x0asession-id\x01\x07commands\x04args\x06\
-\x03env\x07\x03cwd\x08\x11output-byte-limit\x09\x04\0\x17create-terminal-request\
-\x03\0\x0a\x01r\x01\x0bterminal-id\x05\x04\0\x18create-terminal-response\x03\0\x0c\
-\x01kz\x01r\x02\x09exit-code\x0e\x06signal\x08\x04\0\x14terminal-exit-status\x03\
-\0\x0f\x01k\x10\x01r\x03\x06outputs\x09truncated\x7f\x0bexit-status\x11\x04\0\x0f\
-terminal-output\x03\0\x12\x03\0\x18yosh:acp/terminals@7.0.0\x05\x06\x02\x03\0\x03\
-\x0dcontent-block\x02\x03\0\x04\x0bterminal-id\x01B9\x02\x03\x02\x01\x07\x04\0\x0d\
-content-block\x03\0\0\x02\x03\x02\x01\x08\x04\0\x0bterminal-id\x03\0\x02\x01s\x04\
-\0\x0ctool-call-id\x03\0\x04\x04\0\x09tool-call\x03\x01\x01m\x09\x04read\x04edit\
-\x06delete\x04move\x06search\x07execute\x05think\x05fetch\x05other\x04\0\x09tool\
--kind\x03\0\x07\x01m\x04\x07pending\x0bin-progress\x09completed\x06failed\x04\0\x10\
-tool-call-status\x03\0\x09\x01ks\x01r\x03\x04paths\x08old-text\x0b\x08new-texts\x04\
-\0\x04diff\x03\0\x0c\x01q\x03\x07content\x01\x01\0\x04diff\x01\x0d\0\x08terminal\
-\x01\x03\0\x04\0\x11tool-call-content\x03\0\x0e\x01ky\x01r\x02\x04paths\x04line\x10\
-\x04\0\x12tool-call-location\x03\0\x11\x01p\x0f\x01p\x12\x01r\x07\x02id\x05\x05t\
-itles\x04kind\x08\x06status\x0a\x07content\x13\x09locations\x14\x09raw-input\x0b\
-\x04\0\x0etool-call-init\x03\0\x15\x01k\x08\x01k\x0a\x01k\x13\x01k\x14\x01r\x07\x05\
-title\x0b\x04kind\x17\x06status\x18\x07content\x19\x09locations\x1a\x09raw-input\
-\x0b\x0araw-output\x0b\x04\0\x0ftool-call-patch\x03\0\x1b\x01m\x03\x04high\x06me\
-dium\x03low\x04\0\x13plan-entry-priority\x03\0\x1d\x01m\x03\x07pending\x0bin-pro\
-gress\x09completed\x04\0\x11plan-entry-status\x03\0\x1f\x01r\x03\x07contents\x08\
-priority\x1e\x06status\x20\x04\0\x0aplan-entry\x03\0!\x01p\"\x01r\x01\x07entries\
-#\x04\0\x04plan\x03\0$\x01r\x08\x02id\x05\x05titles\x04kind\x08\x06status\x0a\x07\
-content\x13\x09locations\x14\x09raw-input\x0b\x0araw-output\x0b\x04\0\x12tool-ca\
-ll-snapshot\x03\0&\x01m\x04\x0aallow-once\x0callow-always\x0breject-once\x0dreje\
-ct-always\x04\0\x16permission-option-kind\x03\0(\x01r\x03\x02ids\x04names\x04kin\
-d)\x04\0\x11permission-option\x03\0*\x01p+\x01r\x02\x09tool-call'\x07options,\x04\
-\0\x1arequest-permission-request\x03\0-\x01q\x02\x08selected\x01s\0\x09cancelled\
-\0\0\x04\0\x12permission-outcome\x03\0/\x01r\x01\x07outcome0\x04\0\x1brequest-pe\
-rmission-response\x03\01\x01i\x06\x01@\x01\x07initial\x16\03\x04\0\x16[construct\
-or]tool-call\x014\x01h\x06\x01C\x02\x04self5\x05patch\x1c\x01\0\x04\0\x18[method\
-]tool-call.update\x016\x03\0\x14yosh:acp/tools@7.0.0\x05\x09\x02\x03\0\x02\x0fse\
-ssion-mode-id\x02\x03\0\x02\x13session-info-update\x02\x03\0\x05\x12tool-call-sn\
-apshot\x02\x03\0\x05\x04plan\x01B\x16\x02\x03\x02\x01\x0a\x04\0\x0fsession-mode-\
-id\x03\0\0\x02\x03\x02\x01\x0b\x04\0\x13session-info-update\x03\0\x02\x02\x03\x02\
-\x01\x07\x04\0\x0dcontent-block\x03\0\x04\x02\x03\x02\x01\x0c\x04\0\x12tool-call\
--snapshot\x03\0\x06\x02\x03\x02\x01\x0d\x04\0\x04plan\x03\0\x08\x01m\x05\x08end-\
-turn\x0amax-tokens\x11max-turn-requests\x07refusal\x09cancelled\x04\0\x0bstop-re\
-ason\x03\0\x0a\x01r\x01\x0bstop-reason\x0b\x04\0\x0fprompt-response\x03\0\x0c\x01\
-r\x01\x04hints\x04\0\x17available-command-input\x03\0\x0e\x01k\x0f\x01r\x03\x04n\
-ames\x0bdescriptions\x05input\x10\x04\0\x11available-command\x03\0\x11\x01p\x12\x01\
-q\x09\x12user-message-chunk\x01\x05\0\x13agent-message-chunk\x01\x05\0\x13agent-\
-thought-chunk\x01\x05\0\x09tool-call\x01\x07\0\x10tool-call-update\x01\x07\0\x04\
-plan\x01\x09\0\x13current-mode-update\x01\x01\0\x13session-info-update\x01\x03\0\
-\x19available-commands-update\x01\x13\0\x04\0\x0esession-update\x03\0\x14\x03\0\x16\
-yosh:acp/prompts@7.0.0\x05\x0e\x02\x03\0\0\x05error\x02\x03\0\x01\x12initialize-\
-request\x02\x03\0\x01\x13initialize-response\x02\x03\0\x01\x14authenticate-reque\
-st\x02\x03\0\x02\x10session-model-id\x02\x03\0\x02\x13new-session-request\x02\x03\
-\0\x02\x14new-session-response\x02\x03\0\x02\x14load-session-request\x02\x03\0\x02\
-\x15load-session-response\x02\x03\0\x02\x15list-sessions-request\x02\x03\0\x02\x16\
-list-sessions-response\x02\x03\0\x02\x16resume-session-request\x02\x03\0\x02\x17\
-resume-session-response\x02\x03\0\x06\x0esession-update\x02\x03\0\x06\x0fprompt-\
-response\x01BJ\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x10\x04\
-\0\x12initialize-request\x03\0\x02\x02\x03\x02\x01\x11\x04\0\x13initialize-respo\
-nse\x03\0\x04\x02\x03\x02\x01\x12\x04\0\x14authenticate-request\x03\0\x06\x02\x03\
-\x02\x01\x0a\x04\0\x0fsession-mode-id\x03\0\x08\x02\x03\x02\x01\x13\x04\0\x10ses\
-sion-model-id\x03\0\x0a\x02\x03\x02\x01\x14\x04\0\x13new-session-request\x03\0\x0c\
-\x02\x03\x02\x01\x15\x04\0\x14new-session-response\x03\0\x0e\x02\x03\x02\x01\x16\
-\x04\0\x14load-session-request\x03\0\x10\x02\x03\x02\x01\x17\x04\0\x15load-sessi\
-on-response\x03\0\x12\x02\x03\x02\x01\x18\x04\0\x15list-sessions-request\x03\0\x14\
-\x02\x03\x02\x01\x19\x04\0\x16list-sessions-response\x03\0\x16\x02\x03\x02\x01\x1a\
-\x04\0\x16resume-session-request\x03\0\x18\x02\x03\x02\x01\x1b\x04\0\x17resume-s\
-ession-response\x03\0\x1a\x02\x03\x02\x01\x07\x04\0\x0dcontent-block\x03\0\x1c\x02\
-\x03\x02\x01\x1c\x04\0\x0esession-update\x03\0\x1e\x02\x03\x02\x01\x1d\x04\0\x0f\
-prompt-response\x03\0\x20\x04\0\x07session\x03\x01\x04\0\x0bprompt-turn\x03\x01\x01\
-h\"\x01p\x1d\x01i#\x01C\x02\x04self$\x06prompt%\0&\x04\0\x16[method]session.prom\
-pt\x01'\x01j\0\x01\x01\x01C\x02\x04self$\x07mode-id\x09\0(\x04\0\x18[method]sess\
-ion.set-mode\x01)\x01C\x02\x04self$\x08model-id\x0b\0(\x04\0\x1c[method]session.\
-select-model\x01*\x01h#\x01f\x01\x1f\x01C\x01\x04self+\0,\x04\0\x1b[method]promp\
-t-turn.updates\x01-\x01j\x01!\x01\x01\x01C\x01\x04self+\0.\x04\0\x1c[method]prom\
-pt-turn.response\x01/\x01j\x01\x05\x01\x01\x01C\x01\x03req\x03\00\x04\0\x0ainiti\
-alize\x011\x01C\x01\x03req\x07\0(\x04\0\x0cauthenticate\x012\x01i\"\x01o\x023\x0f\
-\x01j\x014\x01\x01\x01C\x01\x03req\x0d\05\x04\0\x0bnew-session\x016\x01o\x023\x13\
-\x01j\x017\x01\x01\x01C\x01\x03req\x11\08\x04\0\x0cload-session\x019\x01j\x01\x17\
-\x01\x01\x01C\x01\x03req\x15\0:\x04\0\x0dlist-sessions\x01;\x01o\x023\x1b\x01j\x01\
-<\x01\x01\x01C\x01\x03req\x19\0=\x04\0\x0eresume-session\x01>\x03\0\x14yosh:acp/\
-agent@7.0.0\x05\x1e\x01B\x09\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x01\
-ky\x01r\x04\x0asession-id\x01\x04paths\x04line\x02\x05limit\x02\x04\0\x16read-te\
-xt-file-request\x03\0\x03\x01r\x01\x07contents\x04\0\x17read-text-file-response\x03\
-\0\x05\x01r\x03\x0asession-id\x01\x04paths\x07contents\x04\0\x17write-text-file-\
-request\x03\0\x07\x03\0\x19yosh:acp/filesystem@7.0.0\x05\x1f\x02\x03\0\x05\x1are\
-quest-permission-request\x02\x03\0\x05\x1brequest-permission-response\x02\x03\0\x08\
-\x16read-text-file-request\x02\x03\0\x08\x17read-text-file-response\x02\x03\0\x08\
-\x17write-text-file-request\x02\x03\0\x04\x17create-terminal-request\x02\x03\0\x04\
-\x14terminal-exit-status\x01B&\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\
-\x02\x01\x04\x04\0\x0asession-id\x03\0\x02\x02\x03\x02\x01\x20\x04\0\x1arequest-\
-permission-request\x03\0\x04\x02\x03\x02\x01!\x04\0\x1brequest-permission-respon\
-se\x03\0\x06\x02\x03\x02\x01\"\x04\0\x16read-text-file-request\x03\0\x08\x02\x03\
-\x02\x01#\x04\0\x17read-text-file-response\x03\0\x0a\x02\x03\x02\x01$\x04\0\x17w\
-rite-text-file-request\x03\0\x0c\x02\x03\x02\x01%\x04\0\x17create-terminal-reque\
-st\x03\0\x0e\x02\x03\x02\x01&\x04\0\x14terminal-exit-status\x03\0\x10\x04\0\x08t\
-erminal\x03\x01\x01i\x12\x01@\x01\x03req\x0f\0\x13\x04\0\x15[constructor]termina\
-l\x01\x14\x01h\x12\x01f\x01}\x01C\x01\x04self\x15\0\x16\x04\0\x17[method]termina\
-l.output\x01\x17\x01j\x01\x11\x01\x01\x01C\x01\x04self\x15\0\x18\x04\0\x1e[metho\
-d]terminal.wait-for-exit\x01\x19\x01j\x01\x07\x01\x01\x01C\x01\x03req\x05\0\x1a\x04\
-\0\x12request-permission\x01\x1b\x01j\x01\x0b\x01\x01\x01C\x01\x03req\x09\0\x1c\x04\
-\0\x0eread-text-file\x01\x1d\x01j\0\x01\x01\x01C\x01\x03req\x0d\0\x1e\x04\0\x0fw\
-rite-text-file\x01\x1f\x03\0\x15yosh:acp/client@7.0.0\x05'\x01B\x0a\x01q\x03\x08\
-upstream\x01s\0\x02io\x01s\0\x09not-found\0\0\x04\0\x0dsecrets-error\x03\0\0\x01\
-p}\x01q\x02\x06string\x01s\0\x05bytes\x01\x02\0\x04\0\x0csecret-value\x03\0\x03\x04\
-\0\x06secret\x03\x01\x01i\x05\x01j\x01\x06\x01\x01\x01@\x01\x03keys\0\x07\x04\0\x03\
-get\x01\x08\x03\0#wasmcloud:secrets/store@0.1.0-draft\x05(\x02\x03\0\x0a\x06secr\
-et\x02\x03\0\x0a\x0csecret-value\x01B\x07\x02\x03\x02\x01)\x04\0\x06secret\x03\0\
-\0\x02\x03\x02\x01*\x04\0\x0csecret-value\x03\0\x02\x01h\x01\x01@\x01\x01s\x04\0\
-\x03\x04\0\x06reveal\x01\x05\x03\0$wasmcloud:secrets/reveal@0.1.0-draft\x05+\x01\
-BJ\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x10\x04\0\x12initi\
-alize-request\x03\0\x02\x02\x03\x02\x01\x11\x04\0\x13initialize-response\x03\0\x04\
-\x02\x03\x02\x01\x12\x04\0\x14authenticate-request\x03\0\x06\x02\x03\x02\x01\x0a\
-\x04\0\x0fsession-mode-id\x03\0\x08\x02\x03\x02\x01\x13\x04\0\x10session-model-i\
-d\x03\0\x0a\x02\x03\x02\x01\x14\x04\0\x13new-session-request\x03\0\x0c\x02\x03\x02\
-\x01\x15\x04\0\x14new-session-response\x03\0\x0e\x02\x03\x02\x01\x16\x04\0\x14lo\
-ad-session-request\x03\0\x10\x02\x03\x02\x01\x17\x04\0\x15load-session-response\x03\
-\0\x12\x02\x03\x02\x01\x18\x04\0\x15list-sessions-request\x03\0\x14\x02\x03\x02\x01\
-\x19\x04\0\x16list-sessions-response\x03\0\x16\x02\x03\x02\x01\x1a\x04\0\x16resu\
-me-session-request\x03\0\x18\x02\x03\x02\x01\x1b\x04\0\x17resume-session-respons\
-e\x03\0\x1a\x02\x03\x02\x01\x07\x04\0\x0dcontent-block\x03\0\x1c\x02\x03\x02\x01\
-\x1c\x04\0\x0esession-update\x03\0\x1e\x02\x03\x02\x01\x1d\x04\0\x0fprompt-respo\
-nse\x03\0\x20\x04\0\x07session\x03\x01\x04\0\x0bprompt-turn\x03\x01\x01h\"\x01p\x1d\
-\x01i#\x01C\x02\x04self$\x06prompt%\0&\x04\0\x16[method]session.prompt\x01'\x01j\
-\0\x01\x01\x01C\x02\x04self$\x07mode-id\x09\0(\x04\0\x18[method]session.set-mode\
-\x01)\x01C\x02\x04self$\x08model-id\x0b\0(\x04\0\x1c[method]session.select-model\
-\x01*\x01h#\x01f\x01\x1f\x01C\x01\x04self+\0,\x04\0\x1b[method]prompt-turn.updat\
-es\x01-\x01j\x01!\x01\x01\x01C\x01\x04self+\0.\x04\0\x1c[method]prompt-turn.resp\
-onse\x01/\x01j\x01\x05\x01\x01\x01C\x01\x03req\x03\00\x04\0\x0ainitialize\x011\x01\
-C\x01\x03req\x07\0(\x04\0\x0cauthenticate\x012\x01i\"\x01o\x023\x0f\x01j\x014\x01\
-\x01\x01C\x01\x03req\x0d\05\x04\0\x0bnew-session\x016\x01o\x023\x13\x01j\x017\x01\
-\x01\x01C\x01\x03req\x11\08\x04\0\x0cload-session\x019\x01j\x01\x17\x01\x01\x01C\
-\x01\x03req\x15\0:\x04\0\x0dlist-sessions\x01;\x01o\x023\x1b\x01j\x01<\x01\x01\x01\
-C\x01\x03req\x19\0=\x04\0\x0eresume-session\x01>\x04\0\x14yosh:acp/agent@7.0.0\x05\
-,\x04\0\x17yosh:acp/provider@7.0.0\x04\0\x0b\x0e\x01\0\x08provider\x03\0\0\0G\x09\
-producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.245.1\x10wit-bindgen-rus\
-t\x060.54.0";
+model-id\x05\x04\0\x14select-model-request\x03\0$\x01s\x04\0\x11session-config-i\
+d\x03\0&\x01s\x04\0\x17session-config-value-id\x03\0(\x01q\x04\x04mode\0\0\x05mo\
+del\0\0\x0dthought-level\0\0\x05other\x01s\0\x04\0\x1esession-config-option-cate\
+gory\x03\0*\x01r\x03\x05value)\x04names\x0bdescription\x17\x04\0\x1csession-conf\
+ig-select-option\x03\0,\x01k+\x01p-\x01r\x07\x02id'\x04names\x0bdescription\x17\x08\
+category.\x0dcurrent-value)\x07options/\x0bprovided-by\x16\x04\0\x15session-conf\
+ig-option\x03\00\x01p\x14\x01r\x02\x03cwds\x0bmcp-servers2\x04\0\x13new-session-\
+request\x03\03\x01k\x1c\x01k#\x01p1\x01k7\x01r\x04\x0asession-id\x01\x05modes5\x06\
+models6\x0econfig-options8\x04\0\x14new-session-response\x03\09\x01r\x03\x0asess\
+ion-id\x01\x03cwds\x0bmcp-servers2\x04\0\x14load-session-request\x03\0;\x01r\x03\
+\x05modes5\x06models6\x0econfig-options8\x04\0\x15load-session-response\x03\0=\x01\
+r\x04\x0asession-id\x01\x03cwds\x05title\x17\x0aupdated-at\x17\x04\0\x0csession-\
+info\x03\0?\x01r\x02\x03cwd\x17\x06cursor\x17\x04\0\x15list-sessions-request\x03\
+\0A\x01p\xc0\0\x01r\x02\x08sessions\xc3\0\x0bnext-cursor\x17\x04\0\x16list-sessi\
+ons-response\x03\0D\x01r\x03\x0asession-id\x01\x03cwds\x0bmcp-servers2\x04\0\x16\
+resume-session-request\x03\0F\x01r\x03\x05modes5\x06models6\x0econfig-options8\x04\
+\0\x17resume-session-response\x03\0H\x01r\x02\x05title\x17\x0aupdated-at\x17\x04\
+\0\x13session-info-update\x03\0J\x03\0\x17yosh:acp/sessions@7.0.0\x05\x02\x01B\x14\
+\x01r\x01\x04texts\x04\0\x0ctext-content\x03\0\0\x01ks\x01r\x03\x04datas\x09mime\
+-types\x03uri\x02\x04\0\x0dimage-content\x03\0\x03\x01r\x02\x04datas\x09mime-typ\
+es\x04\0\x0daudio-content\x03\0\x05\x01kw\x01r\x06\x03uris\x04names\x09mime-type\
+\x02\x05title\x02\x0bdescription\x02\x04size\x07\x04\0\x0dresource-link\x03\0\x08\
+\x01r\x03\x03uris\x09mime-type\x02\x04texts\x04\0\x16text-resource-contents\x03\0\
+\x0a\x01r\x03\x03uris\x09mime-type\x02\x04blobs\x04\0\x16blob-resource-contents\x03\
+\0\x0c\x01q\x02\x04text\x01\x0b\0\x04blob\x01\x0d\0\x04\0\x11resource-contents\x03\
+\0\x0e\x01r\x01\x08resource\x0f\x04\0\x11embedded-resource\x03\0\x10\x01q\x05\x04\
+text\x01\x01\0\x05image\x01\x04\0\x05audio\x01\x06\0\x0dresource-link\x01\x09\0\x08\
+resource\x01\x11\0\x04\0\x0dcontent-block\x03\0\x12\x03\0\x16yosh:acp/content@7.\
+0.0\x05\x03\x02\x03\0\x02\x0asession-id\x02\x03\0\x02\x07env-var\x01B\x14\x02\x03\
+\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x05\x04\0\x07env-var\x03\
+\0\x02\x01s\x04\0\x0bterminal-id\x03\0\x04\x01ps\x01p\x03\x01ks\x01kw\x01r\x06\x0a\
+session-id\x01\x07commands\x04args\x06\x03env\x07\x03cwd\x08\x11output-byte-limi\
+t\x09\x04\0\x17create-terminal-request\x03\0\x0a\x01r\x01\x0bterminal-id\x05\x04\
+\0\x18create-terminal-response\x03\0\x0c\x01kz\x01r\x02\x09exit-code\x0e\x06sign\
+al\x08\x04\0\x14terminal-exit-status\x03\0\x0f\x01k\x10\x01r\x03\x06outputs\x09t\
+runcated\x7f\x0bexit-status\x11\x04\0\x0fterminal-output\x03\0\x12\x03\0\x18yosh\
+:acp/terminals@7.0.0\x05\x06\x02\x03\0\x03\x0dcontent-block\x02\x03\0\x04\x0bter\
+minal-id\x01B9\x02\x03\x02\x01\x07\x04\0\x0dcontent-block\x03\0\0\x02\x03\x02\x01\
+\x08\x04\0\x0bterminal-id\x03\0\x02\x01s\x04\0\x0ctool-call-id\x03\0\x04\x04\0\x09\
+tool-call\x03\x01\x01m\x09\x04read\x04edit\x06delete\x04move\x06search\x07execut\
+e\x05think\x05fetch\x05other\x04\0\x09tool-kind\x03\0\x07\x01m\x04\x07pending\x0b\
+in-progress\x09completed\x06failed\x04\0\x10tool-call-status\x03\0\x09\x01ks\x01\
+r\x03\x04paths\x08old-text\x0b\x08new-texts\x04\0\x04diff\x03\0\x0c\x01q\x03\x07\
+content\x01\x01\0\x04diff\x01\x0d\0\x08terminal\x01\x03\0\x04\0\x11tool-call-con\
+tent\x03\0\x0e\x01ky\x01r\x02\x04paths\x04line\x10\x04\0\x12tool-call-location\x03\
+\0\x11\x01p\x0f\x01p\x12\x01r\x07\x02id\x05\x05titles\x04kind\x08\x06status\x0a\x07\
+content\x13\x09locations\x14\x09raw-input\x0b\x04\0\x0etool-call-init\x03\0\x15\x01\
+k\x08\x01k\x0a\x01k\x13\x01k\x14\x01r\x07\x05title\x0b\x04kind\x17\x06status\x18\
+\x07content\x19\x09locations\x1a\x09raw-input\x0b\x0araw-output\x0b\x04\0\x0ftoo\
+l-call-patch\x03\0\x1b\x01m\x03\x04high\x06medium\x03low\x04\0\x13plan-entry-pri\
+ority\x03\0\x1d\x01m\x03\x07pending\x0bin-progress\x09completed\x04\0\x11plan-en\
+try-status\x03\0\x1f\x01r\x03\x07contents\x08priority\x1e\x06status\x20\x04\0\x0a\
+plan-entry\x03\0!\x01p\"\x01r\x01\x07entries#\x04\0\x04plan\x03\0$\x01r\x08\x02i\
+d\x05\x05titles\x04kind\x08\x06status\x0a\x07content\x13\x09locations\x14\x09raw\
+-input\x0b\x0araw-output\x0b\x04\0\x12tool-call-snapshot\x03\0&\x01m\x04\x0aallo\
+w-once\x0callow-always\x0breject-once\x0dreject-always\x04\0\x16permission-optio\
+n-kind\x03\0(\x01r\x03\x02ids\x04names\x04kind)\x04\0\x11permission-option\x03\0\
+*\x01p+\x01r\x02\x09tool-call'\x07options,\x04\0\x1arequest-permission-request\x03\
+\0-\x01q\x02\x08selected\x01s\0\x09cancelled\0\0\x04\0\x12permission-outcome\x03\
+\0/\x01r\x01\x07outcome0\x04\0\x1brequest-permission-response\x03\01\x01i\x06\x01\
+@\x01\x07initial\x16\03\x04\0\x16[constructor]tool-call\x014\x01h\x06\x01C\x02\x04\
+self5\x05patch\x1c\x01\0\x04\0\x18[method]tool-call.update\x016\x03\0\x14yosh:ac\
+p/tools@7.0.0\x05\x09\x02\x03\0\x02\x0fsession-mode-id\x02\x03\0\x02\x13session-\
+info-update\x02\x03\0\x05\x12tool-call-snapshot\x02\x03\0\x05\x04plan\x01B\x16\x02\
+\x03\x02\x01\x0a\x04\0\x0fsession-mode-id\x03\0\0\x02\x03\x02\x01\x0b\x04\0\x13s\
+ession-info-update\x03\0\x02\x02\x03\x02\x01\x07\x04\0\x0dcontent-block\x03\0\x04\
+\x02\x03\x02\x01\x0c\x04\0\x12tool-call-snapshot\x03\0\x06\x02\x03\x02\x01\x0d\x04\
+\0\x04plan\x03\0\x08\x01m\x05\x08end-turn\x0amax-tokens\x11max-turn-requests\x07\
+refusal\x09cancelled\x04\0\x0bstop-reason\x03\0\x0a\x01r\x01\x0bstop-reason\x0b\x04\
+\0\x0fprompt-response\x03\0\x0c\x01r\x01\x04hints\x04\0\x17available-command-inp\
+ut\x03\0\x0e\x01k\x0f\x01r\x03\x04names\x0bdescriptions\x05input\x10\x04\0\x11av\
+ailable-command\x03\0\x11\x01p\x12\x01q\x09\x12user-message-chunk\x01\x05\0\x13a\
+gent-message-chunk\x01\x05\0\x13agent-thought-chunk\x01\x05\0\x09tool-call\x01\x07\
+\0\x10tool-call-update\x01\x07\0\x04plan\x01\x09\0\x13current-mode-update\x01\x01\
+\0\x13session-info-update\x01\x03\0\x19available-commands-update\x01\x13\0\x04\0\
+\x0esession-update\x03\0\x14\x03\0\x16yosh:acp/prompts@7.0.0\x05\x0e\x02\x03\0\0\
+\x05error\x02\x03\0\x01\x12initialize-request\x02\x03\0\x01\x13initialize-respon\
+se\x02\x03\0\x01\x14authenticate-request\x02\x03\0\x02\x10session-model-id\x02\x03\
+\0\x02\x11session-config-id\x02\x03\0\x02\x17session-config-value-id\x02\x03\0\x02\
+\x15session-config-option\x02\x03\0\x02\x13new-session-request\x02\x03\0\x02\x14\
+new-session-response\x02\x03\0\x02\x14load-session-request\x02\x03\0\x02\x15load\
+-session-response\x02\x03\0\x02\x15list-sessions-request\x02\x03\0\x02\x16list-s\
+essions-response\x02\x03\0\x02\x16resume-session-request\x02\x03\0\x02\x17resume\
+-session-response\x02\x03\0\x06\x0esession-update\x02\x03\0\x06\x0fprompt-respon\
+se\x01BT\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x10\x04\0\x12\
+initialize-request\x03\0\x02\x02\x03\x02\x01\x11\x04\0\x13initialize-response\x03\
+\0\x04\x02\x03\x02\x01\x12\x04\0\x14authenticate-request\x03\0\x06\x02\x03\x02\x01\
+\x0a\x04\0\x0fsession-mode-id\x03\0\x08\x02\x03\x02\x01\x13\x04\0\x10session-mod\
+el-id\x03\0\x0a\x02\x03\x02\x01\x14\x04\0\x11session-config-id\x03\0\x0c\x02\x03\
+\x02\x01\x15\x04\0\x17session-config-value-id\x03\0\x0e\x02\x03\x02\x01\x16\x04\0\
+\x15session-config-option\x03\0\x10\x02\x03\x02\x01\x17\x04\0\x13new-session-req\
+uest\x03\0\x12\x02\x03\x02\x01\x18\x04\0\x14new-session-response\x03\0\x14\x02\x03\
+\x02\x01\x19\x04\0\x14load-session-request\x03\0\x16\x02\x03\x02\x01\x1a\x04\0\x15\
+load-session-response\x03\0\x18\x02\x03\x02\x01\x1b\x04\0\x15list-sessions-reque\
+st\x03\0\x1a\x02\x03\x02\x01\x1c\x04\0\x16list-sessions-response\x03\0\x1c\x02\x03\
+\x02\x01\x1d\x04\0\x16resume-session-request\x03\0\x1e\x02\x03\x02\x01\x1e\x04\0\
+\x17resume-session-response\x03\0\x20\x02\x03\x02\x01\x07\x04\0\x0dcontent-block\
+\x03\0\"\x02\x03\x02\x01\x1f\x04\0\x0esession-update\x03\0$\x02\x03\x02\x01\x20\x04\
+\0\x0fprompt-response\x03\0&\x04\0\x07session\x03\x01\x04\0\x0bprompt-turn\x03\x01\
+\x01h(\x01p#\x01i)\x01C\x02\x04self*\x06prompt+\0,\x04\0\x16[method]session.prom\
+pt\x01-\x01j\0\x01\x01\x01C\x02\x04self*\x07mode-id\x09\0.\x04\0\x18[method]sess\
+ion.set-mode\x01/\x01C\x02\x04self*\x08model-id\x0b\0.\x04\0\x1c[method]session.\
+select-model\x010\x01p\x11\x01j\x011\x01\x01\x01C\x03\x04self*\x09config-id\x0d\x05\
+value\x0f\02\x04\0![method]session.set-config-option\x013\x01h)\x01f\x01%\x01C\x01\
+\x04self4\05\x04\0\x1b[method]prompt-turn.updates\x016\x01j\x01'\x01\x01\x01C\x01\
+\x04self4\07\x04\0\x1c[method]prompt-turn.response\x018\x01j\x01\x05\x01\x01\x01\
+C\x01\x03req\x03\09\x04\0\x0ainitialize\x01:\x01C\x01\x03req\x07\0.\x04\0\x0caut\
+henticate\x01;\x01i(\x01o\x02<\x15\x01j\x01=\x01\x01\x01C\x01\x03req\x13\0>\x04\0\
+\x0bnew-session\x01?\x01o\x02<\x19\x01j\x01\xc0\0\x01\x01\x01C\x01\x03req\x17\0\xc1\
+\0\x04\0\x0cload-session\x01B\x01j\x01\x1d\x01\x01\x01C\x01\x03req\x1b\0\xc3\0\x04\
+\0\x0dlist-sessions\x01D\x01o\x02<!\x01j\x01\xc5\0\x01\x01\x01C\x01\x03req\x1f\0\
+\xc6\0\x04\0\x0eresume-session\x01G\x03\0\x14yosh:acp/agent@7.0.0\x05!\x01B\x09\x02\
+\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x01ky\x01r\x04\x0asession-id\x01\x04\
+paths\x04line\x02\x05limit\x02\x04\0\x16read-text-file-request\x03\0\x03\x01r\x01\
+\x07contents\x04\0\x17read-text-file-response\x03\0\x05\x01r\x03\x0asession-id\x01\
+\x04paths\x07contents\x04\0\x17write-text-file-request\x03\0\x07\x03\0\x19yosh:a\
+cp/filesystem@7.0.0\x05\"\x02\x03\0\x05\x1arequest-permission-request\x02\x03\0\x05\
+\x1brequest-permission-response\x02\x03\0\x08\x16read-text-file-request\x02\x03\0\
+\x08\x17read-text-file-response\x02\x03\0\x08\x17write-text-file-request\x02\x03\
+\0\x04\x17create-terminal-request\x02\x03\0\x04\x14terminal-exit-status\x01B&\x02\
+\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\
+\0\x02\x02\x03\x02\x01#\x04\0\x1arequest-permission-request\x03\0\x04\x02\x03\x02\
+\x01$\x04\0\x1brequest-permission-response\x03\0\x06\x02\x03\x02\x01%\x04\0\x16r\
+ead-text-file-request\x03\0\x08\x02\x03\x02\x01&\x04\0\x17read-text-file-respons\
+e\x03\0\x0a\x02\x03\x02\x01'\x04\0\x17write-text-file-request\x03\0\x0c\x02\x03\x02\
+\x01(\x04\0\x17create-terminal-request\x03\0\x0e\x02\x03\x02\x01)\x04\0\x14termi\
+nal-exit-status\x03\0\x10\x04\0\x08terminal\x03\x01\x01i\x12\x01@\x01\x03req\x0f\
+\0\x13\x04\0\x15[constructor]terminal\x01\x14\x01h\x12\x01f\x01}\x01C\x01\x04sel\
+f\x15\0\x16\x04\0\x17[method]terminal.output\x01\x17\x01j\x01\x11\x01\x01\x01C\x01\
+\x04self\x15\0\x18\x04\0\x1e[method]terminal.wait-for-exit\x01\x19\x01j\x01\x07\x01\
+\x01\x01C\x01\x03req\x05\0\x1a\x04\0\x12request-permission\x01\x1b\x01j\x01\x0b\x01\
+\x01\x01C\x01\x03req\x09\0\x1c\x04\0\x0eread-text-file\x01\x1d\x01j\0\x01\x01\x01\
+C\x01\x03req\x0d\0\x1e\x04\0\x0fwrite-text-file\x01\x1f\x03\0\x15yosh:acp/client\
+@7.0.0\x05*\x01B\x0a\x01q\x03\x08upstream\x01s\0\x02io\x01s\0\x09not-found\0\0\x04\
+\0\x0dsecrets-error\x03\0\0\x01p}\x01q\x02\x06string\x01s\0\x05bytes\x01\x02\0\x04\
+\0\x0csecret-value\x03\0\x03\x04\0\x06secret\x03\x01\x01i\x05\x01j\x01\x06\x01\x01\
+\x01@\x01\x03keys\0\x07\x04\0\x03get\x01\x08\x03\0#wasmcloud:secrets/store@0.1.0\
+-draft\x05+\x02\x03\0\x0a\x06secret\x02\x03\0\x0a\x0csecret-value\x01B\x07\x02\x03\
+\x02\x01,\x04\0\x06secret\x03\0\0\x02\x03\x02\x01-\x04\0\x0csecret-value\x03\0\x02\
+\x01h\x01\x01@\x01\x01s\x04\0\x03\x04\0\x06reveal\x01\x05\x03\0$wasmcloud:secret\
+s/reveal@0.1.0-draft\x05.\x01BT\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\
+\x02\x01\x10\x04\0\x12initialize-request\x03\0\x02\x02\x03\x02\x01\x11\x04\0\x13\
+initialize-response\x03\0\x04\x02\x03\x02\x01\x12\x04\0\x14authenticate-request\x03\
+\0\x06\x02\x03\x02\x01\x0a\x04\0\x0fsession-mode-id\x03\0\x08\x02\x03\x02\x01\x13\
+\x04\0\x10session-model-id\x03\0\x0a\x02\x03\x02\x01\x14\x04\0\x11session-config\
+-id\x03\0\x0c\x02\x03\x02\x01\x15\x04\0\x17session-config-value-id\x03\0\x0e\x02\
+\x03\x02\x01\x16\x04\0\x15session-config-option\x03\0\x10\x02\x03\x02\x01\x17\x04\
+\0\x13new-session-request\x03\0\x12\x02\x03\x02\x01\x18\x04\0\x14new-session-res\
+ponse\x03\0\x14\x02\x03\x02\x01\x19\x04\0\x14load-session-request\x03\0\x16\x02\x03\
+\x02\x01\x1a\x04\0\x15load-session-response\x03\0\x18\x02\x03\x02\x01\x1b\x04\0\x15\
+list-sessions-request\x03\0\x1a\x02\x03\x02\x01\x1c\x04\0\x16list-sessions-respo\
+nse\x03\0\x1c\x02\x03\x02\x01\x1d\x04\0\x16resume-session-request\x03\0\x1e\x02\x03\
+\x02\x01\x1e\x04\0\x17resume-session-response\x03\0\x20\x02\x03\x02\x01\x07\x04\0\
+\x0dcontent-block\x03\0\"\x02\x03\x02\x01\x1f\x04\0\x0esession-update\x03\0$\x02\
+\x03\x02\x01\x20\x04\0\x0fprompt-response\x03\0&\x04\0\x07session\x03\x01\x04\0\x0b\
+prompt-turn\x03\x01\x01h(\x01p#\x01i)\x01C\x02\x04self*\x06prompt+\0,\x04\0\x16[\
+method]session.prompt\x01-\x01j\0\x01\x01\x01C\x02\x04self*\x07mode-id\x09\0.\x04\
+\0\x18[method]session.set-mode\x01/\x01C\x02\x04self*\x08model-id\x0b\0.\x04\0\x1c\
+[method]session.select-model\x010\x01p\x11\x01j\x011\x01\x01\x01C\x03\x04self*\x09\
+config-id\x0d\x05value\x0f\02\x04\0![method]session.set-config-option\x013\x01h)\
+\x01f\x01%\x01C\x01\x04self4\05\x04\0\x1b[method]prompt-turn.updates\x016\x01j\x01\
+'\x01\x01\x01C\x01\x04self4\07\x04\0\x1c[method]prompt-turn.response\x018\x01j\x01\
+\x05\x01\x01\x01C\x01\x03req\x03\09\x04\0\x0ainitialize\x01:\x01C\x01\x03req\x07\
+\0.\x04\0\x0cauthenticate\x01;\x01i(\x01o\x02<\x15\x01j\x01=\x01\x01\x01C\x01\x03\
+req\x13\0>\x04\0\x0bnew-session\x01?\x01o\x02<\x19\x01j\x01\xc0\0\x01\x01\x01C\x01\
+\x03req\x17\0\xc1\0\x04\0\x0cload-session\x01B\x01j\x01\x1d\x01\x01\x01C\x01\x03\
+req\x1b\0\xc3\0\x04\0\x0dlist-sessions\x01D\x01o\x02<!\x01j\x01\xc5\0\x01\x01\x01\
+C\x01\x03req\x1f\0\xc6\0\x04\0\x0eresume-session\x01G\x04\0\x14yosh:acp/agent@7.\
+0.0\x05/\x04\0\x17yosh:acp/provider@7.0.0\x04\0\x0b\x0e\x01\0\x08provider\x03\0\0\
+\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.245.1\x10wit-bind\
+gen-rust\x060.54.0";
         };
     };
 }
@@ -23396,8 +25653,8 @@ pub use __export_provider_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 7787] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xcc;\x01A\x02\x01A8\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 8398] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xaf@\x01A\x02\x01A;\x01\
 B\x04\x01q\x08\x0bparse-error\0\0\x0finvalid-request\0\0\x10method-not-found\0\0\
 \x0einvalid-params\0\0\x0einternal-error\0\0\x0dauth-required\0\0\x12resource-no\
 t-found\0\0\x05other\x01z\0\x04\0\x0aerror-code\x03\0\0\x01r\x02\x04code\x01\x07\
@@ -23415,7 +25672,7 @@ pabilities\x0a\x14session-capabilities\x0c\x04\0\x12agent-capabilities\x03\0\x0d
 ocol-versiony\x13client-capabilities\x06\x0bclient-info\x13\x04\0\x12initialize-\
 request\x03\0\x14\x01p\x10\x01r\x04\x10protocol-versiony\x12agent-capabilities\x0e\
 \x0aagent-info\x13\x0cauth-methods\x16\x04\0\x13initialize-response\x03\0\x17\x03\
-\0\x13yosh:acp/init@7.0.0\x05\x01\x01B>\x01s\x04\0\x0asession-id\x03\0\0\x01s\x04\
+\0\x13yosh:acp/init@7.0.0\x05\x01\x01BL\x01s\x04\0\x0asession-id\x03\0\0\x01s\x04\
 \0\x0fsession-mode-id\x03\0\x02\x01s\x04\0\x10session-model-id\x03\0\x04\x01r\x02\
 \x04names\x05values\x04\0\x07env-var\x03\0\x06\x01r\x02\x04names\x05values\x04\0\
 \x0bhttp-header\x03\0\x08\x01ps\x01p\x07\x01r\x04\x04names\x07commands\x04args\x0a\
@@ -23430,138 +25687,150 @@ scription\x17\x0bprovided-by\x16\x04\0\x0csession-mode\x03\0\x18\x01p\x19\x01r\x
 \x03\0\x1d\x01r\x04\x02id\x05\x04names\x0bdescription\x17\x0bprovided-by\x16\x04\
 \0\x0dsession-model\x03\0\x1f\x01p\x20\x01r\x02\x10current-model-id\x05\x10avail\
 able-models!\x04\0\x13session-model-state\x03\0\"\x01r\x02\x0asession-id\x01\x08\
-model-id\x05\x04\0\x14select-model-request\x03\0$\x01p\x14\x01r\x02\x03cwds\x0bm\
-cp-servers&\x04\0\x13new-session-request\x03\0'\x01k\x1c\x01k#\x01r\x03\x0asessi\
-on-id\x01\x05modes)\x06models*\x04\0\x14new-session-response\x03\0+\x01r\x03\x0a\
-session-id\x01\x03cwds\x0bmcp-servers&\x04\0\x14load-session-request\x03\0-\x01r\
-\x02\x05modes)\x06models*\x04\0\x15load-session-response\x03\0/\x01r\x04\x0asess\
-ion-id\x01\x03cwds\x05title\x17\x0aupdated-at\x17\x04\0\x0csession-info\x03\01\x01\
-r\x02\x03cwd\x17\x06cursor\x17\x04\0\x15list-sessions-request\x03\03\x01p2\x01r\x02\
-\x08sessions5\x0bnext-cursor\x17\x04\0\x16list-sessions-response\x03\06\x01r\x03\
-\x0asession-id\x01\x03cwds\x0bmcp-servers&\x04\0\x16resume-session-request\x03\0\
-8\x01r\x02\x05modes)\x06models*\x04\0\x17resume-session-response\x03\0:\x01r\x02\
-\x05title\x17\x0aupdated-at\x17\x04\0\x13session-info-update\x03\0<\x03\0\x17yos\
-h:acp/sessions@7.0.0\x05\x02\x01B\x14\x01r\x01\x04texts\x04\0\x0ctext-content\x03\
-\0\0\x01ks\x01r\x03\x04datas\x09mime-types\x03uri\x02\x04\0\x0dimage-content\x03\
-\0\x03\x01r\x02\x04datas\x09mime-types\x04\0\x0daudio-content\x03\0\x05\x01kw\x01\
-r\x06\x03uris\x04names\x09mime-type\x02\x05title\x02\x0bdescription\x02\x04size\x07\
-\x04\0\x0dresource-link\x03\0\x08\x01r\x03\x03uris\x09mime-type\x02\x04texts\x04\
-\0\x16text-resource-contents\x03\0\x0a\x01r\x03\x03uris\x09mime-type\x02\x04blob\
-s\x04\0\x16blob-resource-contents\x03\0\x0c\x01q\x02\x04text\x01\x0b\0\x04blob\x01\
-\x0d\0\x04\0\x11resource-contents\x03\0\x0e\x01r\x01\x08resource\x0f\x04\0\x11em\
-bedded-resource\x03\0\x10\x01q\x05\x04text\x01\x01\0\x05image\x01\x04\0\x05audio\
-\x01\x06\0\x0dresource-link\x01\x09\0\x08resource\x01\x11\0\x04\0\x0dcontent-blo\
-ck\x03\0\x12\x03\0\x16yosh:acp/content@7.0.0\x05\x03\x02\x03\0\x02\x0asession-id\
-\x02\x03\0\x02\x07env-var\x01B\x14\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\
-\0\x02\x03\x02\x01\x05\x04\0\x07env-var\x03\0\x02\x01s\x04\0\x0bterminal-id\x03\0\
-\x04\x01ps\x01p\x03\x01ks\x01kw\x01r\x06\x0asession-id\x01\x07commands\x04args\x06\
-\x03env\x07\x03cwd\x08\x11output-byte-limit\x09\x04\0\x17create-terminal-request\
-\x03\0\x0a\x01r\x01\x0bterminal-id\x05\x04\0\x18create-terminal-response\x03\0\x0c\
-\x01kz\x01r\x02\x09exit-code\x0e\x06signal\x08\x04\0\x14terminal-exit-status\x03\
-\0\x0f\x01k\x10\x01r\x03\x06outputs\x09truncated\x7f\x0bexit-status\x11\x04\0\x0f\
-terminal-output\x03\0\x12\x03\0\x18yosh:acp/terminals@7.0.0\x05\x06\x02\x03\0\x03\
-\x0dcontent-block\x02\x03\0\x04\x0bterminal-id\x01B9\x02\x03\x02\x01\x07\x04\0\x0d\
-content-block\x03\0\0\x02\x03\x02\x01\x08\x04\0\x0bterminal-id\x03\0\x02\x01s\x04\
-\0\x0ctool-call-id\x03\0\x04\x04\0\x09tool-call\x03\x01\x01m\x09\x04read\x04edit\
-\x06delete\x04move\x06search\x07execute\x05think\x05fetch\x05other\x04\0\x09tool\
--kind\x03\0\x07\x01m\x04\x07pending\x0bin-progress\x09completed\x06failed\x04\0\x10\
-tool-call-status\x03\0\x09\x01ks\x01r\x03\x04paths\x08old-text\x0b\x08new-texts\x04\
-\0\x04diff\x03\0\x0c\x01q\x03\x07content\x01\x01\0\x04diff\x01\x0d\0\x08terminal\
-\x01\x03\0\x04\0\x11tool-call-content\x03\0\x0e\x01ky\x01r\x02\x04paths\x04line\x10\
-\x04\0\x12tool-call-location\x03\0\x11\x01p\x0f\x01p\x12\x01r\x07\x02id\x05\x05t\
-itles\x04kind\x08\x06status\x0a\x07content\x13\x09locations\x14\x09raw-input\x0b\
-\x04\0\x0etool-call-init\x03\0\x15\x01k\x08\x01k\x0a\x01k\x13\x01k\x14\x01r\x07\x05\
-title\x0b\x04kind\x17\x06status\x18\x07content\x19\x09locations\x1a\x09raw-input\
-\x0b\x0araw-output\x0b\x04\0\x0ftool-call-patch\x03\0\x1b\x01m\x03\x04high\x06me\
-dium\x03low\x04\0\x13plan-entry-priority\x03\0\x1d\x01m\x03\x07pending\x0bin-pro\
-gress\x09completed\x04\0\x11plan-entry-status\x03\0\x1f\x01r\x03\x07contents\x08\
-priority\x1e\x06status\x20\x04\0\x0aplan-entry\x03\0!\x01p\"\x01r\x01\x07entries\
-#\x04\0\x04plan\x03\0$\x01r\x08\x02id\x05\x05titles\x04kind\x08\x06status\x0a\x07\
-content\x13\x09locations\x14\x09raw-input\x0b\x0araw-output\x0b\x04\0\x12tool-ca\
-ll-snapshot\x03\0&\x01m\x04\x0aallow-once\x0callow-always\x0breject-once\x0dreje\
-ct-always\x04\0\x16permission-option-kind\x03\0(\x01r\x03\x02ids\x04names\x04kin\
-d)\x04\0\x11permission-option\x03\0*\x01p+\x01r\x02\x09tool-call'\x07options,\x04\
-\0\x1arequest-permission-request\x03\0-\x01q\x02\x08selected\x01s\0\x09cancelled\
-\0\0\x04\0\x12permission-outcome\x03\0/\x01r\x01\x07outcome0\x04\0\x1brequest-pe\
-rmission-response\x03\01\x01i\x06\x01@\x01\x07initial\x16\03\x04\0\x16[construct\
-or]tool-call\x014\x01h\x06\x01C\x02\x04self5\x05patch\x1c\x01\0\x04\0\x18[method\
-]tool-call.update\x016\x03\0\x14yosh:acp/tools@7.0.0\x05\x09\x02\x03\0\x02\x0fse\
-ssion-mode-id\x02\x03\0\x02\x13session-info-update\x02\x03\0\x05\x12tool-call-sn\
-apshot\x02\x03\0\x05\x04plan\x01B\x16\x02\x03\x02\x01\x0a\x04\0\x0fsession-mode-\
-id\x03\0\0\x02\x03\x02\x01\x0b\x04\0\x13session-info-update\x03\0\x02\x02\x03\x02\
-\x01\x07\x04\0\x0dcontent-block\x03\0\x04\x02\x03\x02\x01\x0c\x04\0\x12tool-call\
--snapshot\x03\0\x06\x02\x03\x02\x01\x0d\x04\0\x04plan\x03\0\x08\x01m\x05\x08end-\
-turn\x0amax-tokens\x11max-turn-requests\x07refusal\x09cancelled\x04\0\x0bstop-re\
-ason\x03\0\x0a\x01r\x01\x0bstop-reason\x0b\x04\0\x0fprompt-response\x03\0\x0c\x01\
-r\x01\x04hints\x04\0\x17available-command-input\x03\0\x0e\x01k\x0f\x01r\x03\x04n\
-ames\x0bdescriptions\x05input\x10\x04\0\x11available-command\x03\0\x11\x01p\x12\x01\
-q\x09\x12user-message-chunk\x01\x05\0\x13agent-message-chunk\x01\x05\0\x13agent-\
-thought-chunk\x01\x05\0\x09tool-call\x01\x07\0\x10tool-call-update\x01\x07\0\x04\
-plan\x01\x09\0\x13current-mode-update\x01\x01\0\x13session-info-update\x01\x03\0\
-\x19available-commands-update\x01\x13\0\x04\0\x0esession-update\x03\0\x14\x03\0\x16\
-yosh:acp/prompts@7.0.0\x05\x0e\x02\x03\0\0\x05error\x02\x03\0\x01\x12initialize-\
-request\x02\x03\0\x01\x13initialize-response\x02\x03\0\x01\x14authenticate-reque\
-st\x02\x03\0\x02\x10session-model-id\x02\x03\0\x02\x13new-session-request\x02\x03\
-\0\x02\x14new-session-response\x02\x03\0\x02\x14load-session-request\x02\x03\0\x02\
-\x15load-session-response\x02\x03\0\x02\x15list-sessions-request\x02\x03\0\x02\x16\
-list-sessions-response\x02\x03\0\x02\x16resume-session-request\x02\x03\0\x02\x17\
-resume-session-response\x02\x03\0\x06\x0esession-update\x02\x03\0\x06\x0fprompt-\
-response\x01BJ\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x10\x04\
-\0\x12initialize-request\x03\0\x02\x02\x03\x02\x01\x11\x04\0\x13initialize-respo\
-nse\x03\0\x04\x02\x03\x02\x01\x12\x04\0\x14authenticate-request\x03\0\x06\x02\x03\
-\x02\x01\x0a\x04\0\x0fsession-mode-id\x03\0\x08\x02\x03\x02\x01\x13\x04\0\x10ses\
-sion-model-id\x03\0\x0a\x02\x03\x02\x01\x14\x04\0\x13new-session-request\x03\0\x0c\
-\x02\x03\x02\x01\x15\x04\0\x14new-session-response\x03\0\x0e\x02\x03\x02\x01\x16\
-\x04\0\x14load-session-request\x03\0\x10\x02\x03\x02\x01\x17\x04\0\x15load-sessi\
-on-response\x03\0\x12\x02\x03\x02\x01\x18\x04\0\x15list-sessions-request\x03\0\x14\
-\x02\x03\x02\x01\x19\x04\0\x16list-sessions-response\x03\0\x16\x02\x03\x02\x01\x1a\
-\x04\0\x16resume-session-request\x03\0\x18\x02\x03\x02\x01\x1b\x04\0\x17resume-s\
-ession-response\x03\0\x1a\x02\x03\x02\x01\x07\x04\0\x0dcontent-block\x03\0\x1c\x02\
-\x03\x02\x01\x1c\x04\0\x0esession-update\x03\0\x1e\x02\x03\x02\x01\x1d\x04\0\x0f\
-prompt-response\x03\0\x20\x04\0\x07session\x03\x01\x04\0\x0bprompt-turn\x03\x01\x01\
-h\"\x01p\x1d\x01i#\x01C\x02\x04self$\x06prompt%\0&\x04\0\x16[method]session.prom\
-pt\x01'\x01j\0\x01\x01\x01C\x02\x04self$\x07mode-id\x09\0(\x04\0\x18[method]sess\
-ion.set-mode\x01)\x01C\x02\x04self$\x08model-id\x0b\0(\x04\0\x1c[method]session.\
-select-model\x01*\x01h#\x01f\x01\x1f\x01C\x01\x04self+\0,\x04\0\x1b[method]promp\
-t-turn.updates\x01-\x01j\x01!\x01\x01\x01C\x01\x04self+\0.\x04\0\x1c[method]prom\
-pt-turn.response\x01/\x01j\x01\x05\x01\x01\x01C\x01\x03req\x03\00\x04\0\x0ainiti\
-alize\x011\x01C\x01\x03req\x07\0(\x04\0\x0cauthenticate\x012\x01i\"\x01o\x023\x0f\
-\x01j\x014\x01\x01\x01C\x01\x03req\x0d\05\x04\0\x0bnew-session\x016\x01o\x023\x13\
-\x01j\x017\x01\x01\x01C\x01\x03req\x11\08\x04\0\x0cload-session\x019\x01j\x01\x17\
-\x01\x01\x01C\x01\x03req\x15\0:\x04\0\x0dlist-sessions\x01;\x01o\x023\x1b\x01j\x01\
-<\x01\x01\x01C\x01\x03req\x19\0=\x04\0\x0eresume-session\x01>\x03\0\x14yosh:acp/\
-agent@7.0.0\x05\x1e\x01B\x09\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x01\
-ky\x01r\x04\x0asession-id\x01\x04paths\x04line\x02\x05limit\x02\x04\0\x16read-te\
-xt-file-request\x03\0\x03\x01r\x01\x07contents\x04\0\x17read-text-file-response\x03\
-\0\x05\x01r\x03\x0asession-id\x01\x04paths\x07contents\x04\0\x17write-text-file-\
-request\x03\0\x07\x03\0\x19yosh:acp/filesystem@7.0.0\x05\x1f\x02\x03\0\x05\x1are\
-quest-permission-request\x02\x03\0\x05\x1brequest-permission-response\x02\x03\0\x08\
-\x16read-text-file-request\x02\x03\0\x08\x17read-text-file-response\x02\x03\0\x08\
-\x17write-text-file-request\x02\x03\0\x04\x17create-terminal-request\x02\x03\0\x04\
-\x14terminal-exit-status\x01B&\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\
-\x02\x01\x04\x04\0\x0asession-id\x03\0\x02\x02\x03\x02\x01\x20\x04\0\x1arequest-\
-permission-request\x03\0\x04\x02\x03\x02\x01!\x04\0\x1brequest-permission-respon\
-se\x03\0\x06\x02\x03\x02\x01\"\x04\0\x16read-text-file-request\x03\0\x08\x02\x03\
-\x02\x01#\x04\0\x17read-text-file-response\x03\0\x0a\x02\x03\x02\x01$\x04\0\x17w\
-rite-text-file-request\x03\0\x0c\x02\x03\x02\x01%\x04\0\x17create-terminal-reque\
-st\x03\0\x0e\x02\x03\x02\x01&\x04\0\x14terminal-exit-status\x03\0\x10\x04\0\x08t\
-erminal\x03\x01\x01i\x12\x01@\x01\x03req\x0f\0\x13\x04\0\x15[constructor]termina\
-l\x01\x14\x01h\x12\x01f\x01}\x01C\x01\x04self\x15\0\x16\x04\0\x17[method]termina\
-l.output\x01\x17\x01j\x01\x11\x01\x01\x01C\x01\x04self\x15\0\x18\x04\0\x1e[metho\
-d]terminal.wait-for-exit\x01\x19\x01j\x01\x07\x01\x01\x01C\x01\x03req\x05\0\x1a\x04\
-\0\x12request-permission\x01\x1b\x01j\x01\x0b\x01\x01\x01C\x01\x03req\x09\0\x1c\x04\
-\0\x0eread-text-file\x01\x1d\x01j\0\x01\x01\x01C\x01\x03req\x0d\0\x1e\x04\0\x0fw\
-rite-text-file\x01\x1f\x03\0\x15yosh:acp/client@7.0.0\x05'\x01B\x0a\x01q\x03\x08\
-upstream\x01s\0\x02io\x01s\0\x09not-found\0\0\x04\0\x0dsecrets-error\x03\0\0\x01\
-p}\x01q\x02\x06string\x01s\0\x05bytes\x01\x02\0\x04\0\x0csecret-value\x03\0\x03\x04\
-\0\x06secret\x03\x01\x01i\x05\x01j\x01\x06\x01\x01\x01@\x01\x03keys\0\x07\x04\0\x03\
-get\x01\x08\x03\0#wasmcloud:secrets/store@0.1.0-draft\x05(\x02\x03\0\x0a\x06secr\
-et\x02\x03\0\x0a\x0csecret-value\x01B\x07\x02\x03\x02\x01)\x04\0\x06secret\x03\0\
-\0\x02\x03\x02\x01*\x04\0\x0csecret-value\x03\0\x02\x01h\x01\x01@\x01\x01s\x04\0\
-\x03\x04\0\x06reveal\x01\x05\x03\0$wasmcloud:secrets/reveal@0.1.0-draft\x05+\x04\
-\07yosh:acp/provider-with-all-of-its-exports-removed@7.0.0\x04\0\x0b.\x01\0(prov\
-ider-with-all-of-its-exports-removed\x03\0\0\0G\x09producers\x01\x0cprocessed-by\
-\x02\x0dwit-component\x070.245.1\x10wit-bindgen-rust\x060.54.0";
+model-id\x05\x04\0\x14select-model-request\x03\0$\x01s\x04\0\x11session-config-i\
+d\x03\0&\x01s\x04\0\x17session-config-value-id\x03\0(\x01q\x04\x04mode\0\0\x05mo\
+del\0\0\x0dthought-level\0\0\x05other\x01s\0\x04\0\x1esession-config-option-cate\
+gory\x03\0*\x01r\x03\x05value)\x04names\x0bdescription\x17\x04\0\x1csession-conf\
+ig-select-option\x03\0,\x01k+\x01p-\x01r\x07\x02id'\x04names\x0bdescription\x17\x08\
+category.\x0dcurrent-value)\x07options/\x0bprovided-by\x16\x04\0\x15session-conf\
+ig-option\x03\00\x01p\x14\x01r\x02\x03cwds\x0bmcp-servers2\x04\0\x13new-session-\
+request\x03\03\x01k\x1c\x01k#\x01p1\x01k7\x01r\x04\x0asession-id\x01\x05modes5\x06\
+models6\x0econfig-options8\x04\0\x14new-session-response\x03\09\x01r\x03\x0asess\
+ion-id\x01\x03cwds\x0bmcp-servers2\x04\0\x14load-session-request\x03\0;\x01r\x03\
+\x05modes5\x06models6\x0econfig-options8\x04\0\x15load-session-response\x03\0=\x01\
+r\x04\x0asession-id\x01\x03cwds\x05title\x17\x0aupdated-at\x17\x04\0\x0csession-\
+info\x03\0?\x01r\x02\x03cwd\x17\x06cursor\x17\x04\0\x15list-sessions-request\x03\
+\0A\x01p\xc0\0\x01r\x02\x08sessions\xc3\0\x0bnext-cursor\x17\x04\0\x16list-sessi\
+ons-response\x03\0D\x01r\x03\x0asession-id\x01\x03cwds\x0bmcp-servers2\x04\0\x16\
+resume-session-request\x03\0F\x01r\x03\x05modes5\x06models6\x0econfig-options8\x04\
+\0\x17resume-session-response\x03\0H\x01r\x02\x05title\x17\x0aupdated-at\x17\x04\
+\0\x13session-info-update\x03\0J\x03\0\x17yosh:acp/sessions@7.0.0\x05\x02\x01B\x14\
+\x01r\x01\x04texts\x04\0\x0ctext-content\x03\0\0\x01ks\x01r\x03\x04datas\x09mime\
+-types\x03uri\x02\x04\0\x0dimage-content\x03\0\x03\x01r\x02\x04datas\x09mime-typ\
+es\x04\0\x0daudio-content\x03\0\x05\x01kw\x01r\x06\x03uris\x04names\x09mime-type\
+\x02\x05title\x02\x0bdescription\x02\x04size\x07\x04\0\x0dresource-link\x03\0\x08\
+\x01r\x03\x03uris\x09mime-type\x02\x04texts\x04\0\x16text-resource-contents\x03\0\
+\x0a\x01r\x03\x03uris\x09mime-type\x02\x04blobs\x04\0\x16blob-resource-contents\x03\
+\0\x0c\x01q\x02\x04text\x01\x0b\0\x04blob\x01\x0d\0\x04\0\x11resource-contents\x03\
+\0\x0e\x01r\x01\x08resource\x0f\x04\0\x11embedded-resource\x03\0\x10\x01q\x05\x04\
+text\x01\x01\0\x05image\x01\x04\0\x05audio\x01\x06\0\x0dresource-link\x01\x09\0\x08\
+resource\x01\x11\0\x04\0\x0dcontent-block\x03\0\x12\x03\0\x16yosh:acp/content@7.\
+0.0\x05\x03\x02\x03\0\x02\x0asession-id\x02\x03\0\x02\x07env-var\x01B\x14\x02\x03\
+\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x02\x03\x02\x01\x05\x04\0\x07env-var\x03\
+\0\x02\x01s\x04\0\x0bterminal-id\x03\0\x04\x01ps\x01p\x03\x01ks\x01kw\x01r\x06\x0a\
+session-id\x01\x07commands\x04args\x06\x03env\x07\x03cwd\x08\x11output-byte-limi\
+t\x09\x04\0\x17create-terminal-request\x03\0\x0a\x01r\x01\x0bterminal-id\x05\x04\
+\0\x18create-terminal-response\x03\0\x0c\x01kz\x01r\x02\x09exit-code\x0e\x06sign\
+al\x08\x04\0\x14terminal-exit-status\x03\0\x0f\x01k\x10\x01r\x03\x06outputs\x09t\
+runcated\x7f\x0bexit-status\x11\x04\0\x0fterminal-output\x03\0\x12\x03\0\x18yosh\
+:acp/terminals@7.0.0\x05\x06\x02\x03\0\x03\x0dcontent-block\x02\x03\0\x04\x0bter\
+minal-id\x01B9\x02\x03\x02\x01\x07\x04\0\x0dcontent-block\x03\0\0\x02\x03\x02\x01\
+\x08\x04\0\x0bterminal-id\x03\0\x02\x01s\x04\0\x0ctool-call-id\x03\0\x04\x04\0\x09\
+tool-call\x03\x01\x01m\x09\x04read\x04edit\x06delete\x04move\x06search\x07execut\
+e\x05think\x05fetch\x05other\x04\0\x09tool-kind\x03\0\x07\x01m\x04\x07pending\x0b\
+in-progress\x09completed\x06failed\x04\0\x10tool-call-status\x03\0\x09\x01ks\x01\
+r\x03\x04paths\x08old-text\x0b\x08new-texts\x04\0\x04diff\x03\0\x0c\x01q\x03\x07\
+content\x01\x01\0\x04diff\x01\x0d\0\x08terminal\x01\x03\0\x04\0\x11tool-call-con\
+tent\x03\0\x0e\x01ky\x01r\x02\x04paths\x04line\x10\x04\0\x12tool-call-location\x03\
+\0\x11\x01p\x0f\x01p\x12\x01r\x07\x02id\x05\x05titles\x04kind\x08\x06status\x0a\x07\
+content\x13\x09locations\x14\x09raw-input\x0b\x04\0\x0etool-call-init\x03\0\x15\x01\
+k\x08\x01k\x0a\x01k\x13\x01k\x14\x01r\x07\x05title\x0b\x04kind\x17\x06status\x18\
+\x07content\x19\x09locations\x1a\x09raw-input\x0b\x0araw-output\x0b\x04\0\x0ftoo\
+l-call-patch\x03\0\x1b\x01m\x03\x04high\x06medium\x03low\x04\0\x13plan-entry-pri\
+ority\x03\0\x1d\x01m\x03\x07pending\x0bin-progress\x09completed\x04\0\x11plan-en\
+try-status\x03\0\x1f\x01r\x03\x07contents\x08priority\x1e\x06status\x20\x04\0\x0a\
+plan-entry\x03\0!\x01p\"\x01r\x01\x07entries#\x04\0\x04plan\x03\0$\x01r\x08\x02i\
+d\x05\x05titles\x04kind\x08\x06status\x0a\x07content\x13\x09locations\x14\x09raw\
+-input\x0b\x0araw-output\x0b\x04\0\x12tool-call-snapshot\x03\0&\x01m\x04\x0aallo\
+w-once\x0callow-always\x0breject-once\x0dreject-always\x04\0\x16permission-optio\
+n-kind\x03\0(\x01r\x03\x02ids\x04names\x04kind)\x04\0\x11permission-option\x03\0\
+*\x01p+\x01r\x02\x09tool-call'\x07options,\x04\0\x1arequest-permission-request\x03\
+\0-\x01q\x02\x08selected\x01s\0\x09cancelled\0\0\x04\0\x12permission-outcome\x03\
+\0/\x01r\x01\x07outcome0\x04\0\x1brequest-permission-response\x03\01\x01i\x06\x01\
+@\x01\x07initial\x16\03\x04\0\x16[constructor]tool-call\x014\x01h\x06\x01C\x02\x04\
+self5\x05patch\x1c\x01\0\x04\0\x18[method]tool-call.update\x016\x03\0\x14yosh:ac\
+p/tools@7.0.0\x05\x09\x02\x03\0\x02\x0fsession-mode-id\x02\x03\0\x02\x13session-\
+info-update\x02\x03\0\x05\x12tool-call-snapshot\x02\x03\0\x05\x04plan\x01B\x16\x02\
+\x03\x02\x01\x0a\x04\0\x0fsession-mode-id\x03\0\0\x02\x03\x02\x01\x0b\x04\0\x13s\
+ession-info-update\x03\0\x02\x02\x03\x02\x01\x07\x04\0\x0dcontent-block\x03\0\x04\
+\x02\x03\x02\x01\x0c\x04\0\x12tool-call-snapshot\x03\0\x06\x02\x03\x02\x01\x0d\x04\
+\0\x04plan\x03\0\x08\x01m\x05\x08end-turn\x0amax-tokens\x11max-turn-requests\x07\
+refusal\x09cancelled\x04\0\x0bstop-reason\x03\0\x0a\x01r\x01\x0bstop-reason\x0b\x04\
+\0\x0fprompt-response\x03\0\x0c\x01r\x01\x04hints\x04\0\x17available-command-inp\
+ut\x03\0\x0e\x01k\x0f\x01r\x03\x04names\x0bdescriptions\x05input\x10\x04\0\x11av\
+ailable-command\x03\0\x11\x01p\x12\x01q\x09\x12user-message-chunk\x01\x05\0\x13a\
+gent-message-chunk\x01\x05\0\x13agent-thought-chunk\x01\x05\0\x09tool-call\x01\x07\
+\0\x10tool-call-update\x01\x07\0\x04plan\x01\x09\0\x13current-mode-update\x01\x01\
+\0\x13session-info-update\x01\x03\0\x19available-commands-update\x01\x13\0\x04\0\
+\x0esession-update\x03\0\x14\x03\0\x16yosh:acp/prompts@7.0.0\x05\x0e\x02\x03\0\0\
+\x05error\x02\x03\0\x01\x12initialize-request\x02\x03\0\x01\x13initialize-respon\
+se\x02\x03\0\x01\x14authenticate-request\x02\x03\0\x02\x10session-model-id\x02\x03\
+\0\x02\x11session-config-id\x02\x03\0\x02\x17session-config-value-id\x02\x03\0\x02\
+\x15session-config-option\x02\x03\0\x02\x13new-session-request\x02\x03\0\x02\x14\
+new-session-response\x02\x03\0\x02\x14load-session-request\x02\x03\0\x02\x15load\
+-session-response\x02\x03\0\x02\x15list-sessions-request\x02\x03\0\x02\x16list-s\
+essions-response\x02\x03\0\x02\x16resume-session-request\x02\x03\0\x02\x17resume\
+-session-response\x02\x03\0\x06\x0esession-update\x02\x03\0\x06\x0fprompt-respon\
+se\x01BT\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x10\x04\0\x12\
+initialize-request\x03\0\x02\x02\x03\x02\x01\x11\x04\0\x13initialize-response\x03\
+\0\x04\x02\x03\x02\x01\x12\x04\0\x14authenticate-request\x03\0\x06\x02\x03\x02\x01\
+\x0a\x04\0\x0fsession-mode-id\x03\0\x08\x02\x03\x02\x01\x13\x04\0\x10session-mod\
+el-id\x03\0\x0a\x02\x03\x02\x01\x14\x04\0\x11session-config-id\x03\0\x0c\x02\x03\
+\x02\x01\x15\x04\0\x17session-config-value-id\x03\0\x0e\x02\x03\x02\x01\x16\x04\0\
+\x15session-config-option\x03\0\x10\x02\x03\x02\x01\x17\x04\0\x13new-session-req\
+uest\x03\0\x12\x02\x03\x02\x01\x18\x04\0\x14new-session-response\x03\0\x14\x02\x03\
+\x02\x01\x19\x04\0\x14load-session-request\x03\0\x16\x02\x03\x02\x01\x1a\x04\0\x15\
+load-session-response\x03\0\x18\x02\x03\x02\x01\x1b\x04\0\x15list-sessions-reque\
+st\x03\0\x1a\x02\x03\x02\x01\x1c\x04\0\x16list-sessions-response\x03\0\x1c\x02\x03\
+\x02\x01\x1d\x04\0\x16resume-session-request\x03\0\x1e\x02\x03\x02\x01\x1e\x04\0\
+\x17resume-session-response\x03\0\x20\x02\x03\x02\x01\x07\x04\0\x0dcontent-block\
+\x03\0\"\x02\x03\x02\x01\x1f\x04\0\x0esession-update\x03\0$\x02\x03\x02\x01\x20\x04\
+\0\x0fprompt-response\x03\0&\x04\0\x07session\x03\x01\x04\0\x0bprompt-turn\x03\x01\
+\x01h(\x01p#\x01i)\x01C\x02\x04self*\x06prompt+\0,\x04\0\x16[method]session.prom\
+pt\x01-\x01j\0\x01\x01\x01C\x02\x04self*\x07mode-id\x09\0.\x04\0\x18[method]sess\
+ion.set-mode\x01/\x01C\x02\x04self*\x08model-id\x0b\0.\x04\0\x1c[method]session.\
+select-model\x010\x01p\x11\x01j\x011\x01\x01\x01C\x03\x04self*\x09config-id\x0d\x05\
+value\x0f\02\x04\0![method]session.set-config-option\x013\x01h)\x01f\x01%\x01C\x01\
+\x04self4\05\x04\0\x1b[method]prompt-turn.updates\x016\x01j\x01'\x01\x01\x01C\x01\
+\x04self4\07\x04\0\x1c[method]prompt-turn.response\x018\x01j\x01\x05\x01\x01\x01\
+C\x01\x03req\x03\09\x04\0\x0ainitialize\x01:\x01C\x01\x03req\x07\0.\x04\0\x0caut\
+henticate\x01;\x01i(\x01o\x02<\x15\x01j\x01=\x01\x01\x01C\x01\x03req\x13\0>\x04\0\
+\x0bnew-session\x01?\x01o\x02<\x19\x01j\x01\xc0\0\x01\x01\x01C\x01\x03req\x17\0\xc1\
+\0\x04\0\x0cload-session\x01B\x01j\x01\x1d\x01\x01\x01C\x01\x03req\x1b\0\xc3\0\x04\
+\0\x0dlist-sessions\x01D\x01o\x02<!\x01j\x01\xc5\0\x01\x01\x01C\x01\x03req\x1f\0\
+\xc6\0\x04\0\x0eresume-session\x01G\x03\0\x14yosh:acp/agent@7.0.0\x05!\x01B\x09\x02\
+\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x01ky\x01r\x04\x0asession-id\x01\x04\
+paths\x04line\x02\x05limit\x02\x04\0\x16read-text-file-request\x03\0\x03\x01r\x01\
+\x07contents\x04\0\x17read-text-file-response\x03\0\x05\x01r\x03\x0asession-id\x01\
+\x04paths\x07contents\x04\0\x17write-text-file-request\x03\0\x07\x03\0\x19yosh:a\
+cp/filesystem@7.0.0\x05\"\x02\x03\0\x05\x1arequest-permission-request\x02\x03\0\x05\
+\x1brequest-permission-response\x02\x03\0\x08\x16read-text-file-request\x02\x03\0\
+\x08\x17read-text-file-response\x02\x03\0\x08\x17write-text-file-request\x02\x03\
+\0\x04\x17create-terminal-request\x02\x03\0\x04\x14terminal-exit-status\x01B&\x02\
+\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\
+\0\x02\x02\x03\x02\x01#\x04\0\x1arequest-permission-request\x03\0\x04\x02\x03\x02\
+\x01$\x04\0\x1brequest-permission-response\x03\0\x06\x02\x03\x02\x01%\x04\0\x16r\
+ead-text-file-request\x03\0\x08\x02\x03\x02\x01&\x04\0\x17read-text-file-respons\
+e\x03\0\x0a\x02\x03\x02\x01'\x04\0\x17write-text-file-request\x03\0\x0c\x02\x03\x02\
+\x01(\x04\0\x17create-terminal-request\x03\0\x0e\x02\x03\x02\x01)\x04\0\x14termi\
+nal-exit-status\x03\0\x10\x04\0\x08terminal\x03\x01\x01i\x12\x01@\x01\x03req\x0f\
+\0\x13\x04\0\x15[constructor]terminal\x01\x14\x01h\x12\x01f\x01}\x01C\x01\x04sel\
+f\x15\0\x16\x04\0\x17[method]terminal.output\x01\x17\x01j\x01\x11\x01\x01\x01C\x01\
+\x04self\x15\0\x18\x04\0\x1e[method]terminal.wait-for-exit\x01\x19\x01j\x01\x07\x01\
+\x01\x01C\x01\x03req\x05\0\x1a\x04\0\x12request-permission\x01\x1b\x01j\x01\x0b\x01\
+\x01\x01C\x01\x03req\x09\0\x1c\x04\0\x0eread-text-file\x01\x1d\x01j\0\x01\x01\x01\
+C\x01\x03req\x0d\0\x1e\x04\0\x0fwrite-text-file\x01\x1f\x03\0\x15yosh:acp/client\
+@7.0.0\x05*\x01B\x0a\x01q\x03\x08upstream\x01s\0\x02io\x01s\0\x09not-found\0\0\x04\
+\0\x0dsecrets-error\x03\0\0\x01p}\x01q\x02\x06string\x01s\0\x05bytes\x01\x02\0\x04\
+\0\x0csecret-value\x03\0\x03\x04\0\x06secret\x03\x01\x01i\x05\x01j\x01\x06\x01\x01\
+\x01@\x01\x03keys\0\x07\x04\0\x03get\x01\x08\x03\0#wasmcloud:secrets/store@0.1.0\
+-draft\x05+\x02\x03\0\x0a\x06secret\x02\x03\0\x0a\x0csecret-value\x01B\x07\x02\x03\
+\x02\x01,\x04\0\x06secret\x03\0\0\x02\x03\x02\x01-\x04\0\x0csecret-value\x03\0\x02\
+\x01h\x01\x01@\x01\x01s\x04\0\x03\x04\0\x06reveal\x01\x05\x03\0$wasmcloud:secret\
+s/reveal@0.1.0-draft\x05.\x04\07yosh:acp/provider-with-all-of-its-exports-remove\
+d@7.0.0\x04\0\x0b.\x01\0(provider-with-all-of-its-exports-removed\x03\0\0\0G\x09\
+producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.245.1\x10wit-bindgen-rus\
+t\x060.54.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {
