@@ -336,6 +336,11 @@ struct ChatRequest<'a> {
     model: &'a str,
     messages: &'a [Message],
     stream: bool,
+    /// Native reasoning-effort control. Only set for models whose
+    /// `capabilities.supports.reasoning_effort` advertises the value;
+    /// sending it to a non-reasoning model (e.g. gpt-4o) is a 400.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -403,6 +408,7 @@ fn parse_sse_line(line: &str) -> SseEvent {
 /// a Copilot token that expired mid-session.
 pub async fn chat<F, Fut>(
     model: String,
+    reasoning_effort: Option<String>,
     history: Vec<Message>,
     mut on_chunk: F,
 ) -> Result<String, String>
@@ -410,10 +416,11 @@ where
     F: FnMut(String) -> Fut,
     Fut: core::future::Future<Output = ()>,
 {
-    match chat_once(&model, &history, &mut on_chunk).await {
+    let effort = reasoning_effort.as_deref();
+    match chat_once(&model, effort, &history, &mut on_chunk).await {
         Err(ChatError::Auth(_)) => {
             invalidate_token();
-            chat_once(&model, &history, &mut on_chunk)
+            chat_once(&model, effort, &history, &mut on_chunk)
                 .await
                 .map_err(|e| e.into_string())
         }
@@ -438,6 +445,7 @@ impl ChatError {
 
 async fn chat_once<F, Fut>(
     model: &str,
+    reasoning_effort: Option<&str>,
     history: &[Message],
     on_chunk: &mut F,
 ) -> Result<String, ChatError>
@@ -451,6 +459,7 @@ where
         model,
         messages: history,
         stream: true,
+        reasoning_effort,
     })
     .map_err(|e| ChatError::Other(format!("encode chat request: {e}")))?;
 
@@ -529,6 +538,11 @@ where
 pub struct CopilotModel {
     pub id: String,
     pub name: String,
+    /// The reasoning-effort levels this model supports, in the order the
+    /// API advertises them (e.g. `["low", "medium", "high"]`). Empty for
+    /// models with no native reasoning control (e.g. gpt-4o). Sourced from
+    /// `capabilities.supports.reasoning_effort`.
+    pub reasoning_efforts: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -550,6 +564,14 @@ struct ModelEntry {
 struct ModelCapabilities {
     #[serde(default, rename = "type")]
     kind: Option<String>,
+    #[serde(default)]
+    supports: Option<ModelSupports>,
+}
+
+#[derive(Deserialize)]
+struct ModelSupports {
+    #[serde(default)]
+    reasoning_effort: Option<Vec<String>>,
 }
 
 /// List chat-capable models via `GET {base}/models`, de-duplicated by id and
@@ -592,11 +614,18 @@ pub async fn list_models() -> Result<Vec<CopilotModel>, String> {
     let mut out: Vec<CopilotModel> = Vec::new();
     for entry in body.data {
         // Skip non-chat models (e.g. embeddings) when the capability type is
-        // advertised; keep entries that don't declare one.
+        // advertised; keep entries that don't declare one. Capture the
+        // reasoning-effort levels the model natively supports.
+        let mut reasoning_efforts = Vec::new();
         if let Some(caps) = &entry.capabilities {
             if let Some(kind) = &caps.kind {
                 if kind != "chat" {
                     continue;
+                }
+            }
+            if let Some(supports) = &caps.supports {
+                if let Some(levels) = &supports.reasoning_effort {
+                    reasoning_efforts = levels.clone();
                 }
             }
         }
@@ -604,7 +633,11 @@ pub async fn list_models() -> Result<Vec<CopilotModel>, String> {
             continue;
         }
         let name = entry.name.unwrap_or_else(|| entry.id.clone());
-        out.push(CopilotModel { id: entry.id, name });
+        out.push(CopilotModel {
+            id: entry.id,
+            name,
+            reasoning_efforts,
+        });
     }
     Ok(out)
 }

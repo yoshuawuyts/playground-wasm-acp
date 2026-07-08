@@ -64,13 +64,13 @@ impl GuestSession for ProviderSession {
     }
 
     async fn set_mode(&self, _mode_id: SessionModeId) -> Result<(), Error> {
-        // The provider advertises modes via `config-options` (the unified
-        // selector mechanism), not the legacy `modes` field, so clients
-        // drive mode changes through `set-config-option` instead. The
-        // legacy `set-mode` slot is reserved for layers.
+        // The Copilot API exposes no "mode" concept, so this provider never
+        // advertises modes and the legacy `set-mode` slot is unused (it is
+        // reserved for layers). Model and thinking-level selection are driven
+        // through `set-config-option` instead.
         Err(err(
             ErrorCode::InvalidParams,
-            "copilot provider drives modes through set-config-option, not set-mode",
+            "copilot provider does not support modes",
         ))
     }
 
@@ -98,7 +98,7 @@ impl GuestSession for ProviderSession {
         let session_id = self.id.clone();
 
         // Apply the change to the addressed option, validating the value
-        // against the option's advertised set.
+        // against the option's advertised (upstream) set.
         let snapshot = SESSIONS
             .with(|s| {
                 let mut sessions = s.borrow_mut();
@@ -118,16 +118,25 @@ impl GuestSession for ProviderSession {
                             return Err(format!("unknown model: {value}"));
                         }
                         session.model = value.clone();
-                    }
-                    CONFIG_MODE => {
-                        if !MODES.iter().any(|(id, _, _)| *id == value) {
-                            return Err(format!("unknown mode: {value}"));
-                        }
-                        session.mode = value.clone();
+                        // The new model may support a different set of
+                        // reasoning levels (or none). Re-resolve so we never
+                        // carry a level the model rejects.
+                        let models = cached_models(&session.model);
+                        session.reasoning =
+                            resolve_reasoning(find_model(&models, &session.model), &session.reasoning);
                     }
                     CONFIG_REASONING => {
-                        if !REASONING_LEVELS.iter().any(|(id, _, _)| *id == value) {
-                            return Err(format!("unknown thinking level: {value}"));
+                        // Validate against the current model's upstream
+                        // reasoning levels — the only source of truth.
+                        let models = cached_models(&session.model);
+                        let supported = find_model(&models, &session.model)
+                            .map(|m| m.reasoning_efforts.iter().any(|e| *e == value))
+                            .unwrap_or(false);
+                        if !supported {
+                            return Err(format!(
+                                "model {} does not support thinking level: {value}",
+                                session.model
+                            ));
                         }
                         session.reasoning = value.clone();
                     }
@@ -145,7 +154,6 @@ impl GuestSession for ProviderSession {
         Ok(build_config_options(
             &models,
             &snapshot.model,
-            &snapshot.mode,
             &snapshot.reasoning,
         ))
     }
@@ -227,41 +235,19 @@ const COMPONENT_ID: &str = "local:copilot-provider";
 // Config option ids. Stable identifiers the editor echoes back on
 // `set-config-option`.
 const CONFIG_MODEL: &str = "model";
-const CONFIG_MODE: &str = "mode";
 const CONFIG_REASONING: &str = "reasoning-effort";
 
-/// Chat modes: `(id, display-name, description)`. Each selects a
-/// system-prompt posture applied on every turn. The first entry is the
-/// default for fresh sessions.
-const MODES: &[(&str, &str, &str)] = &[
-    ("chat", "Chat", "Concise, direct answers."),
-    (
-        "plan",
-        "Plan",
-        "Think step by step and outline a short plan before acting.",
-    ),
-];
-const DEFAULT_MODE: &str = "chat";
-
-/// Thinking levels: `(id, display-name, description)`. Scale how much
-/// deliberation the assistant is asked to apply on each turn.
-const REASONING_LEVELS: &[(&str, &str, &str)] = &[
-    ("none", "None", "No extra deliberation."),
-    ("low", "Low", "Answer quickly and directly."),
-    ("medium", "Medium", "Balanced reasoning."),
-    (
-        "high",
-        "High",
-        "Reason carefully and thoroughly before answering.",
-    ),
-];
-const DEFAULT_REASONING: &str = "medium";
+/// Preferred default thinking level, used when a model supports reasoning
+/// but the session has no (valid) selection yet. Falls back to the model's
+/// first advertised level when `medium` isn't offered.
+const PREFERRED_REASONING: &str = "medium";
 
 thread_local! {
-    /// The account's chat-capable model list, cached per host process the
-    /// first time a session lifecycle response is built. Lets
-    /// `set-config-option` rebuild the full option set without re-hitting
-    /// the models endpoint on every switch.
+    /// The account's chat-capable model list (with per-model capabilities),
+    /// cached per host process the first time a session lifecycle response
+    /// is built. Lets `set-config-option` rebuild the full option set —
+    /// including each model's upstream reasoning-effort levels — without
+    /// re-hitting the models endpoint on every switch.
     static MODELS_CACHE: RefCell<Vec<copilot::CopilotModel>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -278,13 +264,61 @@ fn component_source() -> ComponentSource {
     }
 }
 
-/// Build the three config-option selectors (model, mode, thinking level)
-/// advertised on every session lifecycle response and returned from
-/// `set-config-option`.
+/// Human-readable label for a reasoning-effort id (e.g. `xhigh` -> `XHigh`).
+fn reasoning_label(id: &str) -> String {
+    match id {
+        "none" => "None".to_string(),
+        "low" => "Low".to_string(),
+        "medium" => "Medium".to_string(),
+        "high" => "High".to_string(),
+        "xhigh" => "XHigh".to_string(),
+        "max" => "Max".to_string(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                None => other.to_string(),
+            }
+        }
+    }
+}
+
+/// Locate a model by id in a listing.
+fn find_model<'a>(models: &'a [copilot::CopilotModel], id: &str) -> Option<&'a copilot::CopilotModel> {
+    models.iter().find(|m| m.id == id)
+}
+
+/// Resolve the effective reasoning level for a model, given the session's
+/// stored preference. Returns an empty string when the model advertises no
+/// reasoning support (so no thinking selector is shown, and no
+/// `reasoning_effort` is sent). Otherwise keeps the stored preference if the
+/// model still supports it, else prefers [`PREFERRED_REASONING`], else the
+/// model's first advertised level.
+fn resolve_reasoning(model: Option<&copilot::CopilotModel>, stored: &str) -> String {
+    let Some(model) = model else {
+        return String::new();
+    };
+    let efforts = &model.reasoning_efforts;
+    if efforts.is_empty() {
+        return String::new();
+    }
+    if efforts.iter().any(|e| e == stored) {
+        return stored.to_string();
+    }
+    if efforts.iter().any(|e| e == PREFERRED_REASONING) {
+        return PREFERRED_REASONING.to_string();
+    }
+    efforts[0].clone()
+}
+
+/// Build the config-option selectors advertised on every session lifecycle
+/// response and returned from `set-config-option`. The model selector is
+/// always present; the thinking-level selector is present only when the
+/// current model advertises `reasoning_effort` upstream, and its options are
+/// exactly the levels that model supports.
 fn build_config_options(
     models: &[copilot::CopilotModel],
     current_model: &str,
-    current_mode: &str,
     current_reasoning: &str,
 ) -> Vec<SessionConfigOption> {
     let model_options = models
@@ -295,45 +329,45 @@ fn build_config_options(
             description: None,
         })
         .collect();
-    let static_options = |entries: &[(&str, &str, &str)]| {
-        entries
-            .iter()
-            .map(|(id, name, desc)| SessionConfigSelectOption {
-                value: id.to_string(),
-                name: name.to_string(),
-                description: Some(desc.to_string()),
-            })
-            .collect()
-    };
-    vec![
-        SessionConfigOption {
-            id: CONFIG_MODEL.to_string(),
-            name: "Model".to_string(),
-            description: Some("Which Copilot model backs this session.".to_string()),
-            category: Some(SessionConfigOptionCategory::Model),
-            current_value: current_model.to_string(),
-            options: model_options,
-            provided_by: component_source(),
-        },
-        SessionConfigOption {
-            id: CONFIG_MODE.to_string(),
-            name: "Mode".to_string(),
-            description: Some("How the assistant approaches the conversation.".to_string()),
-            category: Some(SessionConfigOptionCategory::Mode),
-            current_value: current_mode.to_string(),
-            options: static_options(MODES),
-            provided_by: component_source(),
-        },
-        SessionConfigOption {
-            id: CONFIG_REASONING.to_string(),
-            name: "Thinking".to_string(),
-            description: Some("How much deliberation the assistant applies.".to_string()),
-            category: Some(SessionConfigOptionCategory::ThoughtLevel),
-            current_value: current_reasoning.to_string(),
-            options: static_options(REASONING_LEVELS),
-            provided_by: component_source(),
-        },
-    ]
+    let mut options = vec![SessionConfigOption {
+        id: CONFIG_MODEL.to_string(),
+        name: "Model".to_string(),
+        description: Some("Which Copilot model backs this session.".to_string()),
+        category: Some(SessionConfigOptionCategory::Model),
+        current_value: current_model.to_string(),
+        options: model_options,
+        provided_by: component_source(),
+    }];
+
+    // Thinking levels come straight from the current model's upstream
+    // capabilities; omit the selector entirely for models without reasoning.
+    if let Some(model) = find_model(models, current_model) {
+        if !model.reasoning_efforts.is_empty() {
+            let reasoning_options = model
+                .reasoning_efforts
+                .iter()
+                .map(|id| SessionConfigSelectOption {
+                    value: id.clone(),
+                    name: reasoning_label(id),
+                    description: None,
+                })
+                .collect();
+            options.push(SessionConfigOption {
+                id: CONFIG_REASONING.to_string(),
+                name: "Thinking".to_string(),
+                description: Some(
+                    "How much reasoning effort the model applies (from the model's \
+                     capabilities)."
+                        .to_string(),
+                ),
+                category: Some(SessionConfigOptionCategory::ThoughtLevel),
+                current_value: current_reasoning.to_string(),
+                options: reasoning_options,
+                provided_by: component_source(),
+            });
+        }
+    }
+    options
 }
 
 /// Pick the current model: `preferred` if advertised, else
@@ -348,15 +382,16 @@ fn pick_current_model(models: &[copilot::CopilotModel], preferred: Option<&str>)
         .unwrap_or_else(|| models[0].id.clone())
 }
 
-/// Read the cached model list, falling back to a single entry for
-/// `current_model` when the cache is empty (e.g. the models endpoint was
-/// unreachable). Keeps `set-config-option` offline.
+/// Read the cached model list, falling back to a single (reasoning-less)
+/// entry for `current_model` when the cache is empty (e.g. the models
+/// endpoint was unreachable). Keeps `set-config-option` offline.
 fn cached_models(current_model: &str) -> Vec<copilot::CopilotModel> {
     let cached = MODELS_CACHE.with(|c| c.borrow().clone());
     if cached.is_empty() {
         vec![copilot::CopilotModel {
             id: current_model.to_string(),
             name: current_model.to_string(),
+            reasoning_efforts: Vec::new(),
         }]
     } else {
         cached
@@ -364,14 +399,14 @@ fn cached_models(current_model: &str) -> Vec<copilot::CopilotModel> {
 }
 
 /// List chat-capable Copilot models (populating [`MODELS_CACHE`]) and build the
-/// session's config-option selectors plus the resolved current model. Falls
-/// back to a single entry for [`copilot::default_model`] if the API is
-/// unreachable or returns nothing, so session creation still succeeds.
+/// session's config-option selectors, the resolved current model, and the
+/// resolved thinking level for that model. Falls back to a single entry for
+/// [`copilot::default_model`] if the API is unreachable or returns nothing, so
+/// session creation still succeeds.
 async fn build_session_config(
     preferred_model: Option<&str>,
-    mode: &str,
-    reasoning: &str,
-) -> (Vec<SessionConfigOption>, String) {
+    stored_reasoning: &str,
+) -> (Vec<SessionConfigOption>, String, String) {
     let default = copilot::default_model();
     let listed = match copilot::list_models().await {
         Ok(models) if !models.is_empty() => models,
@@ -380,6 +415,7 @@ async fn build_session_config(
             vec![copilot::CopilotModel {
                 id: default.clone(),
                 name: default.clone(),
+                reasoning_efforts: Vec::new(),
             }]
         }
         Err(e) => {
@@ -387,46 +423,15 @@ async fn build_session_config(
             vec![copilot::CopilotModel {
                 id: default.clone(),
                 name: default.clone(),
+                reasoning_efforts: Vec::new(),
             }]
         }
     };
     MODELS_CACHE.with(|c| *c.borrow_mut() = listed.clone());
     let current = pick_current_model(&listed, preferred_model);
-    let options = build_config_options(&listed, &current, mode, reasoning);
-    (options, current)
-}
-
-/// Assemble an ephemeral system directive from the active mode and thinking
-/// level, or `None` when both are neutral. Prepended to the message list on
-/// each turn (never persisted) so switching mode/thinking takes effect on the
-/// very next prompt.
-fn turn_directive(mode: &str, reasoning: &str) -> Option<String> {
-    let mut out = String::new();
-    if mode == "plan" {
-        out.push_str(
-            "Operate in planning mode: before answering, think step by step and outline a short \
-             plan, then carry it out.",
-        );
-    }
-    let reasoning_line = match reasoning {
-        "low" => Some("Prefer brevity: answer quickly and directly with minimal deliberation."),
-        "high" => Some(
-            "Reason carefully and thoroughly, considering edge cases, before giving your final \
-             answer.",
-        ),
-        _ => None,
-    };
-    if let Some(line) = reasoning_line {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(line);
-    }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    let reasoning = resolve_reasoning(find_model(&listed, &current), stored_reasoning);
+    let options = build_config_options(&listed, &current, &reasoning);
+    (options, current, reasoning)
 }
 
 fn next_session_id() -> String {
@@ -505,16 +510,15 @@ impl Guest for Agent {
 
     async fn new_session(req: NewSessionRequest) -> Result<(Session, NewSessionResponse), Error> {
         let id = next_session_id();
-        let (config_options, current_model) =
-            build_session_config(None, DEFAULT_MODE, DEFAULT_REASONING).await;
+        let (config_options, current_model, reasoning) =
+            build_session_config(None, PREFERRED_REASONING).await;
         SESSIONS.with(|s| {
             s.borrow_mut().insert(
                 id.clone(),
                 SessionState {
                     history: Vec::new(),
                     model: current_model,
-                    mode: DEFAULT_MODE.to_string(),
-                    reasoning: DEFAULT_REASONING.to_string(),
+                    reasoning,
                     cwd: req.cwd,
                 },
             )
@@ -548,18 +552,12 @@ impl Guest for Agent {
             .map(|s| s.history.clone())
             .unwrap_or_default();
         let preferred = stored.as_ref().map(|s| s.model.clone());
-        let mode = stored
-            .as_ref()
-            .map(|s| s.mode.clone())
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| DEFAULT_MODE.to_string());
-        let reasoning = stored
+        let stored_reasoning = stored
             .as_ref()
             .map(|s| s.reasoning.clone())
-            .filter(|r| !r.is_empty())
-            .unwrap_or_else(|| DEFAULT_REASONING.to_string());
-        let (config_options, current_model) =
-            build_session_config(preferred.as_deref(), &mode, &reasoning).await;
+            .unwrap_or_default();
+        let (config_options, current_model, reasoning) =
+            build_session_config(preferred.as_deref(), &stored_reasoning).await;
         for msg in &history {
             let block = ContentBlock::Text(TextContent {
                 text: msg.content.clone(),
@@ -577,7 +575,6 @@ impl Guest for Agent {
                 SessionState {
                     history,
                     model: current_model,
-                    mode,
                     reasoning,
                     cwd: req.cwd,
                 },
@@ -614,25 +611,18 @@ impl Guest for Agent {
             .map(|s| s.history.clone())
             .unwrap_or_default();
         let preferred = stored.as_ref().map(|s| s.model.clone());
-        let mode = stored
-            .as_ref()
-            .map(|s| s.mode.clone())
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| DEFAULT_MODE.to_string());
-        let reasoning = stored
+        let stored_reasoning = stored
             .as_ref()
             .map(|s| s.reasoning.clone())
-            .filter(|r| !r.is_empty())
-            .unwrap_or_else(|| DEFAULT_REASONING.to_string());
-        let (config_options, current_model) =
-            build_session_config(preferred.as_deref(), &mode, &reasoning).await;
+            .unwrap_or_default();
+        let (config_options, current_model, reasoning) =
+            build_session_config(preferred.as_deref(), &stored_reasoning).await;
         SESSIONS.with(|s| {
             s.borrow_mut().insert(
                 session_id.clone(),
                 SessionState {
                     history,
                     model: current_model,
-                    mode,
                     reasoning,
                     cwd: req.cwd,
                 },
@@ -663,16 +653,15 @@ async fn prompt_impl(
     }
 
     // Append the user turn to this session's history and grab a copy (plus the
-    // active model, mode, and thinking level) to send to Copilot. New sessions
-    // can land here without going through `new-session` (e.g. tests); fall back
-    // to defaults. A one-time `system` message is prepended on the first prompt.
-    let (history, model, mode, reasoning) = SESSIONS.with(|s| {
+    // active model and thinking level) to send to Copilot. New sessions can
+    // land here without going through `new-session` (e.g. tests); fall back to
+    // defaults. A one-time `system` message is prepended on the first prompt.
+    let (history, model, reasoning) = SESSIONS.with(|s| {
         let mut sessions = s.borrow_mut();
         let entry = sessions.entry(session_id.clone()).or_insert_with(|| SessionState {
             history: Vec::new(),
             model: copilot::default_model(),
-            mode: DEFAULT_MODE.to_string(),
-            reasoning: DEFAULT_REASONING.to_string(),
+            reasoning: String::new(),
             cwd: String::new(),
         });
         if entry.history.is_empty() {
@@ -685,34 +674,25 @@ async fn prompt_impl(
             entry.history.push(Message::system(prompt));
         }
         entry.history.push(Message::user(user_text.clone()));
-        let mode = if entry.mode.is_empty() {
-            DEFAULT_MODE.to_string()
-        } else {
-            entry.mode.clone()
-        };
-        let reasoning = if entry.reasoning.is_empty() {
-            DEFAULT_REASONING.to_string()
-        } else {
-            entry.reasoning.clone()
-        };
-        (entry.history.clone(), entry.model.clone(), mode, reasoning)
+        (entry.history.clone(), entry.model.clone(), entry.reasoning.clone())
     });
 
-    // Prepend an ephemeral directive derived from the current mode + thinking
-    // level. It is sent to the API but never persisted, so mid-session switches
-    // take effect on the very next turn without rewriting stored history.
-    let messages = match turn_directive(&mode, &reasoning) {
-        Some(directive) => {
-            let mut msgs = Vec::with_capacity(history.len() + 1);
-            msgs.push(Message::system(directive));
-            msgs.extend(history);
-            msgs
-        }
-        None => history,
+    // Apply the thinking level as the model's native `reasoning_effort`
+    // parameter — but only when the selected model actually advertises that
+    // level upstream, so we never send it to a model that would reject it
+    // (e.g. gpt-4o returns `invalid_reasoning_effort`).
+    let effort = if reasoning.is_empty() {
+        None
+    } else {
+        let models = cached_models(&model);
+        let supported = find_model(&models, &model)
+            .map(|m| m.reasoning_efforts.iter().any(|e| *e == reasoning))
+            .unwrap_or(false);
+        supported.then(|| reasoning.clone())
     };
 
     let session_id_chunk = session_id.clone();
-    let reply = copilot::chat(model, messages, |chunk| {
+    let reply = copilot::chat(model, effort, history, |chunk| {
         let sid = session_id_chunk.clone();
         async move {
             emit_update(

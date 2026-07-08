@@ -33,18 +33,16 @@ fn path_for(session_id: &str) -> Option<PathBuf> {
 }
 
 /// On-disk session payload: conversation history plus the active model, the
-/// active mode and thinking level, and the working directory the editor sent
-/// on `session/new` / `session/load`.
+/// active thinking level, and the working directory the editor sent on
+/// `session/new` / `session/load`.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SessionState {
     pub history: Vec<Message>,
     pub model: String,
-    /// Active chat mode id (e.g. `"chat"`, `"plan"`). Selects the
-    /// system-prompt posture applied on each turn.
-    #[serde(default)]
-    pub mode: String,
-    /// Active thinking level id (e.g. `"none"`, `"low"`, `"medium"`,
-    /// `"high"`). Scales the deliberation directive applied on each turn.
+    /// Active thinking level id (e.g. `"low"`, `"medium"`, `"high"`), sourced
+    /// from the current model's upstream `reasoning_effort` set. Empty when the
+    /// model advertises no reasoning levels. Sent as the native
+    /// `reasoning_effort` API parameter on each turn.
     #[serde(default)]
     pub reasoning: String,
     #[serde(default)]
