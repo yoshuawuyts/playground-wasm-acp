@@ -206,7 +206,20 @@ async fn exchange_token(github_token: &str) -> Result<CopilotToken, String> {
             .await
             .unwrap_or("<unreadable>")
             .to_string();
-        return Err(format!("copilot token exchange HTTP {status}: {txt}"));
+        // GitHub returns 404 (not 403) when the token authenticates but the
+        // account/OAuth-app carries no Copilot entitlement — notably a
+        // `gh auth token` from the GitHub CLI, whose OAuth app is not
+        // Copilot-enabled. Turn the bare "Not Found" into an actionable hint.
+        let hint = match status.as_u16() {
+            404 => " — the token is valid but not Copilot-entitled. A GitHub CLI \
+token (`gh auth token`) does not work here; mint one from a Copilot editor app \
+via the device flow (see the copilot-provider README, \"Authentication\") and \
+ensure the account has an active Copilot subscription",
+            401 => " — the token was rejected as expired or invalid",
+            403 => " — the token is forbidden from the Copilot API (missing Copilot permission)",
+            _ => "",
+        };
+        return Err(format!("copilot token exchange HTTP {status}: {txt}{hint}"));
     }
 
     let body = resp
