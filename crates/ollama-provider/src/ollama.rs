@@ -185,6 +185,14 @@ struct StreamChunk {
     message: Option<StreamMessage>,
     #[serde(default)]
     done: bool,
+    /// Prompt/context tokens Ollama evaluated for this turn. Present on
+    /// the final `done` chunk.
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
+    /// Tokens Ollama generated for this turn. Present on the final
+    /// `done` chunk.
+    #[serde(default)]
+    eval_count: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -202,6 +210,12 @@ struct StreamMessage {
 pub struct ChatTurn {
     pub content: String,
     pub tool_calls: Vec<OllamaToolCall>,
+    /// Prompt/context tokens Ollama evaluated for this turn, from the
+    /// final `done` chunk. `None` if Ollama didn't report it.
+    pub prompt_eval_count: Option<u64>,
+    /// Tokens Ollama generated for this turn, from the final `done`
+    /// chunk. `None` if Ollama didn't report it.
+    pub eval_count: Option<u64>,
 }
 
 /// Send a streaming chat completion to Ollama. `on_chunk` is invoked once
@@ -256,6 +270,8 @@ where
     let mut buf: Vec<u8> = Vec::new();
     let mut content = String::new();
     let mut tool_calls: Vec<OllamaToolCall> = Vec::new();
+    let mut prompt_eval_count: Option<u64> = None;
+    let mut eval_count: Option<u64> = None;
     let mut done = false;
     'outer: while let Some(frame) = stream.next().await {
         let bytes = frame.map_err(|e| format!("read body: {e}"))?;
@@ -277,6 +293,12 @@ where
                     tool_calls.extend(msg.tool_calls);
                 }
             }
+            if chunk.prompt_eval_count.is_some() {
+                prompt_eval_count = chunk.prompt_eval_count;
+            }
+            if chunk.eval_count.is_some() {
+                eval_count = chunk.eval_count;
+            }
             if chunk.done {
                 done = true;
                 break 'outer;
@@ -294,11 +316,19 @@ where
                     tool_calls.extend(msg.tool_calls);
                 }
             }
+            if chunk.prompt_eval_count.is_some() {
+                prompt_eval_count = chunk.prompt_eval_count;
+            }
+            if chunk.eval_count.is_some() {
+                eval_count = chunk.eval_count;
+            }
         }
     }
     Ok(ChatTurn {
         content,
         tool_calls,
+        prompt_eval_count,
+        eval_count,
     })
 }
 
@@ -315,6 +345,10 @@ struct ShowRequest<'a> {
 struct ShowResponse {
     #[serde(default)]
     capabilities: Vec<String>,
+    /// Architecture metadata (e.g. `llama.context_length`, keyed by the
+    /// model's architecture). Used to derive the context-window size.
+    #[serde(default)]
+    model_info: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Probe Ollama for whether the given model declares tool-calling support
@@ -345,4 +379,40 @@ pub async fn supports_tools(model: &str) -> Result<bool, String> {
         .await
         .map_err(|e| format!("decode show: {e}"))?;
     Ok(body.capabilities.iter().any(|c| c == "tools"))
+}
+
+/// Fetch the model's context-window length (in tokens) from `/api/show`.
+///
+/// Ollama reports this under an architecture-prefixed key in `model_info`
+/// (e.g. `llama.context_length`, `qwen2.context_length`), so we scan for
+/// any key ending in `.context_length`. Returns `Ok(None)` when the model
+/// is unknown or the field is absent, so callers can skip usage reporting
+/// rather than fail the prompt turn.
+pub async fn model_context_length(model: &str) -> Result<Option<u64>, String> {
+    let url = format!("{}/api/show", base_url());
+    let body = Body::from_json(&ShowRequest { model }).map_err(|e| format!("encode: {e}"))?;
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(&url)
+        .header("content-type", "application/json")
+        .body(body)
+        .map_err(|e| format!("build request: {e}"))?;
+    let mut resp = Client::new()
+        .send(req)
+        .await
+        .map_err(|e| format!("send: {e}"))?;
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let body = resp
+        .body_mut()
+        .json::<ShowResponse>()
+        .await
+        .map_err(|e| format!("decode show: {e}"))?;
+    let ctx = body
+        .model_info
+        .iter()
+        .find(|(k, _)| k.ends_with(".context_length"))
+        .and_then(|(_, v)| v.as_u64());
+    Ok(ctx)
 }

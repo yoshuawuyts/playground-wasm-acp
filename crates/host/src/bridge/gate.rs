@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
-use agent_client_protocol::schema;
+use agent_client_protocol::schema::v1 as schema;
 
 #[derive(Default)]
 pub struct NotificationGate {
