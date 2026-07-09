@@ -26,7 +26,8 @@ use acp_wasm_sys::provider::yosh::acp::sessions::{
     ComponentSource, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, NewSessionRequest, NewSessionResponse, ResumeSessionRequest,
     ResumeSessionResponse, SessionConfigId, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SessionConfigValueId, SessionModeId, SessionModelId,
+    SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionModeId,
+    SessionModelId,
 };
 
 use acp_wasm_sys::provider::yosh::acp::client;
@@ -343,7 +344,7 @@ fn build_config_options(
         ),
         category: Some(SessionConfigOptionCategory::Mode),
         current_value: resolve_mode(current_mode),
-        options: vec![
+        options: SessionConfigSelectOptions::Ungrouped(vec![
             SessionConfigSelectOption {
                 value: MODE_AGENT.to_string(),
                 name: "Agent".to_string(),
@@ -367,7 +368,7 @@ fn build_config_options(
                         .to_string(),
                 ),
             },
-        ],
+        ]),
         provided_by: component_source(),
     }];
 
@@ -385,7 +386,7 @@ fn build_config_options(
         description: Some("Which Copilot model backs this session.".to_string()),
         category: Some(SessionConfigOptionCategory::Model),
         current_value: current_model.to_string(),
-        options: model_options,
+        options: SessionConfigSelectOptions::Ungrouped(model_options),
         provided_by: component_source(),
     });
 
@@ -412,7 +413,7 @@ fn build_config_options(
                 ),
                 category: Some(SessionConfigOptionCategory::ThoughtLevel),
                 current_value: current_reasoning.to_string(),
-                options: reasoning_options,
+                options: SessionConfigSelectOptions::Ungrouped(reasoning_options),
                 provided_by: component_source(),
             });
         }
@@ -431,7 +432,7 @@ fn build_config_options(
         ),
         category: Some(SessionConfigOptionCategory::Other("permissions".to_string())),
         current_value: if effective_allow_all { "on" } else { "off" }.to_string(),
-        options: vec![
+        options: SessionConfigSelectOptions::Ungrouped(vec![
             SessionConfigSelectOption {
                 value: "on".to_string(),
                 name: "On".to_string(),
@@ -442,7 +443,7 @@ fn build_config_options(
                 name: "Off".to_string(),
                 description: Some("Require approval for tool requests.".to_string()),
             },
-        ],
+        ]),
         provided_by: component_source(),
     });
 

@@ -22,7 +22,8 @@ use acp_wasm_sys::provider::yosh::acp::sessions::{
     ComponentSource, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, NewSessionRequest, NewSessionResponse, ResumeSessionRequest,
     ResumeSessionResponse, SessionConfigId, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SessionConfigValueId, SessionModeId, SessionModelId,
+    SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionModeId,
+    SessionModelId,
 };
 use acp_wasm_sys::provider::yosh::acp::tools::ToolKind;
 
@@ -197,7 +198,7 @@ fn build_config_options(models: &[String], current_model: &str) -> Vec<SessionCo
         description: Some("Which locally installed Ollama model backs this session.".to_string()),
         category: Some(SessionConfigOptionCategory::Model),
         current_value: current_model.to_string(),
-        options: model_options,
+        options: SessionConfigSelectOptions::Ungrouped(model_options),
         provided_by: component_source(),
     }]
 }

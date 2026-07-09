@@ -24,8 +24,9 @@ use crate::yosh::acp::prompts::{PromptResponse, SessionUpdate, StopReason};
 use crate::yosh::acp::sessions::{
     ComponentSource, EnvVar, HttpHeader, LoadSessionRequest, LoadSessionResponse, McpServer,
     McpServerHttp, McpServerSse, McpServerStdio, NewSessionRequest, NewSessionResponse,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption, SessionId,
-    SessionMode, SessionModeId, SessionModeState,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectGroup,
+    SessionConfigSelectOption, SessionConfigSelectOptions, SessionId, SessionMode, SessionModeId,
+    SessionModeState,
 };
 use crate::yosh::acp::tools::{
     PermissionOption, PermissionOptionKind, PermissionOutcome, RequestPermissionRequest,
@@ -394,17 +395,15 @@ fn session_config_option_to_json(option: SessionConfigOption) -> serde_json::Val
         provided_by: _,
     } = option;
     // The schema flattens `kind` via a `type` discriminator; we only emit
-    // `select` options. `SessionConfigSelectOptions` is untagged, so a flat
-    // array deserializes as the ungrouped variant.
+    // `select` options. `SessionConfigSelectOptions` is untagged: an
+    // ungrouped list serializes as a flat array of option objects, a
+    // grouped list as an array of `{group, name, options}` objects.
     let mut entry = serde_json::json!({
         "id": id,
         "name": name,
         "type": "select",
         "currentValue": current_value,
-        "options": options
-            .into_iter()
-            .map(session_config_select_option_to_json)
-            .collect::<Vec<_>>(),
+        "options": session_config_select_options_to_json(options),
     });
     if let Some(d) = description {
         entry["description"] = serde_json::Value::String(d);
@@ -442,6 +441,42 @@ fn session_config_select_option_to_json(option: SessionConfigSelectOption) -> se
         entry["description"] = serde_json::Value::String(d);
     }
     entry
+}
+
+/// Serialize the (untagged) select-options variant: ungrouped → a flat
+/// array of option objects; grouped → an array of group objects.
+fn session_config_select_options_to_json(
+    options: SessionConfigSelectOptions,
+) -> serde_json::Value {
+    match options {
+        SessionConfigSelectOptions::Ungrouped(list) => serde_json::Value::Array(
+            list.into_iter()
+                .map(session_config_select_option_to_json)
+                .collect(),
+        ),
+        SessionConfigSelectOptions::Grouped(groups) => serde_json::Value::Array(
+            groups
+                .into_iter()
+                .map(session_config_select_group_to_json)
+                .collect(),
+        ),
+    }
+}
+
+fn session_config_select_group_to_json(group: SessionConfigSelectGroup) -> serde_json::Value {
+    let SessionConfigSelectGroup {
+        group,
+        name,
+        options,
+    } = group;
+    serde_json::json!({
+        "group": group,
+        "name": name,
+        "options": options
+            .into_iter()
+            .map(session_config_select_option_to_json)
+            .collect::<Vec<_>>(),
+    })
 }
 
 // -----------------------------------------------------------------------------

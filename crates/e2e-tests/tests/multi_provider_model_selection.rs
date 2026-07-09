@@ -121,32 +121,79 @@ fn model_current_value(resp: &Value) -> String {
         .to_string()
 }
 
-/// `(value, name)` for every entry in the merged model selector.
-fn model_choices(resp: &Value) -> Vec<(String, String)> {
+/// The merged model selector's native groups as
+/// `(group_id, group_name, [(value, name)])` — one per provider.
+fn model_groups(resp: &Value) -> Vec<(String, String, Vec<(String, String)>)> {
     model_option(resp)
         .get("options")
         .and_then(Value::as_array)
-        .map(|opts| {
-            opts.iter()
-                .map(|o| {
-                    (
-                        o.get("value").and_then(Value::as_str).unwrap_or("").to_string(),
-                        o.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
-                    )
+        .map(|groups| {
+            groups
+                .iter()
+                .map(|g| {
+                    let gid = g
+                        .get("group")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let gname = g
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let opts = g
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(|os| {
+                            os.iter()
+                                .map(|o| {
+                                    (
+                                        o.get("value")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        o.get("name")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or("")
+                                            .to_string(),
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (gid, gname, opts)
                 })
                 .collect()
         })
         .unwrap_or_default()
 }
 
-/// The merged `value` of the first model entry whose label mentions
-/// `provider_id`. Panics if none is found.
-fn value_for_provider(resp: &Value, provider_id: &str) -> String {
-    model_choices(resp)
+/// `(value, name)` for every entry across all groups in the merged model
+/// selector.
+fn model_choices(resp: &Value) -> Vec<(String, String)> {
+    model_groups(resp)
         .into_iter()
-        .find(|(_, name)| name.contains(provider_id))
-        .map(|(value, _)| value)
-        .unwrap_or_else(|| panic!("no model entry labelled `{provider_id}` in: {resp}"))
+        .flat_map(|(_, _, opts)| opts)
+        .collect()
+}
+
+/// The `value` of the first model entry in the group whose id is
+/// `provider_id`. Panics if no such group exists.
+fn value_for_provider(resp: &Value, provider_id: &str) -> String {
+    model_groups(resp)
+        .into_iter()
+        .find(|(gid, _, _)| gid == provider_id)
+        .and_then(|(_, _, opts)| opts.into_iter().next().map(|(value, _)| value))
+        .unwrap_or_else(|| panic!("no model group `{provider_id}` in: {resp}"))
+}
+
+/// The id of the group that owns the model entry with `value`.
+fn group_for_value(resp: &Value, value: &str) -> String {
+    model_groups(resp)
+        .into_iter()
+        .find(|(_, _, opts)| opts.iter().any(|(v, _)| v == value))
+        .map(|(gid, _, _)| gid)
+        .unwrap_or_else(|| panic!("no group owns model value `{value}` in: {resp}"))
 }
 
 #[tokio::test]
@@ -214,31 +261,46 @@ async fn merges_models_across_providers_and_switches_active() {
         "merged selector keeps the model category: {s}"
     );
 
+    // The merged selector groups each provider's models under a native
+    // group headed by the provider's component id, with unsuffixed names.
+    let groups = model_groups(&s);
+    let ollama_group = groups
+        .iter()
+        .find(|(gid, _, _)| gid == OLLAMA_PROVIDER_ID)
+        .unwrap_or_else(|| panic!("no ollama model group: {s}"));
+    assert!(
+        ollama_group.2.iter().any(|(_, n)| n == OLLAMA_MODEL_A),
+        "ollama group must list model A under a clean name: {ollama_group:?}"
+    );
+    assert!(
+        ollama_group.2.iter().any(|(_, n)| n == OLLAMA_MODEL_B),
+        "ollama group must list every ollama model: {ollama_group:?}"
+    );
+    let copilot_group = groups
+        .iter()
+        .find(|(gid, _, _)| gid == COPILOT_PROVIDER_ID)
+        .unwrap_or_else(|| panic!("no copilot model group: {s}"));
+    assert!(
+        copilot_group.2.iter().any(|(_, n)| n == COPILOT_MODEL),
+        "copilot group must list copilot's model: {copilot_group:?}"
+    );
+    // Native grouping replaces the old `(namespace:component)` suffix, so
+    // option names must no longer embed the provider id.
     let names: Vec<String> = model_choices(&s).into_iter().map(|(_, n)| n).collect();
     assert!(
-        names.iter().any(|n| n.contains(OLLAMA_MODEL_A) && n.contains(OLLAMA_PROVIDER_ID)),
-        "merged models must list ollama's models, labelled by provider: {names:?}"
-    );
-    assert!(
-        names.iter().any(|n| n.contains(OLLAMA_MODEL_B) && n.contains(OLLAMA_PROVIDER_ID)),
-        "merged models must list every ollama model: {names:?}"
-    );
-    assert!(
-        names.iter().any(|n| n.contains(COPILOT_MODEL) && n.contains(COPILOT_PROVIDER_ID)),
-        "merged models must also list copilot's models, labelled by provider: {names:?}"
+        names
+            .iter()
+            .all(|n| !n.contains(OLLAMA_PROVIDER_ID) && !n.contains(COPILOT_PROVIDER_ID)),
+        "model names must be unsuffixed now that grouping is native: {names:?}"
     );
 
-    // Active provider starts as ollama, so the current model is an ollama one
-    // and copilot's mode/allow-all selectors are not shown yet.
+    // Active provider starts as ollama, so the current model belongs to
+    // ollama's group and copilot's mode/allow-all selectors are not shown.
     let current = model_current_value(&s);
-    let current_name = model_choices(&s)
-        .into_iter()
-        .find(|(v, _)| v == &current)
-        .map(|(_, n)| n)
-        .unwrap_or_default();
-    assert!(
-        current_name.contains(OLLAMA_PROVIDER_ID),
-        "the initial active model belongs to the first-loaded provider (ollama): {current_name}"
+    assert_eq!(
+        group_for_value(&s, &current),
+        OLLAMA_PROVIDER_ID,
+        "the initial active model belongs to the first-loaded provider (ollama): {s}"
     );
     let ids = option_ids(&s);
     assert!(

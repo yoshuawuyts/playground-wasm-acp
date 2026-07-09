@@ -25,7 +25,8 @@ use crate::wasm::{PromptOutcome, Session, SetConfigOptionOutcome, SetModeOutcome
 use crate::yosh::acp::content::ContentBlock;
 use crate::yosh::acp::sessions::{
     ComponentSource, SessionConfigId, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SessionConfigValueId, SessionModeId,
+    SessionConfigSelectGroup, SessionConfigSelectOption, SessionConfigSelectOptions,
+    SessionConfigValueId, SessionModeId,
 };
 
 /// Well-known config-option id for the host's merged, cross-provider
@@ -240,7 +241,7 @@ impl GroupInner {
             // Identity decode map so model selections route uniformly.
             let mut map = HashMap::new();
             if let Some(model) = opts.iter().find(|o| is_model(o)) {
-                for so in &model.options {
+                for so in flatten_select_options(&model.options) {
                     map.insert(so.value.clone(), (0usize, so.value.clone()));
                 }
             }
@@ -251,8 +252,12 @@ impl GroupInner {
         let active = self.active_idx();
         let active_opts = self.providers[active].options.lock().unwrap().clone();
 
-        // Merge every provider's model options into one selector.
-        let mut merged_values: Vec<SessionConfigSelectOption> = Vec::new();
+        // Merge every provider's model options into one selector, one
+        // native ACP group per provider. Option *values* stay
+        // group-unique (encoded with the provider id) because selection
+        // round-trips by value alone; the group is display-only, so
+        // option *names* are the provider's own, unsuffixed.
+        let mut groups: Vec<SessionConfigSelectGroup> = Vec::new();
         let mut map: HashMap<String, (usize, String)> = HashMap::new();
         let mut current_value = String::new();
         for (idx, p) in self.providers.iter().enumerate() {
@@ -260,21 +265,29 @@ impl GroupInner {
             let Some(model) = opts.iter().find(|o| is_model(o)) else {
                 continue;
             };
-            for so in &model.options {
+            let mut group_values: Vec<SessionConfigSelectOption> = Vec::new();
+            for so in flatten_select_options(&model.options) {
                 let merged = encode_model_value(&p.component_id, &so.value);
                 map.insert(merged.clone(), (idx, so.value.clone()));
-                merged_values.push(SessionConfigSelectOption {
+                group_values.push(SessionConfigSelectOption {
                     value: merged.clone(),
-                    name: format!("{} ({})", so.name, p.component_id),
+                    name: so.name.clone(),
                     description: so.description.clone(),
                 });
                 if idx == active && so.value == model.current_value {
                     current_value = merged;
                 }
             }
+            if !group_values.is_empty() {
+                groups.push(SessionConfigSelectGroup {
+                    group: p.component_id.clone(),
+                    name: p.component_id.clone(),
+                    options: group_values,
+                });
+            }
         }
         if current_value.is_empty() {
-            if let Some(first) = merged_values.first() {
+            if let Some(first) = groups.iter().flat_map(|g| g.options.iter()).next() {
                 current_value = first.value.clone();
             }
         }
@@ -286,7 +299,7 @@ impl GroupInner {
             description: Some("Model to use, grouped by provider.".to_string()),
             category: Some(SessionConfigOptionCategory::Model),
             current_value,
-            options: merged_values,
+            options: SessionConfigSelectOptions::Grouped(groups),
             provided_by: ComponentSource {
                 component_id: HOST_COMPONENT_ID.to_string(),
             },
@@ -317,6 +330,21 @@ impl GroupInner {
 /// Whether a config option is the model selector (`category == model`).
 fn is_model(o: &SessionConfigOption) -> bool {
     matches!(o.category, Some(SessionConfigOptionCategory::Model))
+}
+
+/// Flatten a provider's select options (ungrouped or grouped) into a
+/// single sequence. Grouping is a display concern the host re-derives per
+/// provider, so scanning a provider's own options ignores any inbound
+/// grouping.
+fn flatten_select_options(
+    opts: &SessionConfigSelectOptions,
+) -> Vec<&SessionConfigSelectOption> {
+    match opts {
+        SessionConfigSelectOptions::Ungrouped(list) => list.iter().collect(),
+        SessionConfigSelectOptions::Grouped(groups) => {
+            groups.iter().flat_map(|g| g.options.iter()).collect()
+        }
+    }
 }
 
 /// Encode a provider-native model value into a group-unique merged value.
