@@ -1,6 +1,6 @@
 //! WIT-named component plugin installer.
 //!
-//! Wraps [`component_package_manager::manager::Manager`] with an
+//! Wraps [`wasm_package_manager::manager::Manager`] with an
 //! app-scoped XDG cache and a couple of convenience helpers used by the
 //! CLI (`--provider`/`--layer`) and by the host-side `/install` slash
 //! command.
@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use component_package_manager::manager::{
+use wasm_package_manager::manager::{
     Manager, SyncPolicy, SyncResult,
     install::{looks_like_wit_name, resolve_wit_name},
 };
@@ -154,7 +154,7 @@ pub async fn install_wit_with_progress(
         // Forward the package manager's own ProgressEvents as
         // human-readable strings on the same channel.
         let (pe_tx, mut pe_rx) =
-            tokio::sync::mpsc::channel::<component_package_manager::ProgressEvent>(32);
+            tokio::sync::mpsc::channel::<wasm_package_manager::ProgressEvent>(32);
         let forward = tokio::spawn(async move {
             let mut total: Option<u64> = None;
             while let Some(ev) = pe_rx.recv().await {
@@ -185,15 +185,15 @@ pub async fn install_wit_with_progress(
     })
 }
 
-/// Map a [`component_package_manager::ProgressEvent`] to a one-line
+/// Map a [`wasm_package_manager::ProgressEvent`] to a one-line
 /// user-facing string. Returns `None` for events that don't merit a
 /// UI update (e.g. fine-grained byte deltas — we throttle those to a
 /// single "downloaded N bytes" line per layer at a time).
 fn format_progress(
-    ev: &component_package_manager::ProgressEvent,
+    ev: &wasm_package_manager::ProgressEvent,
     total: &mut Option<u64>,
 ) -> Option<String> {
-    use component_package_manager::ProgressEvent as P;
+    use wasm_package_manager::ProgressEvent as P;
     match ev {
         P::ManifestFetched { layer_count, .. } => {
             *total = None;
