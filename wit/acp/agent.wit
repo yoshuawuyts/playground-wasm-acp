@@ -10,11 +10,11 @@ package yosh:acp@7.0.0;
 /// resource alongside an initial state snapshot. Dropping the
 /// `session` closes it; there is no `close-session` method.
 ///
-/// A prompt turn is also resource-shaped: `session.prompt(blocks)`
-/// returns a [`prompt-turn`] that exposes the streaming
-/// `session-update` body and the eventual final response. Dropping the
-/// `prompt-turn` cancels the in-flight turn. This mirrors
-/// `wasi:http`'s `handler.handle(request) -> response` shape.
+/// `session.prompt` is a plain async function that returns the
+/// terminal `prompt-response` when the turn ends. Intermediate
+/// `session-update`s (agent message chunks, tool-call lifecycle,
+/// plan/mode notifications, etc.) flow over `client.notify-session`
+/// in the opposite direction.
 interface agent {
     use errors.{error};
     use init.{initialize-request, initialize-response, authenticate-request};
@@ -27,7 +27,7 @@ interface agent {
         resume-session-request, resume-session-response,
     };
     use content.{content-block};
-    use prompts.{session-update, prompt-response};
+    use prompts.{prompt-response};
 
     /// Opaque handle to an active session.
     ///
@@ -35,17 +35,17 @@ interface agent {
     /// `resume-session`; dropping the handle closes the session — no
     /// separate `close-session` method.
     resource session {
-        /// Begin a prompt turn. Returns an owned [`prompt-turn`] that
-        /// streams `session-update`s on its body and resolves a
-        /// `prompt-response` when the turn ends. Drop the turn to
-        /// cancel; awaiting `response()` resolves with
-        /// `stop-reason::cancelled` in that case.
+        /// Run a prompt turn to completion. Resolves with the
+        /// terminal `prompt-response` when the turn ends. Intermediate
+        /// `session-update`s are emitted via `client.notify-session`
+        /// during the call.
         ///
-        /// Multiple concurrent turns on the same session are allowed:
-        /// each one is its own resource with its own body stream.
+        /// To cancel, drop the future (or use the host's cancel
+        /// machinery); the agent MUST resolve with
+        /// `stop-reason::cancelled`.
         ///
         /// See: <https://agentclientprotocol.com/protocol/prompt-turn>
-        prompt: async func(prompt: list<content-block>) -> prompt-turn;
+        prompt: async func(prompt: list<content-block>) -> result<prompt-response, error>;
 
         /// Switch the active mode for this session. The `mode-id` MUST
         /// be one of the modes returned in the session's lifecycle
@@ -67,29 +67,6 @@ interface agent {
         ///
         /// See: <https://agentclientprotocol.com/protocol/session-config>
         set-config-option: async func(config-id: session-config-id, value: session-config-value-id) -> result<list<session-config-option>, error>;
-    }
-
-    /// An in-flight prompt turn.
-    ///
-    /// Holds the streaming "body" (session updates as they happen) and
-    /// the future final response. Dropping the resource cancels the
-    /// turn — the agent MUST resolve `response()` with
-    /// `stop-reason::cancelled` and the `updates` stream MUST end
-    /// promptly.
-    ///
-    /// Analogous to `wasi:http/types.response`: the body is consumed
-    /// separately from the terminal status.
-    resource prompt-turn {
-        /// The streaming body of the turn: every `session-update` the
-        /// agent emits during the turn arrives here in order. The
-        /// stream ends when the turn finishes (whether normally or by
-        /// cancellation).
-        updates: async func() -> stream<session-update>;
-
-        /// The terminal response for this turn. Resolves once the turn
-        /// ends. Safe to call before, during, or after consuming the
-        /// `updates` stream.
-        response: async func() -> result<prompt-response, error>;
     }
 
     /// Establish the connection. Negotiate protocol version, exchange

@@ -4159,12 +4159,14 @@ pub mod yosh {
                         .finish()
                 }
             }
-            /// Monetary cost associated with a [`usage-update`].
+            /// Cost associated with a [`usage-update`]. May be a monetary amount or a
+            /// provider-specific usage unit (e.g. GitHub AI Units).
             #[derive(Clone)]
             pub struct UsageCost {
                 /// The cost amount, expressed in `currency` units.
                 pub amount: f64,
-                /// ISO 4217 currency code (e.g. `USD`).
+                /// The unit of `amount`: an ISO 4217 currency code (e.g. `USD`) or a
+                /// provider-specific usage unit (e.g. `AIU` for GitHub AI Units).
                 pub currency: _rt::String,
             }
             impl ::core::fmt::Debug for UsageCost {
@@ -4192,7 +4194,8 @@ pub mod yosh {
                 pub used: u64,
                 /// Total size of the model's context window, in tokens.
                 pub size: u64,
-                /// Optional monetary cost accrued by the session so far.
+                /// Optional cost accrued by the session so far, in the units named
+                /// by [`usage-cost.currency`].
                 pub cost: Option<UsageCost>,
             }
             impl ::core::fmt::Debug for UsageUpdate {
@@ -4294,11 +4297,11 @@ pub mod yosh {
         /// resource alongside an initial state snapshot. Dropping the
         /// `session` closes it; there is no `close-session` method.
         ///
-        /// A prompt turn is also resource-shaped: `session.prompt(blocks)`
-        /// returns a [`prompt-turn`] that exposes the streaming
-        /// `session-update` body and the eventual final response. Dropping the
-        /// `prompt-turn` cancels the in-flight turn. This mirrors
-        /// `wasi:http`'s `handler.handle(request) -> response` shape.
+        /// `session.prompt` is a plain async function that returns the
+        /// terminal `prompt-response` when the turn ends. Intermediate
+        /// `session-update`s (agent message chunks, tool-call lifecycle,
+        /// plan/mode notifications, etc.) flow over `client.notify-session`
+        /// in the opposite direction.
         #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
         pub mod agent {
             #[used]
@@ -4323,7 +4326,6 @@ pub mod yosh {
             pub type ResumeSessionRequest = super::super::super::yosh::acp::sessions::ResumeSessionRequest;
             pub type ResumeSessionResponse = super::super::super::yosh::acp::sessions::ResumeSessionResponse;
             pub type ContentBlock = super::super::super::yosh::acp::content::ContentBlock;
-            pub type SessionUpdate = super::super::super::yosh::acp::prompts::SessionUpdate;
             pub type PromptResponse = super::super::super::yosh::acp::prompts::PromptResponse;
             /// Opaque handle to an active session.
             ///
@@ -4369,72 +4371,23 @@ pub mod yosh {
                     }
                 }
             }
-            /// An in-flight prompt turn.
-            ///
-            /// Holds the streaming "body" (session updates as they happen) and
-            /// the future final response. Dropping the resource cancels the
-            /// turn — the agent MUST resolve `response()` with
-            /// `stop-reason::cancelled` and the `updates` stream MUST end
-            /// promptly.
-            ///
-            /// Analogous to `wasi:http/types.response`: the body is consumed
-            /// separately from the terminal status.
-            #[derive(Debug)]
-            #[repr(transparent)]
-            pub struct PromptTurn {
-                handle: _rt::Resource<PromptTurn>,
-            }
-            impl PromptTurn {
-                #[doc(hidden)]
-                pub unsafe fn from_handle(handle: u32) -> Self {
-                    Self {
-                        handle: unsafe { _rt::Resource::from_handle(handle) },
-                    }
-                }
-                #[doc(hidden)]
-                pub fn take_handle(&self) -> u32 {
-                    _rt::Resource::take_handle(&self.handle)
-                }
-                #[doc(hidden)]
-                pub fn handle(&self) -> u32 {
-                    _rt::Resource::handle(&self.handle)
-                }
-            }
-            unsafe impl _rt::WasmResource for PromptTurn {
-                #[inline]
-                unsafe fn drop(_handle: u32) {
-                    #[cfg(target_arch = "wasm32")]
-                    #[link(wasm_import_module = "yosh:acp/agent@7.0.0")]
-                    unsafe extern "C" {
-                        #[link_name = "[resource-drop]prompt-turn"]
-                        fn drop(_: i32);
-                    }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    unsafe extern "C" fn drop(_: i32) {
-                        unreachable!()
-                    }
-                    unsafe {
-                        drop(_handle as i32);
-                    }
-                }
-            }
             impl Session {
                 #[allow(unused_unsafe, clippy::all)]
-                /// Begin a prompt turn. Returns an owned [`prompt-turn`] that
-                /// streams `session-update`s on its body and resolves a
-                /// `prompt-response` when the turn ends. Drop the turn to
-                /// cancel; awaiting `response()` resolves with
-                /// `stop-reason::cancelled` in that case.
+                /// Run a prompt turn to completion. Resolves with the
+                /// terminal `prompt-response` when the turn ends. Intermediate
+                /// `session-update`s are emitted via `client.notify-session`
+                /// during the call.
                 ///
-                /// Multiple concurrent turns on the same session are allowed:
-                /// each one is its own resource with its own body stream.
+                /// To cancel, drop the future (or use the host's cancel
+                /// machinery); the agent MUST resolve with
+                /// `stop-reason::cancelled`.
                 ///
                 /// See: <https://agentclientprotocol.com/protocol/prompt-turn>
                 #[allow(async_fn_in_trait)]
                 pub async fn prompt(
                     &self,
                     prompt: _rt::Vec<ContentBlock>,
-                ) -> PromptTurn {
+                ) -> Result<PromptResponse, Error> {
                     unsafe {
                         #[derive(Copy, Clone)]
                         struct ParamsLower(i32, *mut u8, usize);
@@ -4446,11 +4399,14 @@ pub mod yosh {
                         #[allow(unused_parens)]
                         unsafe impl<'a> _Subtask for _MySubtask<'a> {
                             type Params = (&'a Session, _rt::Vec<ContentBlock>);
-                            type Results = PromptTurn;
+                            type Results = Result<PromptResponse, Error>;
                             type ParamsLower = ParamsLower;
                             fn abi_layout(&mut self) -> ::core::alloc::Layout {
                                 unsafe {
-                                    ::core::alloc::Layout::from_size_align_unchecked(4, 4)
+                                    ::core::alloc::Layout::from_size_align_unchecked(
+                                        (8 + 3 * ::core::mem::size_of::<*const u8>()),
+                                        ::core::mem::size_of::<*const u8>(),
+                                    )
                                 }
                             }
                             fn results_offset(&mut self) -> usize {
@@ -5245,8 +5201,67 @@ pub mod yosh {
                                 _ptr: *mut u8,
                             ) -> Self::Results {
                                 unsafe {
-                                    let l0 = *_ptr.add(0).cast::<i32>();
-                                    PromptTurn::from_handle(l0 as u32)
+                                    let l0 = i32::from(*_ptr.add(0).cast::<u8>());
+                                    match l0 {
+                                        0 => {
+                                            let e = {
+                                                let l1 = i32::from(
+                                                    *_ptr.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
+                                                );
+                                                super::super::super::yosh::acp::prompts::PromptResponse {
+                                                    stop_reason: super::super::super::yosh::acp::prompts::StopReason::_lift(
+                                                        l1 as u8,
+                                                    ),
+                                                }
+                                            };
+                                            Ok(e)
+                                        }
+                                        1 => {
+                                            let e = {
+                                                let l2 = i32::from(
+                                                    *_ptr.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
+                                                );
+                                                use super::super::super::yosh::acp::errors::ErrorCode as V4;
+                                                let v4 = match l2 {
+                                                    0 => V4::ParseError,
+                                                    1 => V4::InvalidRequest,
+                                                    2 => V4::MethodNotFound,
+                                                    3 => V4::InvalidParams,
+                                                    4 => V4::InternalError,
+                                                    5 => V4::AuthRequired,
+                                                    6 => V4::ResourceNotFound,
+                                                    n => {
+                                                        debug_assert_eq!(n, 7, "invalid enum discriminant");
+                                                        let e4 = {
+                                                            let l3 = *_ptr
+                                                                .add(4 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<i32>();
+                                                            l3
+                                                        };
+                                                        V4::Other(e4)
+                                                    }
+                                                };
+                                                let l5 = *_ptr
+                                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l6 = *_ptr
+                                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                let len7 = l6;
+                                                let bytes7 = _rt::Vec::from_raw_parts(
+                                                    l5.cast(),
+                                                    len7,
+                                                    len7,
+                                                );
+                                                super::super::super::yosh::acp::errors::Error {
+                                                    code: v4,
+                                                    message: _rt::string_lift(bytes7),
+                                                }
+                                            };
+                                            Err(e)
+                                        }
+                                        _ => _rt::invalid_enum_discriminant(),
+                                    }
                                 }
                             }
                         }
@@ -6014,240 +6029,6 @@ pub mod yosh {
                             _unused: core::marker::PhantomData,
                         }
                             .call((self, config_id, value))
-                            .await
-                    }
-                }
-            }
-            impl PromptTurn {
-                #[allow(unused_unsafe, clippy::all)]
-                /// The streaming body of the turn: every `session-update` the
-                /// agent emits during the turn arrives here in order. The
-                /// stream ends when the turn finishes (whether normally or by
-                /// cancellation).
-                #[allow(async_fn_in_trait)]
-                pub async fn updates(
-                    &self,
-                ) -> wit_bindgen::rt::async_support::StreamReader<SessionUpdate> {
-                    unsafe {
-                        #[derive(Copy, Clone)]
-                        struct ParamsLower(i32);
-                        unsafe impl Send for ParamsLower {}
-                        use wit_bindgen::rt::async_support::Subtask as _Subtask;
-                        struct _MySubtask<'a> {
-                            _unused: core::marker::PhantomData<&'a ()>,
-                        }
-                        #[allow(unused_parens)]
-                        unsafe impl<'a> _Subtask for _MySubtask<'a> {
-                            type Params = (&'a PromptTurn,);
-                            type Results = wit_bindgen::rt::async_support::StreamReader<
-                                SessionUpdate,
-                            >;
-                            type ParamsLower = ParamsLower;
-                            fn abi_layout(&mut self) -> ::core::alloc::Layout {
-                                unsafe {
-                                    ::core::alloc::Layout::from_size_align_unchecked(4, 4)
-                                }
-                            }
-                            fn results_offset(&mut self) -> usize {
-                                0
-                            }
-                            unsafe fn call_import(
-                                &mut self,
-                                _params: Self::ParamsLower,
-                                _results: *mut u8,
-                            ) -> u32 {
-                                #[cfg(target_arch = "wasm32")]
-                                #[link(wasm_import_module = "yosh:acp/agent@7.0.0")]
-                                unsafe extern "C" {
-                                    #[link_name = "[async-lower][method]prompt-turn.updates"]
-                                    fn call(_: i32, _: *mut u8) -> i32;
-                                }
-                                #[cfg(not(target_arch = "wasm32"))]
-                                unsafe extern "C" fn call(_: i32, _: *mut u8) -> i32 {
-                                    unreachable!()
-                                }
-                                unsafe { call(_params.0, _results) as u32 }
-                            }
-                            unsafe fn params_dealloc_lists(
-                                &mut self,
-                                _params: Self::ParamsLower,
-                            ) {
-                                unsafe {}
-                            }
-                            unsafe fn params_dealloc_lists_and_own(
-                                &mut self,
-                                _params: Self::ParamsLower,
-                            ) {
-                                unsafe {}
-                            }
-                            unsafe fn params_lower(
-                                &mut self,
-                                (_lower0,): Self::Params,
-                                _ptr: *mut u8,
-                            ) -> Self::ParamsLower {
-                                unsafe { ParamsLower((_lower0).handle() as i32) }
-                            }
-                            unsafe fn results_lift(
-                                &mut self,
-                                _ptr: *mut u8,
-                            ) -> Self::Results {
-                                unsafe {
-                                    let l0 = *_ptr.add(0).cast::<i32>();
-                                    wit_bindgen::rt::async_support::StreamReader::new(
-                                        l0 as u32,
-                                        &<SessionUpdate as super::super::super::wit_stream::StreamPayload>::VTABLE,
-                                    )
-                                }
-                            }
-                        }
-                        _MySubtask {
-                            _unused: core::marker::PhantomData,
-                        }
-                            .call((self,))
-                            .await
-                    }
-                }
-            }
-            impl PromptTurn {
-                #[allow(unused_unsafe, clippy::all)]
-                /// The terminal response for this turn. Resolves once the turn
-                /// ends. Safe to call before, during, or after consuming the
-                /// `updates` stream.
-                #[allow(async_fn_in_trait)]
-                pub async fn response(&self) -> Result<PromptResponse, Error> {
-                    unsafe {
-                        #[derive(Copy, Clone)]
-                        struct ParamsLower(i32);
-                        unsafe impl Send for ParamsLower {}
-                        use wit_bindgen::rt::async_support::Subtask as _Subtask;
-                        struct _MySubtask<'a> {
-                            _unused: core::marker::PhantomData<&'a ()>,
-                        }
-                        #[allow(unused_parens)]
-                        unsafe impl<'a> _Subtask for _MySubtask<'a> {
-                            type Params = (&'a PromptTurn,);
-                            type Results = Result<PromptResponse, Error>;
-                            type ParamsLower = ParamsLower;
-                            fn abi_layout(&mut self) -> ::core::alloc::Layout {
-                                unsafe {
-                                    ::core::alloc::Layout::from_size_align_unchecked(
-                                        (8 + 3 * ::core::mem::size_of::<*const u8>()),
-                                        ::core::mem::size_of::<*const u8>(),
-                                    )
-                                }
-                            }
-                            fn results_offset(&mut self) -> usize {
-                                0
-                            }
-                            unsafe fn call_import(
-                                &mut self,
-                                _params: Self::ParamsLower,
-                                _results: *mut u8,
-                            ) -> u32 {
-                                #[cfg(target_arch = "wasm32")]
-                                #[link(wasm_import_module = "yosh:acp/agent@7.0.0")]
-                                unsafe extern "C" {
-                                    #[link_name = "[async-lower][method]prompt-turn.response"]
-                                    fn call(_: i32, _: *mut u8) -> i32;
-                                }
-                                #[cfg(not(target_arch = "wasm32"))]
-                                unsafe extern "C" fn call(_: i32, _: *mut u8) -> i32 {
-                                    unreachable!()
-                                }
-                                unsafe { call(_params.0, _results) as u32 }
-                            }
-                            unsafe fn params_dealloc_lists(
-                                &mut self,
-                                _params: Self::ParamsLower,
-                            ) {
-                                unsafe {}
-                            }
-                            unsafe fn params_dealloc_lists_and_own(
-                                &mut self,
-                                _params: Self::ParamsLower,
-                            ) {
-                                unsafe {}
-                            }
-                            unsafe fn params_lower(
-                                &mut self,
-                                (_lower0,): Self::Params,
-                                _ptr: *mut u8,
-                            ) -> Self::ParamsLower {
-                                unsafe { ParamsLower((_lower0).handle() as i32) }
-                            }
-                            unsafe fn results_lift(
-                                &mut self,
-                                _ptr: *mut u8,
-                            ) -> Self::Results {
-                                unsafe {
-                                    let l0 = i32::from(*_ptr.add(0).cast::<u8>());
-                                    match l0 {
-                                        0 => {
-                                            let e = {
-                                                let l1 = i32::from(
-                                                    *_ptr.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
-                                                );
-                                                super::super::super::yosh::acp::prompts::PromptResponse {
-                                                    stop_reason: super::super::super::yosh::acp::prompts::StopReason::_lift(
-                                                        l1 as u8,
-                                                    ),
-                                                }
-                                            };
-                                            Ok(e)
-                                        }
-                                        1 => {
-                                            let e = {
-                                                let l2 = i32::from(
-                                                    *_ptr.add(::core::mem::size_of::<*const u8>()).cast::<u8>(),
-                                                );
-                                                use super::super::super::yosh::acp::errors::ErrorCode as V4;
-                                                let v4 = match l2 {
-                                                    0 => V4::ParseError,
-                                                    1 => V4::InvalidRequest,
-                                                    2 => V4::MethodNotFound,
-                                                    3 => V4::InvalidParams,
-                                                    4 => V4::InternalError,
-                                                    5 => V4::AuthRequired,
-                                                    6 => V4::ResourceNotFound,
-                                                    n => {
-                                                        debug_assert_eq!(n, 7, "invalid enum discriminant");
-                                                        let e4 = {
-                                                            let l3 = *_ptr
-                                                                .add(4 + 1 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<i32>();
-                                                            l3
-                                                        };
-                                                        V4::Other(e4)
-                                                    }
-                                                };
-                                                let l5 = *_ptr
-                                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>();
-                                                let l6 = *_ptr
-                                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                let len7 = l6;
-                                                let bytes7 = _rt::Vec::from_raw_parts(
-                                                    l5.cast(),
-                                                    len7,
-                                                    len7,
-                                                );
-                                                super::super::super::yosh::acp::errors::Error {
-                                                    code: v4,
-                                                    message: _rt::string_lift(bytes7),
-                                                }
-                                            };
-                                            Err(e)
-                                        }
-                                        _ => _rt::invalid_enum_discriminant(),
-                                    }
-                                }
-                            }
-                        }
-                        _MySubtask {
-                            _unused: core::marker::PhantomData,
-                        }
-                            .call((self,))
                             .await
                     }
                 }
@@ -11394,11 +11175,11 @@ pub mod yosh {
         /// Maps to the JSON-RPC methods listed under "Client" in the protocol
         /// overview: <https://agentclientprotocol.com/protocol/overview#client>
         ///
-        /// Unlike earlier versions, this interface does NOT carry the
-        /// `update-session` notification — `session-update`s now flow on the
-        /// streaming body of a [`agent.prompt-turn`]. The client interface
-        /// has shrunk to its genuine outbound calls: permission prompts and
-        /// filesystem/terminal capabilities.
+        /// Per-turn `session-update`s flow on the streaming body of a
+        /// [`agent.prompt-turn`]. Out-of-turn session events (slash-command
+        /// advertisements, mode/model state changes from the agent, session
+        /// info updates) still need a channel and arrive here via
+        /// [`notify-session`].
         #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
         pub mod client {
             #[used]
@@ -11407,6 +11188,7 @@ pub mod yosh {
             use super::super::super::_rt;
             pub type Error = super::super::super::yosh::acp::errors::Error;
             pub type SessionId = super::super::super::yosh::acp::sessions::SessionId;
+            pub type SessionUpdate = super::super::super::yosh::acp::prompts::SessionUpdate;
             pub type RequestPermissionRequest = super::super::super::yosh::acp::tools::RequestPermissionRequest;
             pub type RequestPermissionResponse = super::super::super::yosh::acp::tools::RequestPermissionResponse;
             pub type ReadTextFileRequest = super::super::super::yosh::acp::filesystem::ReadTextFileRequest;
@@ -11460,6 +11242,5535 @@ pub mod yosh {
                     unsafe {
                         drop(_handle as i32);
                     }
+                }
+            }
+            #[allow(unused_unsafe, clippy::all)]
+            /// One-way out-of-turn session notification. Mirrors the legacy
+            /// `session/update` JSON-RPC method for events that don't belong
+            /// to any in-flight prompt-turn (e.g. an agent-emitted
+            /// `available-commands-update` advertised during session startup,
+            /// or a `current-mode-update` reflecting a mode flip the user
+            /// triggered out-of-band).
+            #[allow(async_fn_in_trait)]
+            pub async fn notify_session(
+                session_id: SessionId,
+                update: SessionUpdate,
+            ) -> () {
+                unsafe {
+                    #[derive(Copy, Clone)]
+                    struct ParamsLower(*mut u8);
+                    unsafe impl Send for ParamsLower {}
+                    use wit_bindgen::rt::async_support::Subtask as _Subtask;
+                    struct _MySubtask<'a> {
+                        _unused: core::marker::PhantomData<&'a ()>,
+                    }
+                    #[allow(unused_parens)]
+                    unsafe impl<'a> _Subtask for _MySubtask<'a> {
+                        type Params = (SessionId, SessionUpdate);
+                        type Results = ();
+                        type ParamsLower = ParamsLower;
+                        fn abi_layout(&mut self) -> ::core::alloc::Layout {
+                            unsafe {
+                                ::core::alloc::Layout::from_size_align_unchecked(
+                                    (40 + 14 * ::core::mem::size_of::<*const u8>()),
+                                    8,
+                                )
+                            }
+                        }
+                        fn results_offset(&mut self) -> usize {
+                            0
+                        }
+                        unsafe fn call_import(
+                            &mut self,
+                            _params: Self::ParamsLower,
+                            _results: *mut u8,
+                        ) -> u32 {
+                            #[cfg(target_arch = "wasm32")]
+                            #[link(wasm_import_module = "yosh:acp/client@7.0.0")]
+                            unsafe extern "C" {
+                                #[link_name = "[async-lower]notify-session"]
+                                fn call(_: *mut u8) -> i32;
+                            }
+                            #[cfg(not(target_arch = "wasm32"))]
+                            unsafe extern "C" fn call(_: *mut u8) -> i32 {
+                                unreachable!()
+                            }
+                            unsafe { call(_params.0) as u32 }
+                        }
+                        unsafe fn params_dealloc_lists(
+                            &mut self,
+                            _params: Self::ParamsLower,
+                        ) {
+                            unsafe {
+                                let l0 = *_params.0.add(0).cast::<*mut u8>();
+                                let l1 = *_params
+                                    .0
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                _rt::cabi_dealloc(l0, l1, 1);
+                                let l2 = i32::from(
+                                    *_params
+                                        .0
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>(),
+                                );
+                                match l2 {
+                                    0 => {
+                                        let l3 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l3 {
+                                            0 => {
+                                                let l4 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l5 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l4, l5, 1);
+                                            }
+                                            1 => {
+                                                let l6 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l7 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l6, l7, 1);
+                                                let l8 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l9 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l8, l9, 1);
+                                                let l10 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l10 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l11 = *_params
+                                                            .0
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l12 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l11, l12, 1);
+                                                    }
+                                                }
+                                            }
+                                            2 => {
+                                                let l13 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l14 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l13, l14, 1);
+                                                let l15 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l16 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l15, l16, 1);
+                                            }
+                                            3 => {
+                                                let l17 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l18 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l17, l18, 1);
+                                                let l19 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l20 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l19, l20, 1);
+                                                let l21 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l21 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l22 = *_params
+                                                            .0
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l23 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l22, l23, 1);
+                                                    }
+                                                }
+                                                let l24 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l24 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l25 = *_params
+                                                            .0
+                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l26 = *_params
+                                                            .0
+                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l25, l26, 1);
+                                                    }
+                                                }
+                                                let l27 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 12 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l27 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l28 = *_params
+                                                            .0
+                                                            .add(16 + 13 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l29 = *_params
+                                                            .0
+                                                            .add(16 + 14 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l28, l29, 1);
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                let l30 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l30 {
+                                                    0 => {
+                                                        let l31 = *_params
+                                                            .0
+                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l32 = *_params
+                                                            .0
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l31, l32, 1);
+                                                        let l33 = i32::from(
+                                                            *_params
+                                                                .0
+                                                                .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        match l33 {
+                                                            0 => {}
+                                                            _ => {
+                                                                let l34 = *_params
+                                                                    .0
+                                                                    .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l35 = *_params
+                                                                    .0
+                                                                    .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l34, l35, 1);
+                                                            }
+                                                        }
+                                                        let l36 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l37 = *_params
+                                                            .0
+                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l36, l37, 1);
+                                                    }
+                                                    _ => {
+                                                        let l38 = *_params
+                                                            .0
+                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l39 = *_params
+                                                            .0
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l38, l39, 1);
+                                                        let l40 = i32::from(
+                                                            *_params
+                                                                .0
+                                                                .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        match l40 {
+                                                            0 => {}
+                                                            _ => {
+                                                                let l41 = *_params
+                                                                    .0
+                                                                    .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l42 = *_params
+                                                                    .0
+                                                                    .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l41, l42, 1);
+                                                            }
+                                                        }
+                                                        let l43 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l44 = *_params
+                                                            .0
+                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l43, l44, 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    1 => {
+                                        let l45 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l45 {
+                                            0 => {
+                                                let l46 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l47 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l46, l47, 1);
+                                            }
+                                            1 => {
+                                                let l48 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l49 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l48, l49, 1);
+                                                let l50 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l51 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l50, l51, 1);
+                                                let l52 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l52 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l53 = *_params
+                                                            .0
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l54 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l53, l54, 1);
+                                                    }
+                                                }
+                                            }
+                                            2 => {
+                                                let l55 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l56 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l55, l56, 1);
+                                                let l57 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l58 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l57, l58, 1);
+                                            }
+                                            3 => {
+                                                let l59 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l60 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l59, l60, 1);
+                                                let l61 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l62 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l61, l62, 1);
+                                                let l63 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l63 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l64 = *_params
+                                                            .0
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l65 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l64, l65, 1);
+                                                    }
+                                                }
+                                                let l66 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l66 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l67 = *_params
+                                                            .0
+                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l68 = *_params
+                                                            .0
+                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l67, l68, 1);
+                                                    }
+                                                }
+                                                let l69 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 12 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l69 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l70 = *_params
+                                                            .0
+                                                            .add(16 + 13 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l71 = *_params
+                                                            .0
+                                                            .add(16 + 14 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l70, l71, 1);
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                let l72 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l72 {
+                                                    0 => {
+                                                        let l73 = *_params
+                                                            .0
+                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l74 = *_params
+                                                            .0
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l73, l74, 1);
+                                                        let l75 = i32::from(
+                                                            *_params
+                                                                .0
+                                                                .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        match l75 {
+                                                            0 => {}
+                                                            _ => {
+                                                                let l76 = *_params
+                                                                    .0
+                                                                    .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l77 = *_params
+                                                                    .0
+                                                                    .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l76, l77, 1);
+                                                            }
+                                                        }
+                                                        let l78 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l79 = *_params
+                                                            .0
+                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l78, l79, 1);
+                                                    }
+                                                    _ => {
+                                                        let l80 = *_params
+                                                            .0
+                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l81 = *_params
+                                                            .0
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l80, l81, 1);
+                                                        let l82 = i32::from(
+                                                            *_params
+                                                                .0
+                                                                .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        match l82 {
+                                                            0 => {}
+                                                            _ => {
+                                                                let l83 = *_params
+                                                                    .0
+                                                                    .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l84 = *_params
+                                                                    .0
+                                                                    .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l83, l84, 1);
+                                                            }
+                                                        }
+                                                        let l85 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l86 = *_params
+                                                            .0
+                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l85, l86, 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    2 => {
+                                        let l87 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l87 {
+                                            0 => {
+                                                let l88 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l89 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l88, l89, 1);
+                                            }
+                                            1 => {
+                                                let l90 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l91 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l90, l91, 1);
+                                                let l92 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l93 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l92, l93, 1);
+                                                let l94 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l94 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l95 = *_params
+                                                            .0
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l96 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l95, l96, 1);
+                                                    }
+                                                }
+                                            }
+                                            2 => {
+                                                let l97 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l98 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l97, l98, 1);
+                                                let l99 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l100 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l99, l100, 1);
+                                            }
+                                            3 => {
+                                                let l101 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l102 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l101, l102, 1);
+                                                let l103 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l104 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l103, l104, 1);
+                                                let l105 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l105 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l106 = *_params
+                                                            .0
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l107 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l106, l107, 1);
+                                                    }
+                                                }
+                                                let l108 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l108 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l109 = *_params
+                                                            .0
+                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l110 = *_params
+                                                            .0
+                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l109, l110, 1);
+                                                    }
+                                                }
+                                                let l111 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 12 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l111 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l112 = *_params
+                                                            .0
+                                                            .add(16 + 13 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l113 = *_params
+                                                            .0
+                                                            .add(16 + 14 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l112, l113, 1);
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                let l114 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l114 {
+                                                    0 => {
+                                                        let l115 = *_params
+                                                            .0
+                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l116 = *_params
+                                                            .0
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l115, l116, 1);
+                                                        let l117 = i32::from(
+                                                            *_params
+                                                                .0
+                                                                .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        match l117 {
+                                                            0 => {}
+                                                            _ => {
+                                                                let l118 = *_params
+                                                                    .0
+                                                                    .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l119 = *_params
+                                                                    .0
+                                                                    .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l118, l119, 1);
+                                                            }
+                                                        }
+                                                        let l120 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l121 = *_params
+                                                            .0
+                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l120, l121, 1);
+                                                    }
+                                                    _ => {
+                                                        let l122 = *_params
+                                                            .0
+                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l123 = *_params
+                                                            .0
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l122, l123, 1);
+                                                        let l124 = i32::from(
+                                                            *_params
+                                                                .0
+                                                                .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        match l124 {
+                                                            0 => {}
+                                                            _ => {
+                                                                let l125 = *_params
+                                                                    .0
+                                                                    .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l126 = *_params
+                                                                    .0
+                                                                    .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l125, l126, 1);
+                                                            }
+                                                        }
+                                                        let l127 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l128 = *_params
+                                                            .0
+                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l127, l128, 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    3 => {
+                                        let l129 = *_params
+                                            .0
+                                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l130 = *_params
+                                            .0
+                                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        _rt::cabi_dealloc(l129, l130, 1);
+                                        let l131 = *_params
+                                            .0
+                                            .add(8 + 4 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l132 = *_params
+                                            .0
+                                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        _rt::cabi_dealloc(l131, l132, 1);
+                                        let l133 = *_params
+                                            .0
+                                            .add(8 + 7 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l134 = *_params
+                                            .0
+                                            .add(8 + 8 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let base187 = l133;
+                                        let len187 = l134;
+                                        for i in 0..len187 {
+                                            let base = base187
+                                                .add(i * (40 + 12 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let l135 = i32::from(*base.add(0).cast::<u8>());
+                                                match l135 {
+                                                    0 => {
+                                                        let l136 = i32::from(*base.add(8).cast::<u8>());
+                                                        match l136 {
+                                                            0 => {
+                                                                let l137 = *base.add(16).cast::<*mut u8>();
+                                                                let l138 = *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l137, l138, 1);
+                                                            }
+                                                            1 => {
+                                                                let l139 = *base.add(16).cast::<*mut u8>();
+                                                                let l140 = *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l139, l140, 1);
+                                                                let l141 = *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l142 = *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l141, l142, 1);
+                                                                let l143 = i32::from(
+                                                                    *base
+                                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>(),
+                                                                );
+                                                                match l143 {
+                                                                    0 => {}
+                                                                    _ => {
+                                                                        let l144 = *base
+                                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l145 = *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l144, l145, 1);
+                                                                    }
+                                                                }
+                                                            }
+                                                            2 => {
+                                                                let l146 = *base.add(16).cast::<*mut u8>();
+                                                                let l147 = *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l146, l147, 1);
+                                                                let l148 = *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l149 = *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l148, l149, 1);
+                                                            }
+                                                            3 => {
+                                                                let l150 = *base.add(16).cast::<*mut u8>();
+                                                                let l151 = *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l150, l151, 1);
+                                                                let l152 = *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l153 = *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l152, l153, 1);
+                                                                let l154 = i32::from(
+                                                                    *base
+                                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>(),
+                                                                );
+                                                                match l154 {
+                                                                    0 => {}
+                                                                    _ => {
+                                                                        let l155 = *base
+                                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l156 = *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l155, l156, 1);
+                                                                    }
+                                                                }
+                                                                let l157 = i32::from(
+                                                                    *base
+                                                                        .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>(),
+                                                                );
+                                                                match l157 {
+                                                                    0 => {}
+                                                                    _ => {
+                                                                        let l158 = *base
+                                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l159 = *base
+                                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l158, l159, 1);
+                                                                    }
+                                                                }
+                                                                let l160 = i32::from(
+                                                                    *base
+                                                                        .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>(),
+                                                                );
+                                                                match l160 {
+                                                                    0 => {}
+                                                                    _ => {
+                                                                        let l161 = *base
+                                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l162 = *base
+                                                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l161, l162, 1);
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {
+                                                                let l163 = i32::from(*base.add(16).cast::<u8>());
+                                                                match l163 {
+                                                                    0 => {
+                                                                        let l164 = *base
+                                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l165 = *base
+                                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l164, l165, 1);
+                                                                        let l166 = i32::from(
+                                                                            *base
+                                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                                .cast::<u8>(),
+                                                                        );
+                                                                        match l166 {
+                                                                            0 => {}
+                                                                            _ => {
+                                                                                let l167 = *base
+                                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<*mut u8>();
+                                                                                let l168 = *base
+                                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>();
+                                                                                _rt::cabi_dealloc(l167, l168, 1);
+                                                                            }
+                                                                        }
+                                                                        let l169 = *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l170 = *base
+                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l169, l170, 1);
+                                                                    }
+                                                                    _ => {
+                                                                        let l171 = *base
+                                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l172 = *base
+                                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l171, l172, 1);
+                                                                        let l173 = i32::from(
+                                                                            *base
+                                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                                .cast::<u8>(),
+                                                                        );
+                                                                        match l173 {
+                                                                            0 => {}
+                                                                            _ => {
+                                                                                let l174 = *base
+                                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<*mut u8>();
+                                                                                let l175 = *base
+                                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>();
+                                                                                _rt::cabi_dealloc(l174, l175, 1);
+                                                                            }
+                                                                        }
+                                                                        let l176 = *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l177 = *base
+                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l176, l177, 1);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    1 => {
+                                                        let l178 = *base.add(8).cast::<*mut u8>();
+                                                        let l179 = *base
+                                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l178, l179, 1);
+                                                        let l180 = i32::from(
+                                                            *base
+                                                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        match l180 {
+                                                            0 => {}
+                                                            _ => {
+                                                                let l181 = *base
+                                                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l182 = *base
+                                                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l181, l182, 1);
+                                                            }
+                                                        }
+                                                        let l183 = *base
+                                                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l184 = *base
+                                                            .add(8 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l183, l184, 1);
+                                                    }
+                                                    _ => {
+                                                        let l185 = *base.add(8).cast::<*mut u8>();
+                                                        let l186 = *base
+                                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l185, l186, 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _rt::cabi_dealloc(
+                                            base187,
+                                            len187 * (40 + 12 * ::core::mem::size_of::<*const u8>()),
+                                            8,
+                                        );
+                                        let l188 = *_params
+                                            .0
+                                            .add(8 + 9 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l189 = *_params
+                                            .0
+                                            .add(8 + 10 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let base192 = l188;
+                                        let len192 = l189;
+                                        for i in 0..len192 {
+                                            let base = base192
+                                                .add(i * (8 + 2 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let l190 = *base.add(0).cast::<*mut u8>();
+                                                let l191 = *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l190, l191, 1);
+                                            }
+                                        }
+                                        _rt::cabi_dealloc(
+                                            base192,
+                                            len192 * (8 + 2 * ::core::mem::size_of::<*const u8>()),
+                                            ::core::mem::size_of::<*const u8>(),
+                                        );
+                                        let l193 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 11 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l193 {
+                                            0 => {}
+                                            _ => {
+                                                let l194 = *_params
+                                                    .0
+                                                    .add(8 + 12 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l195 = *_params
+                                                    .0
+                                                    .add(8 + 13 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l194, l195, 1);
+                                            }
+                                        }
+                                        let l196 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 14 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l196 {
+                                            0 => {}
+                                            _ => {
+                                                let l197 = *_params
+                                                    .0
+                                                    .add(8 + 15 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l198 = *_params
+                                                    .0
+                                                    .add(8 + 16 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l197, l198, 1);
+                                            }
+                                        }
+                                    }
+                                    4 => {
+                                        let l199 = *_params
+                                            .0
+                                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l200 = *_params
+                                            .0
+                                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        _rt::cabi_dealloc(l199, l200, 1);
+                                        let l201 = *_params
+                                            .0
+                                            .add(8 + 4 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l202 = *_params
+                                            .0
+                                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        _rt::cabi_dealloc(l201, l202, 1);
+                                        let l203 = *_params
+                                            .0
+                                            .add(8 + 7 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l204 = *_params
+                                            .0
+                                            .add(8 + 8 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let base257 = l203;
+                                        let len257 = l204;
+                                        for i in 0..len257 {
+                                            let base = base257
+                                                .add(i * (40 + 12 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let l205 = i32::from(*base.add(0).cast::<u8>());
+                                                match l205 {
+                                                    0 => {
+                                                        let l206 = i32::from(*base.add(8).cast::<u8>());
+                                                        match l206 {
+                                                            0 => {
+                                                                let l207 = *base.add(16).cast::<*mut u8>();
+                                                                let l208 = *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l207, l208, 1);
+                                                            }
+                                                            1 => {
+                                                                let l209 = *base.add(16).cast::<*mut u8>();
+                                                                let l210 = *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l209, l210, 1);
+                                                                let l211 = *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l212 = *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l211, l212, 1);
+                                                                let l213 = i32::from(
+                                                                    *base
+                                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>(),
+                                                                );
+                                                                match l213 {
+                                                                    0 => {}
+                                                                    _ => {
+                                                                        let l214 = *base
+                                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l215 = *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l214, l215, 1);
+                                                                    }
+                                                                }
+                                                            }
+                                                            2 => {
+                                                                let l216 = *base.add(16).cast::<*mut u8>();
+                                                                let l217 = *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l216, l217, 1);
+                                                                let l218 = *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l219 = *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l218, l219, 1);
+                                                            }
+                                                            3 => {
+                                                                let l220 = *base.add(16).cast::<*mut u8>();
+                                                                let l221 = *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l220, l221, 1);
+                                                                let l222 = *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l223 = *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l222, l223, 1);
+                                                                let l224 = i32::from(
+                                                                    *base
+                                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>(),
+                                                                );
+                                                                match l224 {
+                                                                    0 => {}
+                                                                    _ => {
+                                                                        let l225 = *base
+                                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l226 = *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l225, l226, 1);
+                                                                    }
+                                                                }
+                                                                let l227 = i32::from(
+                                                                    *base
+                                                                        .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>(),
+                                                                );
+                                                                match l227 {
+                                                                    0 => {}
+                                                                    _ => {
+                                                                        let l228 = *base
+                                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l229 = *base
+                                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l228, l229, 1);
+                                                                    }
+                                                                }
+                                                                let l230 = i32::from(
+                                                                    *base
+                                                                        .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>(),
+                                                                );
+                                                                match l230 {
+                                                                    0 => {}
+                                                                    _ => {
+                                                                        let l231 = *base
+                                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l232 = *base
+                                                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l231, l232, 1);
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {
+                                                                let l233 = i32::from(*base.add(16).cast::<u8>());
+                                                                match l233 {
+                                                                    0 => {
+                                                                        let l234 = *base
+                                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l235 = *base
+                                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l234, l235, 1);
+                                                                        let l236 = i32::from(
+                                                                            *base
+                                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                                .cast::<u8>(),
+                                                                        );
+                                                                        match l236 {
+                                                                            0 => {}
+                                                                            _ => {
+                                                                                let l237 = *base
+                                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<*mut u8>();
+                                                                                let l238 = *base
+                                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>();
+                                                                                _rt::cabi_dealloc(l237, l238, 1);
+                                                                            }
+                                                                        }
+                                                                        let l239 = *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l240 = *base
+                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l239, l240, 1);
+                                                                    }
+                                                                    _ => {
+                                                                        let l241 = *base
+                                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l242 = *base
+                                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l241, l242, 1);
+                                                                        let l243 = i32::from(
+                                                                            *base
+                                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                                .cast::<u8>(),
+                                                                        );
+                                                                        match l243 {
+                                                                            0 => {}
+                                                                            _ => {
+                                                                                let l244 = *base
+                                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<*mut u8>();
+                                                                                let l245 = *base
+                                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>();
+                                                                                _rt::cabi_dealloc(l244, l245, 1);
+                                                                            }
+                                                                        }
+                                                                        let l246 = *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l247 = *base
+                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l246, l247, 1);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    1 => {
+                                                        let l248 = *base.add(8).cast::<*mut u8>();
+                                                        let l249 = *base
+                                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l248, l249, 1);
+                                                        let l250 = i32::from(
+                                                            *base
+                                                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        match l250 {
+                                                            0 => {}
+                                                            _ => {
+                                                                let l251 = *base
+                                                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l252 = *base
+                                                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l251, l252, 1);
+                                                            }
+                                                        }
+                                                        let l253 = *base
+                                                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l254 = *base
+                                                            .add(8 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l253, l254, 1);
+                                                    }
+                                                    _ => {
+                                                        let l255 = *base.add(8).cast::<*mut u8>();
+                                                        let l256 = *base
+                                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l255, l256, 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _rt::cabi_dealloc(
+                                            base257,
+                                            len257 * (40 + 12 * ::core::mem::size_of::<*const u8>()),
+                                            8,
+                                        );
+                                        let l258 = *_params
+                                            .0
+                                            .add(8 + 9 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l259 = *_params
+                                            .0
+                                            .add(8 + 10 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let base262 = l258;
+                                        let len262 = l259;
+                                        for i in 0..len262 {
+                                            let base = base262
+                                                .add(i * (8 + 2 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let l260 = *base.add(0).cast::<*mut u8>();
+                                                let l261 = *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l260, l261, 1);
+                                            }
+                                        }
+                                        _rt::cabi_dealloc(
+                                            base262,
+                                            len262 * (8 + 2 * ::core::mem::size_of::<*const u8>()),
+                                            ::core::mem::size_of::<*const u8>(),
+                                        );
+                                        let l263 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 11 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l263 {
+                                            0 => {}
+                                            _ => {
+                                                let l264 = *_params
+                                                    .0
+                                                    .add(8 + 12 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l265 = *_params
+                                                    .0
+                                                    .add(8 + 13 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l264, l265, 1);
+                                            }
+                                        }
+                                        let l266 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 14 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l266 {
+                                            0 => {}
+                                            _ => {
+                                                let l267 = *_params
+                                                    .0
+                                                    .add(8 + 15 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l268 = *_params
+                                                    .0
+                                                    .add(8 + 16 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l267, l268, 1);
+                                            }
+                                        }
+                                    }
+                                    5 => {
+                                        let l269 = *_params
+                                            .0
+                                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l270 = *_params
+                                            .0
+                                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let base273 = l269;
+                                        let len273 = l270;
+                                        for i in 0..len273 {
+                                            let base = base273
+                                                .add(i * (3 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let l271 = *base.add(0).cast::<*mut u8>();
+                                                let l272 = *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l271, l272, 1);
+                                            }
+                                        }
+                                        _rt::cabi_dealloc(
+                                            base273,
+                                            len273 * (3 * ::core::mem::size_of::<*const u8>()),
+                                            ::core::mem::size_of::<*const u8>(),
+                                        );
+                                    }
+                                    6 => {
+                                        let l274 = *_params
+                                            .0
+                                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l275 = *_params
+                                            .0
+                                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        _rt::cabi_dealloc(l274, l275, 1);
+                                    }
+                                    7 => {
+                                        let l276 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l276 {
+                                            0 => {}
+                                            _ => {
+                                                let l277 = *_params
+                                                    .0
+                                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l278 = *_params
+                                                    .0
+                                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l277, l278, 1);
+                                            }
+                                        }
+                                        let l279 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l279 {
+                                            0 => {}
+                                            _ => {
+                                                let l280 = *_params
+                                                    .0
+                                                    .add(8 + 6 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l281 = *_params
+                                                    .0
+                                                    .add(8 + 7 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l280, l281, 1);
+                                            }
+                                        }
+                                    }
+                                    8 => {
+                                        let l282 = *_params
+                                            .0
+                                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l283 = *_params
+                                            .0
+                                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let base291 = l282;
+                                        let len291 = l283;
+                                        for i in 0..len291 {
+                                            let base = base291
+                                                .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let l284 = *base.add(0).cast::<*mut u8>();
+                                                let l285 = *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l284, l285, 1);
+                                                let l286 = *base
+                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l287 = *base
+                                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l286, l287, 1);
+                                                let l288 = i32::from(
+                                                    *base
+                                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l288 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l289 = *base
+                                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l290 = *base
+                                                            .add(6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l289, l290, 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _rt::cabi_dealloc(
+                                            base291,
+                                            len291 * (7 * ::core::mem::size_of::<*const u8>()),
+                                            ::core::mem::size_of::<*const u8>(),
+                                        );
+                                    }
+                                    _ => {
+                                        let l292 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(24 + 2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l292 {
+                                            0 => {}
+                                            _ => {
+                                                let l293 = *_params
+                                                    .0
+                                                    .add(40 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l294 = *_params
+                                                    .0
+                                                    .add(40 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l293, l294, 1);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        unsafe fn params_dealloc_lists_and_own(
+                            &mut self,
+                            _params: Self::ParamsLower,
+                        ) {
+                            unsafe {
+                                let l0 = *_params.0.add(0).cast::<*mut u8>();
+                                let l1 = *_params
+                                    .0
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>();
+                                _rt::cabi_dealloc(l0, l1, 1);
+                                let l2 = i32::from(
+                                    *_params
+                                        .0
+                                        .add(2 * ::core::mem::size_of::<*const u8>())
+                                        .cast::<u8>(),
+                                );
+                                match l2 {
+                                    0 => {
+                                        let l3 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l3 {
+                                            0 => {
+                                                let l4 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l5 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l4, l5, 1);
+                                            }
+                                            1 => {
+                                                let l6 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l7 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l6, l7, 1);
+                                                let l8 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l9 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l8, l9, 1);
+                                                let l10 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l10 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l11 = *_params
+                                                            .0
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l12 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l11, l12, 1);
+                                                    }
+                                                }
+                                            }
+                                            2 => {
+                                                let l13 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l14 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l13, l14, 1);
+                                                let l15 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l16 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l15, l16, 1);
+                                            }
+                                            3 => {
+                                                let l17 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l18 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l17, l18, 1);
+                                                let l19 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l20 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l19, l20, 1);
+                                                let l21 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l21 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l22 = *_params
+                                                            .0
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l23 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l22, l23, 1);
+                                                    }
+                                                }
+                                                let l24 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l24 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l25 = *_params
+                                                            .0
+                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l26 = *_params
+                                                            .0
+                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l25, l26, 1);
+                                                    }
+                                                }
+                                                let l27 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 12 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l27 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l28 = *_params
+                                                            .0
+                                                            .add(16 + 13 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l29 = *_params
+                                                            .0
+                                                            .add(16 + 14 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l28, l29, 1);
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                let l30 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l30 {
+                                                    0 => {
+                                                        let l31 = *_params
+                                                            .0
+                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l32 = *_params
+                                                            .0
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l31, l32, 1);
+                                                        let l33 = i32::from(
+                                                            *_params
+                                                                .0
+                                                                .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        match l33 {
+                                                            0 => {}
+                                                            _ => {
+                                                                let l34 = *_params
+                                                                    .0
+                                                                    .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l35 = *_params
+                                                                    .0
+                                                                    .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l34, l35, 1);
+                                                            }
+                                                        }
+                                                        let l36 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l37 = *_params
+                                                            .0
+                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l36, l37, 1);
+                                                    }
+                                                    _ => {
+                                                        let l38 = *_params
+                                                            .0
+                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l39 = *_params
+                                                            .0
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l38, l39, 1);
+                                                        let l40 = i32::from(
+                                                            *_params
+                                                                .0
+                                                                .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        match l40 {
+                                                            0 => {}
+                                                            _ => {
+                                                                let l41 = *_params
+                                                                    .0
+                                                                    .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l42 = *_params
+                                                                    .0
+                                                                    .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l41, l42, 1);
+                                                            }
+                                                        }
+                                                        let l43 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l44 = *_params
+                                                            .0
+                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l43, l44, 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    1 => {
+                                        let l45 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l45 {
+                                            0 => {
+                                                let l46 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l47 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l46, l47, 1);
+                                            }
+                                            1 => {
+                                                let l48 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l49 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l48, l49, 1);
+                                                let l50 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l51 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l50, l51, 1);
+                                                let l52 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l52 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l53 = *_params
+                                                            .0
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l54 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l53, l54, 1);
+                                                    }
+                                                }
+                                            }
+                                            2 => {
+                                                let l55 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l56 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l55, l56, 1);
+                                                let l57 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l58 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l57, l58, 1);
+                                            }
+                                            3 => {
+                                                let l59 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l60 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l59, l60, 1);
+                                                let l61 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l62 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l61, l62, 1);
+                                                let l63 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l63 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l64 = *_params
+                                                            .0
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l65 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l64, l65, 1);
+                                                    }
+                                                }
+                                                let l66 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l66 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l67 = *_params
+                                                            .0
+                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l68 = *_params
+                                                            .0
+                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l67, l68, 1);
+                                                    }
+                                                }
+                                                let l69 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 12 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l69 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l70 = *_params
+                                                            .0
+                                                            .add(16 + 13 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l71 = *_params
+                                                            .0
+                                                            .add(16 + 14 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l70, l71, 1);
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                let l72 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l72 {
+                                                    0 => {
+                                                        let l73 = *_params
+                                                            .0
+                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l74 = *_params
+                                                            .0
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l73, l74, 1);
+                                                        let l75 = i32::from(
+                                                            *_params
+                                                                .0
+                                                                .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        match l75 {
+                                                            0 => {}
+                                                            _ => {
+                                                                let l76 = *_params
+                                                                    .0
+                                                                    .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l77 = *_params
+                                                                    .0
+                                                                    .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l76, l77, 1);
+                                                            }
+                                                        }
+                                                        let l78 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l79 = *_params
+                                                            .0
+                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l78, l79, 1);
+                                                    }
+                                                    _ => {
+                                                        let l80 = *_params
+                                                            .0
+                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l81 = *_params
+                                                            .0
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l80, l81, 1);
+                                                        let l82 = i32::from(
+                                                            *_params
+                                                                .0
+                                                                .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        match l82 {
+                                                            0 => {}
+                                                            _ => {
+                                                                let l83 = *_params
+                                                                    .0
+                                                                    .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l84 = *_params
+                                                                    .0
+                                                                    .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l83, l84, 1);
+                                                            }
+                                                        }
+                                                        let l85 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l86 = *_params
+                                                            .0
+                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l85, l86, 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    2 => {
+                                        let l87 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l87 {
+                                            0 => {
+                                                let l88 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l89 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l88, l89, 1);
+                                            }
+                                            1 => {
+                                                let l90 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l91 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l90, l91, 1);
+                                                let l92 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l93 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l92, l93, 1);
+                                                let l94 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l94 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l95 = *_params
+                                                            .0
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l96 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l95, l96, 1);
+                                                    }
+                                                }
+                                            }
+                                            2 => {
+                                                let l97 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l98 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l97, l98, 1);
+                                                let l99 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l100 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l99, l100, 1);
+                                            }
+                                            3 => {
+                                                let l101 = *_params
+                                                    .0
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l102 = *_params
+                                                    .0
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l101, l102, 1);
+                                                let l103 = *_params
+                                                    .0
+                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l104 = *_params
+                                                    .0
+                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l103, l104, 1);
+                                                let l105 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l105 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l106 = *_params
+                                                            .0
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l107 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l106, l107, 1);
+                                                    }
+                                                }
+                                                let l108 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l108 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l109 = *_params
+                                                            .0
+                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l110 = *_params
+                                                            .0
+                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l109, l110, 1);
+                                                    }
+                                                }
+                                                let l111 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 12 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l111 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l112 = *_params
+                                                            .0
+                                                            .add(16 + 13 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l113 = *_params
+                                                            .0
+                                                            .add(16 + 14 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l112, l113, 1);
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                let l114 = i32::from(
+                                                    *_params
+                                                        .0
+                                                        .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l114 {
+                                                    0 => {
+                                                        let l115 = *_params
+                                                            .0
+                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l116 = *_params
+                                                            .0
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l115, l116, 1);
+                                                        let l117 = i32::from(
+                                                            *_params
+                                                                .0
+                                                                .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        match l117 {
+                                                            0 => {}
+                                                            _ => {
+                                                                let l118 = *_params
+                                                                    .0
+                                                                    .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l119 = *_params
+                                                                    .0
+                                                                    .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l118, l119, 1);
+                                                            }
+                                                        }
+                                                        let l120 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l121 = *_params
+                                                            .0
+                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l120, l121, 1);
+                                                    }
+                                                    _ => {
+                                                        let l122 = *_params
+                                                            .0
+                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l123 = *_params
+                                                            .0
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l122, l123, 1);
+                                                        let l124 = i32::from(
+                                                            *_params
+                                                                .0
+                                                                .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        match l124 {
+                                                            0 => {}
+                                                            _ => {
+                                                                let l125 = *_params
+                                                                    .0
+                                                                    .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l126 = *_params
+                                                                    .0
+                                                                    .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l125, l126, 1);
+                                                            }
+                                                        }
+                                                        let l127 = *_params
+                                                            .0
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l128 = *_params
+                                                            .0
+                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l127, l128, 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    3 => {
+                                        let l129 = *_params
+                                            .0
+                                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l130 = *_params
+                                            .0
+                                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        _rt::cabi_dealloc(l129, l130, 1);
+                                        let l131 = *_params
+                                            .0
+                                            .add(8 + 4 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l132 = *_params
+                                            .0
+                                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        _rt::cabi_dealloc(l131, l132, 1);
+                                        let l133 = *_params
+                                            .0
+                                            .add(8 + 7 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l134 = *_params
+                                            .0
+                                            .add(8 + 8 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let base187 = l133;
+                                        let len187 = l134;
+                                        for i in 0..len187 {
+                                            let base = base187
+                                                .add(i * (40 + 12 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let l135 = i32::from(*base.add(0).cast::<u8>());
+                                                match l135 {
+                                                    0 => {
+                                                        let l136 = i32::from(*base.add(8).cast::<u8>());
+                                                        match l136 {
+                                                            0 => {
+                                                                let l137 = *base.add(16).cast::<*mut u8>();
+                                                                let l138 = *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l137, l138, 1);
+                                                            }
+                                                            1 => {
+                                                                let l139 = *base.add(16).cast::<*mut u8>();
+                                                                let l140 = *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l139, l140, 1);
+                                                                let l141 = *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l142 = *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l141, l142, 1);
+                                                                let l143 = i32::from(
+                                                                    *base
+                                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>(),
+                                                                );
+                                                                match l143 {
+                                                                    0 => {}
+                                                                    _ => {
+                                                                        let l144 = *base
+                                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l145 = *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l144, l145, 1);
+                                                                    }
+                                                                }
+                                                            }
+                                                            2 => {
+                                                                let l146 = *base.add(16).cast::<*mut u8>();
+                                                                let l147 = *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l146, l147, 1);
+                                                                let l148 = *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l149 = *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l148, l149, 1);
+                                                            }
+                                                            3 => {
+                                                                let l150 = *base.add(16).cast::<*mut u8>();
+                                                                let l151 = *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l150, l151, 1);
+                                                                let l152 = *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l153 = *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l152, l153, 1);
+                                                                let l154 = i32::from(
+                                                                    *base
+                                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>(),
+                                                                );
+                                                                match l154 {
+                                                                    0 => {}
+                                                                    _ => {
+                                                                        let l155 = *base
+                                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l156 = *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l155, l156, 1);
+                                                                    }
+                                                                }
+                                                                let l157 = i32::from(
+                                                                    *base
+                                                                        .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>(),
+                                                                );
+                                                                match l157 {
+                                                                    0 => {}
+                                                                    _ => {
+                                                                        let l158 = *base
+                                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l159 = *base
+                                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l158, l159, 1);
+                                                                    }
+                                                                }
+                                                                let l160 = i32::from(
+                                                                    *base
+                                                                        .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>(),
+                                                                );
+                                                                match l160 {
+                                                                    0 => {}
+                                                                    _ => {
+                                                                        let l161 = *base
+                                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l162 = *base
+                                                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l161, l162, 1);
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {
+                                                                let l163 = i32::from(*base.add(16).cast::<u8>());
+                                                                match l163 {
+                                                                    0 => {
+                                                                        let l164 = *base
+                                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l165 = *base
+                                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l164, l165, 1);
+                                                                        let l166 = i32::from(
+                                                                            *base
+                                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                                .cast::<u8>(),
+                                                                        );
+                                                                        match l166 {
+                                                                            0 => {}
+                                                                            _ => {
+                                                                                let l167 = *base
+                                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<*mut u8>();
+                                                                                let l168 = *base
+                                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>();
+                                                                                _rt::cabi_dealloc(l167, l168, 1);
+                                                                            }
+                                                                        }
+                                                                        let l169 = *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l170 = *base
+                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l169, l170, 1);
+                                                                    }
+                                                                    _ => {
+                                                                        let l171 = *base
+                                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l172 = *base
+                                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l171, l172, 1);
+                                                                        let l173 = i32::from(
+                                                                            *base
+                                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                                .cast::<u8>(),
+                                                                        );
+                                                                        match l173 {
+                                                                            0 => {}
+                                                                            _ => {
+                                                                                let l174 = *base
+                                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<*mut u8>();
+                                                                                let l175 = *base
+                                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>();
+                                                                                _rt::cabi_dealloc(l174, l175, 1);
+                                                                            }
+                                                                        }
+                                                                        let l176 = *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l177 = *base
+                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l176, l177, 1);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    1 => {
+                                                        let l178 = *base.add(8).cast::<*mut u8>();
+                                                        let l179 = *base
+                                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l178, l179, 1);
+                                                        let l180 = i32::from(
+                                                            *base
+                                                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        match l180 {
+                                                            0 => {}
+                                                            _ => {
+                                                                let l181 = *base
+                                                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l182 = *base
+                                                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l181, l182, 1);
+                                                            }
+                                                        }
+                                                        let l183 = *base
+                                                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l184 = *base
+                                                            .add(8 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l183, l184, 1);
+                                                    }
+                                                    _ => {
+                                                        let l185 = *base.add(8).cast::<*mut u8>();
+                                                        let l186 = *base
+                                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l185, l186, 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _rt::cabi_dealloc(
+                                            base187,
+                                            len187 * (40 + 12 * ::core::mem::size_of::<*const u8>()),
+                                            8,
+                                        );
+                                        let l188 = *_params
+                                            .0
+                                            .add(8 + 9 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l189 = *_params
+                                            .0
+                                            .add(8 + 10 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let base192 = l188;
+                                        let len192 = l189;
+                                        for i in 0..len192 {
+                                            let base = base192
+                                                .add(i * (8 + 2 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let l190 = *base.add(0).cast::<*mut u8>();
+                                                let l191 = *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l190, l191, 1);
+                                            }
+                                        }
+                                        _rt::cabi_dealloc(
+                                            base192,
+                                            len192 * (8 + 2 * ::core::mem::size_of::<*const u8>()),
+                                            ::core::mem::size_of::<*const u8>(),
+                                        );
+                                        let l193 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 11 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l193 {
+                                            0 => {}
+                                            _ => {
+                                                let l194 = *_params
+                                                    .0
+                                                    .add(8 + 12 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l195 = *_params
+                                                    .0
+                                                    .add(8 + 13 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l194, l195, 1);
+                                            }
+                                        }
+                                        let l196 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 14 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l196 {
+                                            0 => {}
+                                            _ => {
+                                                let l197 = *_params
+                                                    .0
+                                                    .add(8 + 15 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l198 = *_params
+                                                    .0
+                                                    .add(8 + 16 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l197, l198, 1);
+                                            }
+                                        }
+                                    }
+                                    4 => {
+                                        let l199 = *_params
+                                            .0
+                                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l200 = *_params
+                                            .0
+                                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        _rt::cabi_dealloc(l199, l200, 1);
+                                        let l201 = *_params
+                                            .0
+                                            .add(8 + 4 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l202 = *_params
+                                            .0
+                                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        _rt::cabi_dealloc(l201, l202, 1);
+                                        let l203 = *_params
+                                            .0
+                                            .add(8 + 7 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l204 = *_params
+                                            .0
+                                            .add(8 + 8 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let base257 = l203;
+                                        let len257 = l204;
+                                        for i in 0..len257 {
+                                            let base = base257
+                                                .add(i * (40 + 12 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let l205 = i32::from(*base.add(0).cast::<u8>());
+                                                match l205 {
+                                                    0 => {
+                                                        let l206 = i32::from(*base.add(8).cast::<u8>());
+                                                        match l206 {
+                                                            0 => {
+                                                                let l207 = *base.add(16).cast::<*mut u8>();
+                                                                let l208 = *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l207, l208, 1);
+                                                            }
+                                                            1 => {
+                                                                let l209 = *base.add(16).cast::<*mut u8>();
+                                                                let l210 = *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l209, l210, 1);
+                                                                let l211 = *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l212 = *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l211, l212, 1);
+                                                                let l213 = i32::from(
+                                                                    *base
+                                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>(),
+                                                                );
+                                                                match l213 {
+                                                                    0 => {}
+                                                                    _ => {
+                                                                        let l214 = *base
+                                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l215 = *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l214, l215, 1);
+                                                                    }
+                                                                }
+                                                            }
+                                                            2 => {
+                                                                let l216 = *base.add(16).cast::<*mut u8>();
+                                                                let l217 = *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l216, l217, 1);
+                                                                let l218 = *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l219 = *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l218, l219, 1);
+                                                            }
+                                                            3 => {
+                                                                let l220 = *base.add(16).cast::<*mut u8>();
+                                                                let l221 = *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l220, l221, 1);
+                                                                let l222 = *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l223 = *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l222, l223, 1);
+                                                                let l224 = i32::from(
+                                                                    *base
+                                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>(),
+                                                                );
+                                                                match l224 {
+                                                                    0 => {}
+                                                                    _ => {
+                                                                        let l225 = *base
+                                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l226 = *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l225, l226, 1);
+                                                                    }
+                                                                }
+                                                                let l227 = i32::from(
+                                                                    *base
+                                                                        .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>(),
+                                                                );
+                                                                match l227 {
+                                                                    0 => {}
+                                                                    _ => {
+                                                                        let l228 = *base
+                                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l229 = *base
+                                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l228, l229, 1);
+                                                                    }
+                                                                }
+                                                                let l230 = i32::from(
+                                                                    *base
+                                                                        .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                                        .cast::<u8>(),
+                                                                );
+                                                                match l230 {
+                                                                    0 => {}
+                                                                    _ => {
+                                                                        let l231 = *base
+                                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l232 = *base
+                                                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l231, l232, 1);
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {
+                                                                let l233 = i32::from(*base.add(16).cast::<u8>());
+                                                                match l233 {
+                                                                    0 => {
+                                                                        let l234 = *base
+                                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l235 = *base
+                                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l234, l235, 1);
+                                                                        let l236 = i32::from(
+                                                                            *base
+                                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                                .cast::<u8>(),
+                                                                        );
+                                                                        match l236 {
+                                                                            0 => {}
+                                                                            _ => {
+                                                                                let l237 = *base
+                                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<*mut u8>();
+                                                                                let l238 = *base
+                                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>();
+                                                                                _rt::cabi_dealloc(l237, l238, 1);
+                                                                            }
+                                                                        }
+                                                                        let l239 = *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l240 = *base
+                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l239, l240, 1);
+                                                                    }
+                                                                    _ => {
+                                                                        let l241 = *base
+                                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l242 = *base
+                                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l241, l242, 1);
+                                                                        let l243 = i32::from(
+                                                                            *base
+                                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                                .cast::<u8>(),
+                                                                        );
+                                                                        match l243 {
+                                                                            0 => {}
+                                                                            _ => {
+                                                                                let l244 = *base
+                                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<*mut u8>();
+                                                                                let l245 = *base
+                                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>();
+                                                                                _rt::cabi_dealloc(l244, l245, 1);
+                                                                            }
+                                                                        }
+                                                                        let l246 = *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>();
+                                                                        let l247 = *base
+                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>();
+                                                                        _rt::cabi_dealloc(l246, l247, 1);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    1 => {
+                                                        let l248 = *base.add(8).cast::<*mut u8>();
+                                                        let l249 = *base
+                                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l248, l249, 1);
+                                                        let l250 = i32::from(
+                                                            *base
+                                                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                .cast::<u8>(),
+                                                        );
+                                                        match l250 {
+                                                            0 => {}
+                                                            _ => {
+                                                                let l251 = *base
+                                                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>();
+                                                                let l252 = *base
+                                                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>();
+                                                                _rt::cabi_dealloc(l251, l252, 1);
+                                                            }
+                                                        }
+                                                        let l253 = *base
+                                                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l254 = *base
+                                                            .add(8 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l253, l254, 1);
+                                                    }
+                                                    _ => {
+                                                        let l255 = *base.add(8).cast::<*mut u8>();
+                                                        let l256 = *base
+                                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l255, l256, 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _rt::cabi_dealloc(
+                                            base257,
+                                            len257 * (40 + 12 * ::core::mem::size_of::<*const u8>()),
+                                            8,
+                                        );
+                                        let l258 = *_params
+                                            .0
+                                            .add(8 + 9 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l259 = *_params
+                                            .0
+                                            .add(8 + 10 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let base262 = l258;
+                                        let len262 = l259;
+                                        for i in 0..len262 {
+                                            let base = base262
+                                                .add(i * (8 + 2 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let l260 = *base.add(0).cast::<*mut u8>();
+                                                let l261 = *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l260, l261, 1);
+                                            }
+                                        }
+                                        _rt::cabi_dealloc(
+                                            base262,
+                                            len262 * (8 + 2 * ::core::mem::size_of::<*const u8>()),
+                                            ::core::mem::size_of::<*const u8>(),
+                                        );
+                                        let l263 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 11 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l263 {
+                                            0 => {}
+                                            _ => {
+                                                let l264 = *_params
+                                                    .0
+                                                    .add(8 + 12 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l265 = *_params
+                                                    .0
+                                                    .add(8 + 13 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l264, l265, 1);
+                                            }
+                                        }
+                                        let l266 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 14 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l266 {
+                                            0 => {}
+                                            _ => {
+                                                let l267 = *_params
+                                                    .0
+                                                    .add(8 + 15 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l268 = *_params
+                                                    .0
+                                                    .add(8 + 16 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l267, l268, 1);
+                                            }
+                                        }
+                                    }
+                                    5 => {
+                                        let l269 = *_params
+                                            .0
+                                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l270 = *_params
+                                            .0
+                                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let base273 = l269;
+                                        let len273 = l270;
+                                        for i in 0..len273 {
+                                            let base = base273
+                                                .add(i * (3 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let l271 = *base.add(0).cast::<*mut u8>();
+                                                let l272 = *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l271, l272, 1);
+                                            }
+                                        }
+                                        _rt::cabi_dealloc(
+                                            base273,
+                                            len273 * (3 * ::core::mem::size_of::<*const u8>()),
+                                            ::core::mem::size_of::<*const u8>(),
+                                        );
+                                    }
+                                    6 => {
+                                        let l274 = *_params
+                                            .0
+                                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l275 = *_params
+                                            .0
+                                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        _rt::cabi_dealloc(l274, l275, 1);
+                                    }
+                                    7 => {
+                                        let l276 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l276 {
+                                            0 => {}
+                                            _ => {
+                                                let l277 = *_params
+                                                    .0
+                                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l278 = *_params
+                                                    .0
+                                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l277, l278, 1);
+                                            }
+                                        }
+                                        let l279 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l279 {
+                                            0 => {}
+                                            _ => {
+                                                let l280 = *_params
+                                                    .0
+                                                    .add(8 + 6 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l281 = *_params
+                                                    .0
+                                                    .add(8 + 7 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l280, l281, 1);
+                                            }
+                                        }
+                                    }
+                                    8 => {
+                                        let l282 = *_params
+                                            .0
+                                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>();
+                                        let l283 = *_params
+                                            .0
+                                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>();
+                                        let base291 = l282;
+                                        let len291 = l283;
+                                        for i in 0..len291 {
+                                            let base = base291
+                                                .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let l284 = *base.add(0).cast::<*mut u8>();
+                                                let l285 = *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l284, l285, 1);
+                                                let l286 = *base
+                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l287 = *base
+                                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l286, l287, 1);
+                                                let l288 = i32::from(
+                                                    *base
+                                                        .add(4 * ::core::mem::size_of::<*const u8>())
+                                                        .cast::<u8>(),
+                                                );
+                                                match l288 {
+                                                    0 => {}
+                                                    _ => {
+                                                        let l289 = *base
+                                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>();
+                                                        let l290 = *base
+                                                            .add(6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>();
+                                                        _rt::cabi_dealloc(l289, l290, 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _rt::cabi_dealloc(
+                                            base291,
+                                            len291 * (7 * ::core::mem::size_of::<*const u8>()),
+                                            ::core::mem::size_of::<*const u8>(),
+                                        );
+                                    }
+                                    _ => {
+                                        let l292 = i32::from(
+                                            *_params
+                                                .0
+                                                .add(24 + 2 * ::core::mem::size_of::<*const u8>())
+                                                .cast::<u8>(),
+                                        );
+                                        match l292 {
+                                            0 => {}
+                                            _ => {
+                                                let l293 = *_params
+                                                    .0
+                                                    .add(40 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>();
+                                                let l294 = *_params
+                                                    .0
+                                                    .add(40 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>();
+                                                _rt::cabi_dealloc(l293, l294, 1);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        unsafe fn params_lower(
+                            &mut self,
+                            (_lower0, _lower1): Self::Params,
+                            _ptr: *mut u8,
+                        ) -> Self::ParamsLower {
+                            let _param_ptr = unsafe { _ptr.add(0) };
+                            unsafe {
+                                let vec0 = (_lower0.into_bytes()).into_boxed_slice();
+                                let ptr0 = vec0.as_ptr().cast::<u8>();
+                                let len0 = vec0.len();
+                                ::core::mem::forget(vec0);
+                                *_param_ptr
+                                    .add(::core::mem::size_of::<*const u8>())
+                                    .cast::<usize>() = len0;
+                                *_param_ptr.add(0).cast::<*mut u8>() = ptr0.cast_mut();
+                            }
+                            let _param_ptr = unsafe {
+                                _ptr.add((2 * ::core::mem::size_of::<*const u8>()))
+                            };
+                            unsafe {
+                                use super::super::super::yosh::acp::prompts::SessionUpdate as V177;
+                                match _lower1 {
+                                    V177::UserMessageChunk(e) => {
+                                        *_param_ptr.add(0).cast::<u8>() = (0i32) as u8;
+                                        use super::super::super::yosh::acp::content::ContentBlock as V25;
+                                        match e {
+                                            V25::Text(e) => {
+                                                *_param_ptr.add(8).cast::<u8>() = (0i32) as u8;
+                                                let super::super::super::yosh::acp::content::TextContent {
+                                                    text: text0,
+                                                } = e;
+                                                let vec1 = (text0.into_bytes()).into_boxed_slice();
+                                                let ptr1 = vec1.as_ptr().cast::<u8>();
+                                                let len1 = vec1.len();
+                                                ::core::mem::forget(vec1);
+                                                *_param_ptr
+                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len1;
+                                                *_param_ptr.add(16).cast::<*mut u8>() = ptr1.cast_mut();
+                                            }
+                                            V25::Image(e) => {
+                                                *_param_ptr.add(8).cast::<u8>() = (1i32) as u8;
+                                                let super::super::super::yosh::acp::content::ImageContent {
+                                                    data: data2,
+                                                    mime_type: mime_type2,
+                                                    uri: uri2,
+                                                } = e;
+                                                let vec3 = (data2.into_bytes()).into_boxed_slice();
+                                                let ptr3 = vec3.as_ptr().cast::<u8>();
+                                                let len3 = vec3.len();
+                                                ::core::mem::forget(vec3);
+                                                *_param_ptr
+                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len3;
+                                                *_param_ptr.add(16).cast::<*mut u8>() = ptr3.cast_mut();
+                                                let vec4 = (mime_type2.into_bytes()).into_boxed_slice();
+                                                let ptr4 = vec4.as_ptr().cast::<u8>();
+                                                let len4 = vec4.len();
+                                                ::core::mem::forget(vec4);
+                                                *_param_ptr
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len4;
+                                                *_param_ptr
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr4.cast_mut();
+                                                match uri2 {
+                                                    Some(e) => {
+                                                        *_param_ptr
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        let vec5 = (e.into_bytes()).into_boxed_slice();
+                                                        let ptr5 = vec5.as_ptr().cast::<u8>();
+                                                        let len5 = vec5.len();
+                                                        ::core::mem::forget(vec5);
+                                                        *_param_ptr
+                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len5;
+                                                        *_param_ptr
+                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr5.cast_mut();
+                                                    }
+                                                    None => {
+                                                        *_param_ptr
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                            }
+                                            V25::Audio(e) => {
+                                                *_param_ptr.add(8).cast::<u8>() = (2i32) as u8;
+                                                let super::super::super::yosh::acp::content::AudioContent {
+                                                    data: data6,
+                                                    mime_type: mime_type6,
+                                                } = e;
+                                                let vec7 = (data6.into_bytes()).into_boxed_slice();
+                                                let ptr7 = vec7.as_ptr().cast::<u8>();
+                                                let len7 = vec7.len();
+                                                ::core::mem::forget(vec7);
+                                                *_param_ptr
+                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len7;
+                                                *_param_ptr.add(16).cast::<*mut u8>() = ptr7.cast_mut();
+                                                let vec8 = (mime_type6.into_bytes()).into_boxed_slice();
+                                                let ptr8 = vec8.as_ptr().cast::<u8>();
+                                                let len8 = vec8.len();
+                                                ::core::mem::forget(vec8);
+                                                *_param_ptr
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len8;
+                                                *_param_ptr
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr8.cast_mut();
+                                            }
+                                            V25::ResourceLink(e) => {
+                                                *_param_ptr.add(8).cast::<u8>() = (3i32) as u8;
+                                                let super::super::super::yosh::acp::content::ResourceLink {
+                                                    uri: uri9,
+                                                    name: name9,
+                                                    mime_type: mime_type9,
+                                                    title: title9,
+                                                    description: description9,
+                                                    size: size9,
+                                                } = e;
+                                                let vec10 = (uri9.into_bytes()).into_boxed_slice();
+                                                let ptr10 = vec10.as_ptr().cast::<u8>();
+                                                let len10 = vec10.len();
+                                                ::core::mem::forget(vec10);
+                                                *_param_ptr
+                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len10;
+                                                *_param_ptr.add(16).cast::<*mut u8>() = ptr10.cast_mut();
+                                                let vec11 = (name9.into_bytes()).into_boxed_slice();
+                                                let ptr11 = vec11.as_ptr().cast::<u8>();
+                                                let len11 = vec11.len();
+                                                ::core::mem::forget(vec11);
+                                                *_param_ptr
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len11;
+                                                *_param_ptr
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr11.cast_mut();
+                                                match mime_type9 {
+                                                    Some(e) => {
+                                                        *_param_ptr
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        let vec12 = (e.into_bytes()).into_boxed_slice();
+                                                        let ptr12 = vec12.as_ptr().cast::<u8>();
+                                                        let len12 = vec12.len();
+                                                        ::core::mem::forget(vec12);
+                                                        *_param_ptr
+                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len12;
+                                                        *_param_ptr
+                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr12.cast_mut();
+                                                    }
+                                                    None => {
+                                                        *_param_ptr
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                                match title9 {
+                                                    Some(e) => {
+                                                        *_param_ptr
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        let vec13 = (e.into_bytes()).into_boxed_slice();
+                                                        let ptr13 = vec13.as_ptr().cast::<u8>();
+                                                        let len13 = vec13.len();
+                                                        ::core::mem::forget(vec13);
+                                                        *_param_ptr
+                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len13;
+                                                        *_param_ptr
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr13.cast_mut();
+                                                    }
+                                                    None => {
+                                                        *_param_ptr
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                                match description9 {
+                                                    Some(e) => {
+                                                        *_param_ptr
+                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        let vec14 = (e.into_bytes()).into_boxed_slice();
+                                                        let ptr14 = vec14.as_ptr().cast::<u8>();
+                                                        let len14 = vec14.len();
+                                                        ::core::mem::forget(vec14);
+                                                        *_param_ptr
+                                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len14;
+                                                        *_param_ptr
+                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr14.cast_mut();
+                                                    }
+                                                    None => {
+                                                        *_param_ptr
+                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                                match size9 {
+                                                    Some(e) => {
+                                                        *_param_ptr
+                                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        *_param_ptr
+                                                            .add(32 + 12 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<i64>() = _rt::as_i64(e);
+                                                    }
+                                                    None => {
+                                                        *_param_ptr
+                                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                            }
+                                            V25::Resource(e) => {
+                                                *_param_ptr.add(8).cast::<u8>() = (4i32) as u8;
+                                                let super::super::super::yosh::acp::content::EmbeddedResource {
+                                                    resource: resource15,
+                                                } = e;
+                                                use super::super::super::yosh::acp::content::ResourceContents as V24;
+                                                match resource15 {
+                                                    V24::Text(e) => {
+                                                        *_param_ptr.add(16).cast::<u8>() = (0i32) as u8;
+                                                        let super::super::super::yosh::acp::content::TextResourceContents {
+                                                            uri: uri16,
+                                                            mime_type: mime_type16,
+                                                            text: text16,
+                                                        } = e;
+                                                        let vec17 = (uri16.into_bytes()).into_boxed_slice();
+                                                        let ptr17 = vec17.as_ptr().cast::<u8>();
+                                                        let len17 = vec17.len();
+                                                        ::core::mem::forget(vec17);
+                                                        *_param_ptr
+                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len17;
+                                                        *_param_ptr
+                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr17.cast_mut();
+                                                        match mime_type16 {
+                                                            Some(e) => {
+                                                                *_param_ptr
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<u8>() = (1i32) as u8;
+                                                                let vec18 = (e.into_bytes()).into_boxed_slice();
+                                                                let ptr18 = vec18.as_ptr().cast::<u8>();
+                                                                let len18 = vec18.len();
+                                                                ::core::mem::forget(vec18);
+                                                                *_param_ptr
+                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len18;
+                                                                *_param_ptr
+                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>() = ptr18.cast_mut();
+                                                            }
+                                                            None => {
+                                                                *_param_ptr
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<u8>() = (0i32) as u8;
+                                                            }
+                                                        };
+                                                        let vec19 = (text16.into_bytes()).into_boxed_slice();
+                                                        let ptr19 = vec19.as_ptr().cast::<u8>();
+                                                        let len19 = vec19.len();
+                                                        ::core::mem::forget(vec19);
+                                                        *_param_ptr
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len19;
+                                                        *_param_ptr
+                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr19.cast_mut();
+                                                    }
+                                                    V24::Blob(e) => {
+                                                        *_param_ptr.add(16).cast::<u8>() = (1i32) as u8;
+                                                        let super::super::super::yosh::acp::content::BlobResourceContents {
+                                                            uri: uri20,
+                                                            mime_type: mime_type20,
+                                                            blob: blob20,
+                                                        } = e;
+                                                        let vec21 = (uri20.into_bytes()).into_boxed_slice();
+                                                        let ptr21 = vec21.as_ptr().cast::<u8>();
+                                                        let len21 = vec21.len();
+                                                        ::core::mem::forget(vec21);
+                                                        *_param_ptr
+                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len21;
+                                                        *_param_ptr
+                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr21.cast_mut();
+                                                        match mime_type20 {
+                                                            Some(e) => {
+                                                                *_param_ptr
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<u8>() = (1i32) as u8;
+                                                                let vec22 = (e.into_bytes()).into_boxed_slice();
+                                                                let ptr22 = vec22.as_ptr().cast::<u8>();
+                                                                let len22 = vec22.len();
+                                                                ::core::mem::forget(vec22);
+                                                                *_param_ptr
+                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len22;
+                                                                *_param_ptr
+                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>() = ptr22.cast_mut();
+                                                            }
+                                                            None => {
+                                                                *_param_ptr
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<u8>() = (0i32) as u8;
+                                                            }
+                                                        };
+                                                        let vec23 = (blob20.into_bytes()).into_boxed_slice();
+                                                        let ptr23 = vec23.as_ptr().cast::<u8>();
+                                                        let len23 = vec23.len();
+                                                        ::core::mem::forget(vec23);
+                                                        *_param_ptr
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len23;
+                                                        *_param_ptr
+                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr23.cast_mut();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    V177::AgentMessageChunk(e) => {
+                                        *_param_ptr.add(0).cast::<u8>() = (1i32) as u8;
+                                        use super::super::super::yosh::acp::content::ContentBlock as V51;
+                                        match e {
+                                            V51::Text(e) => {
+                                                *_param_ptr.add(8).cast::<u8>() = (0i32) as u8;
+                                                let super::super::super::yosh::acp::content::TextContent {
+                                                    text: text26,
+                                                } = e;
+                                                let vec27 = (text26.into_bytes()).into_boxed_slice();
+                                                let ptr27 = vec27.as_ptr().cast::<u8>();
+                                                let len27 = vec27.len();
+                                                ::core::mem::forget(vec27);
+                                                *_param_ptr
+                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len27;
+                                                *_param_ptr.add(16).cast::<*mut u8>() = ptr27.cast_mut();
+                                            }
+                                            V51::Image(e) => {
+                                                *_param_ptr.add(8).cast::<u8>() = (1i32) as u8;
+                                                let super::super::super::yosh::acp::content::ImageContent {
+                                                    data: data28,
+                                                    mime_type: mime_type28,
+                                                    uri: uri28,
+                                                } = e;
+                                                let vec29 = (data28.into_bytes()).into_boxed_slice();
+                                                let ptr29 = vec29.as_ptr().cast::<u8>();
+                                                let len29 = vec29.len();
+                                                ::core::mem::forget(vec29);
+                                                *_param_ptr
+                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len29;
+                                                *_param_ptr.add(16).cast::<*mut u8>() = ptr29.cast_mut();
+                                                let vec30 = (mime_type28.into_bytes()).into_boxed_slice();
+                                                let ptr30 = vec30.as_ptr().cast::<u8>();
+                                                let len30 = vec30.len();
+                                                ::core::mem::forget(vec30);
+                                                *_param_ptr
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len30;
+                                                *_param_ptr
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr30.cast_mut();
+                                                match uri28 {
+                                                    Some(e) => {
+                                                        *_param_ptr
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        let vec31 = (e.into_bytes()).into_boxed_slice();
+                                                        let ptr31 = vec31.as_ptr().cast::<u8>();
+                                                        let len31 = vec31.len();
+                                                        ::core::mem::forget(vec31);
+                                                        *_param_ptr
+                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len31;
+                                                        *_param_ptr
+                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr31.cast_mut();
+                                                    }
+                                                    None => {
+                                                        *_param_ptr
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                            }
+                                            V51::Audio(e) => {
+                                                *_param_ptr.add(8).cast::<u8>() = (2i32) as u8;
+                                                let super::super::super::yosh::acp::content::AudioContent {
+                                                    data: data32,
+                                                    mime_type: mime_type32,
+                                                } = e;
+                                                let vec33 = (data32.into_bytes()).into_boxed_slice();
+                                                let ptr33 = vec33.as_ptr().cast::<u8>();
+                                                let len33 = vec33.len();
+                                                ::core::mem::forget(vec33);
+                                                *_param_ptr
+                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len33;
+                                                *_param_ptr.add(16).cast::<*mut u8>() = ptr33.cast_mut();
+                                                let vec34 = (mime_type32.into_bytes()).into_boxed_slice();
+                                                let ptr34 = vec34.as_ptr().cast::<u8>();
+                                                let len34 = vec34.len();
+                                                ::core::mem::forget(vec34);
+                                                *_param_ptr
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len34;
+                                                *_param_ptr
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr34.cast_mut();
+                                            }
+                                            V51::ResourceLink(e) => {
+                                                *_param_ptr.add(8).cast::<u8>() = (3i32) as u8;
+                                                let super::super::super::yosh::acp::content::ResourceLink {
+                                                    uri: uri35,
+                                                    name: name35,
+                                                    mime_type: mime_type35,
+                                                    title: title35,
+                                                    description: description35,
+                                                    size: size35,
+                                                } = e;
+                                                let vec36 = (uri35.into_bytes()).into_boxed_slice();
+                                                let ptr36 = vec36.as_ptr().cast::<u8>();
+                                                let len36 = vec36.len();
+                                                ::core::mem::forget(vec36);
+                                                *_param_ptr
+                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len36;
+                                                *_param_ptr.add(16).cast::<*mut u8>() = ptr36.cast_mut();
+                                                let vec37 = (name35.into_bytes()).into_boxed_slice();
+                                                let ptr37 = vec37.as_ptr().cast::<u8>();
+                                                let len37 = vec37.len();
+                                                ::core::mem::forget(vec37);
+                                                *_param_ptr
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len37;
+                                                *_param_ptr
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr37.cast_mut();
+                                                match mime_type35 {
+                                                    Some(e) => {
+                                                        *_param_ptr
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        let vec38 = (e.into_bytes()).into_boxed_slice();
+                                                        let ptr38 = vec38.as_ptr().cast::<u8>();
+                                                        let len38 = vec38.len();
+                                                        ::core::mem::forget(vec38);
+                                                        *_param_ptr
+                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len38;
+                                                        *_param_ptr
+                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr38.cast_mut();
+                                                    }
+                                                    None => {
+                                                        *_param_ptr
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                                match title35 {
+                                                    Some(e) => {
+                                                        *_param_ptr
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        let vec39 = (e.into_bytes()).into_boxed_slice();
+                                                        let ptr39 = vec39.as_ptr().cast::<u8>();
+                                                        let len39 = vec39.len();
+                                                        ::core::mem::forget(vec39);
+                                                        *_param_ptr
+                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len39;
+                                                        *_param_ptr
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr39.cast_mut();
+                                                    }
+                                                    None => {
+                                                        *_param_ptr
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                                match description35 {
+                                                    Some(e) => {
+                                                        *_param_ptr
+                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        let vec40 = (e.into_bytes()).into_boxed_slice();
+                                                        let ptr40 = vec40.as_ptr().cast::<u8>();
+                                                        let len40 = vec40.len();
+                                                        ::core::mem::forget(vec40);
+                                                        *_param_ptr
+                                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len40;
+                                                        *_param_ptr
+                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr40.cast_mut();
+                                                    }
+                                                    None => {
+                                                        *_param_ptr
+                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                                match size35 {
+                                                    Some(e) => {
+                                                        *_param_ptr
+                                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        *_param_ptr
+                                                            .add(32 + 12 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<i64>() = _rt::as_i64(e);
+                                                    }
+                                                    None => {
+                                                        *_param_ptr
+                                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                            }
+                                            V51::Resource(e) => {
+                                                *_param_ptr.add(8).cast::<u8>() = (4i32) as u8;
+                                                let super::super::super::yosh::acp::content::EmbeddedResource {
+                                                    resource: resource41,
+                                                } = e;
+                                                use super::super::super::yosh::acp::content::ResourceContents as V50;
+                                                match resource41 {
+                                                    V50::Text(e) => {
+                                                        *_param_ptr.add(16).cast::<u8>() = (0i32) as u8;
+                                                        let super::super::super::yosh::acp::content::TextResourceContents {
+                                                            uri: uri42,
+                                                            mime_type: mime_type42,
+                                                            text: text42,
+                                                        } = e;
+                                                        let vec43 = (uri42.into_bytes()).into_boxed_slice();
+                                                        let ptr43 = vec43.as_ptr().cast::<u8>();
+                                                        let len43 = vec43.len();
+                                                        ::core::mem::forget(vec43);
+                                                        *_param_ptr
+                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len43;
+                                                        *_param_ptr
+                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr43.cast_mut();
+                                                        match mime_type42 {
+                                                            Some(e) => {
+                                                                *_param_ptr
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<u8>() = (1i32) as u8;
+                                                                let vec44 = (e.into_bytes()).into_boxed_slice();
+                                                                let ptr44 = vec44.as_ptr().cast::<u8>();
+                                                                let len44 = vec44.len();
+                                                                ::core::mem::forget(vec44);
+                                                                *_param_ptr
+                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len44;
+                                                                *_param_ptr
+                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>() = ptr44.cast_mut();
+                                                            }
+                                                            None => {
+                                                                *_param_ptr
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<u8>() = (0i32) as u8;
+                                                            }
+                                                        };
+                                                        let vec45 = (text42.into_bytes()).into_boxed_slice();
+                                                        let ptr45 = vec45.as_ptr().cast::<u8>();
+                                                        let len45 = vec45.len();
+                                                        ::core::mem::forget(vec45);
+                                                        *_param_ptr
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len45;
+                                                        *_param_ptr
+                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr45.cast_mut();
+                                                    }
+                                                    V50::Blob(e) => {
+                                                        *_param_ptr.add(16).cast::<u8>() = (1i32) as u8;
+                                                        let super::super::super::yosh::acp::content::BlobResourceContents {
+                                                            uri: uri46,
+                                                            mime_type: mime_type46,
+                                                            blob: blob46,
+                                                        } = e;
+                                                        let vec47 = (uri46.into_bytes()).into_boxed_slice();
+                                                        let ptr47 = vec47.as_ptr().cast::<u8>();
+                                                        let len47 = vec47.len();
+                                                        ::core::mem::forget(vec47);
+                                                        *_param_ptr
+                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len47;
+                                                        *_param_ptr
+                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr47.cast_mut();
+                                                        match mime_type46 {
+                                                            Some(e) => {
+                                                                *_param_ptr
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<u8>() = (1i32) as u8;
+                                                                let vec48 = (e.into_bytes()).into_boxed_slice();
+                                                                let ptr48 = vec48.as_ptr().cast::<u8>();
+                                                                let len48 = vec48.len();
+                                                                ::core::mem::forget(vec48);
+                                                                *_param_ptr
+                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len48;
+                                                                *_param_ptr
+                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>() = ptr48.cast_mut();
+                                                            }
+                                                            None => {
+                                                                *_param_ptr
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<u8>() = (0i32) as u8;
+                                                            }
+                                                        };
+                                                        let vec49 = (blob46.into_bytes()).into_boxed_slice();
+                                                        let ptr49 = vec49.as_ptr().cast::<u8>();
+                                                        let len49 = vec49.len();
+                                                        ::core::mem::forget(vec49);
+                                                        *_param_ptr
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len49;
+                                                        *_param_ptr
+                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr49.cast_mut();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    V177::AgentThoughtChunk(e) => {
+                                        *_param_ptr.add(0).cast::<u8>() = (2i32) as u8;
+                                        use super::super::super::yosh::acp::content::ContentBlock as V77;
+                                        match e {
+                                            V77::Text(e) => {
+                                                *_param_ptr.add(8).cast::<u8>() = (0i32) as u8;
+                                                let super::super::super::yosh::acp::content::TextContent {
+                                                    text: text52,
+                                                } = e;
+                                                let vec53 = (text52.into_bytes()).into_boxed_slice();
+                                                let ptr53 = vec53.as_ptr().cast::<u8>();
+                                                let len53 = vec53.len();
+                                                ::core::mem::forget(vec53);
+                                                *_param_ptr
+                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len53;
+                                                *_param_ptr.add(16).cast::<*mut u8>() = ptr53.cast_mut();
+                                            }
+                                            V77::Image(e) => {
+                                                *_param_ptr.add(8).cast::<u8>() = (1i32) as u8;
+                                                let super::super::super::yosh::acp::content::ImageContent {
+                                                    data: data54,
+                                                    mime_type: mime_type54,
+                                                    uri: uri54,
+                                                } = e;
+                                                let vec55 = (data54.into_bytes()).into_boxed_slice();
+                                                let ptr55 = vec55.as_ptr().cast::<u8>();
+                                                let len55 = vec55.len();
+                                                ::core::mem::forget(vec55);
+                                                *_param_ptr
+                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len55;
+                                                *_param_ptr.add(16).cast::<*mut u8>() = ptr55.cast_mut();
+                                                let vec56 = (mime_type54.into_bytes()).into_boxed_slice();
+                                                let ptr56 = vec56.as_ptr().cast::<u8>();
+                                                let len56 = vec56.len();
+                                                ::core::mem::forget(vec56);
+                                                *_param_ptr
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len56;
+                                                *_param_ptr
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr56.cast_mut();
+                                                match uri54 {
+                                                    Some(e) => {
+                                                        *_param_ptr
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        let vec57 = (e.into_bytes()).into_boxed_slice();
+                                                        let ptr57 = vec57.as_ptr().cast::<u8>();
+                                                        let len57 = vec57.len();
+                                                        ::core::mem::forget(vec57);
+                                                        *_param_ptr
+                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len57;
+                                                        *_param_ptr
+                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr57.cast_mut();
+                                                    }
+                                                    None => {
+                                                        *_param_ptr
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                            }
+                                            V77::Audio(e) => {
+                                                *_param_ptr.add(8).cast::<u8>() = (2i32) as u8;
+                                                let super::super::super::yosh::acp::content::AudioContent {
+                                                    data: data58,
+                                                    mime_type: mime_type58,
+                                                } = e;
+                                                let vec59 = (data58.into_bytes()).into_boxed_slice();
+                                                let ptr59 = vec59.as_ptr().cast::<u8>();
+                                                let len59 = vec59.len();
+                                                ::core::mem::forget(vec59);
+                                                *_param_ptr
+                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len59;
+                                                *_param_ptr.add(16).cast::<*mut u8>() = ptr59.cast_mut();
+                                                let vec60 = (mime_type58.into_bytes()).into_boxed_slice();
+                                                let ptr60 = vec60.as_ptr().cast::<u8>();
+                                                let len60 = vec60.len();
+                                                ::core::mem::forget(vec60);
+                                                *_param_ptr
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len60;
+                                                *_param_ptr
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr60.cast_mut();
+                                            }
+                                            V77::ResourceLink(e) => {
+                                                *_param_ptr.add(8).cast::<u8>() = (3i32) as u8;
+                                                let super::super::super::yosh::acp::content::ResourceLink {
+                                                    uri: uri61,
+                                                    name: name61,
+                                                    mime_type: mime_type61,
+                                                    title: title61,
+                                                    description: description61,
+                                                    size: size61,
+                                                } = e;
+                                                let vec62 = (uri61.into_bytes()).into_boxed_slice();
+                                                let ptr62 = vec62.as_ptr().cast::<u8>();
+                                                let len62 = vec62.len();
+                                                ::core::mem::forget(vec62);
+                                                *_param_ptr
+                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len62;
+                                                *_param_ptr.add(16).cast::<*mut u8>() = ptr62.cast_mut();
+                                                let vec63 = (name61.into_bytes()).into_boxed_slice();
+                                                let ptr63 = vec63.as_ptr().cast::<u8>();
+                                                let len63 = vec63.len();
+                                                ::core::mem::forget(vec63);
+                                                *_param_ptr
+                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len63;
+                                                *_param_ptr
+                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr63.cast_mut();
+                                                match mime_type61 {
+                                                    Some(e) => {
+                                                        *_param_ptr
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        let vec64 = (e.into_bytes()).into_boxed_slice();
+                                                        let ptr64 = vec64.as_ptr().cast::<u8>();
+                                                        let len64 = vec64.len();
+                                                        ::core::mem::forget(vec64);
+                                                        *_param_ptr
+                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len64;
+                                                        *_param_ptr
+                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr64.cast_mut();
+                                                    }
+                                                    None => {
+                                                        *_param_ptr
+                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                                match title61 {
+                                                    Some(e) => {
+                                                        *_param_ptr
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        let vec65 = (e.into_bytes()).into_boxed_slice();
+                                                        let ptr65 = vec65.as_ptr().cast::<u8>();
+                                                        let len65 = vec65.len();
+                                                        ::core::mem::forget(vec65);
+                                                        *_param_ptr
+                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len65;
+                                                        *_param_ptr
+                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr65.cast_mut();
+                                                    }
+                                                    None => {
+                                                        *_param_ptr
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                                match description61 {
+                                                    Some(e) => {
+                                                        *_param_ptr
+                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        let vec66 = (e.into_bytes()).into_boxed_slice();
+                                                        let ptr66 = vec66.as_ptr().cast::<u8>();
+                                                        let len66 = vec66.len();
+                                                        ::core::mem::forget(vec66);
+                                                        *_param_ptr
+                                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len66;
+                                                        *_param_ptr
+                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr66.cast_mut();
+                                                    }
+                                                    None => {
+                                                        *_param_ptr
+                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                                match size61 {
+                                                    Some(e) => {
+                                                        *_param_ptr
+                                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        *_param_ptr
+                                                            .add(32 + 12 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<i64>() = _rt::as_i64(e);
+                                                    }
+                                                    None => {
+                                                        *_param_ptr
+                                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                            }
+                                            V77::Resource(e) => {
+                                                *_param_ptr.add(8).cast::<u8>() = (4i32) as u8;
+                                                let super::super::super::yosh::acp::content::EmbeddedResource {
+                                                    resource: resource67,
+                                                } = e;
+                                                use super::super::super::yosh::acp::content::ResourceContents as V76;
+                                                match resource67 {
+                                                    V76::Text(e) => {
+                                                        *_param_ptr.add(16).cast::<u8>() = (0i32) as u8;
+                                                        let super::super::super::yosh::acp::content::TextResourceContents {
+                                                            uri: uri68,
+                                                            mime_type: mime_type68,
+                                                            text: text68,
+                                                        } = e;
+                                                        let vec69 = (uri68.into_bytes()).into_boxed_slice();
+                                                        let ptr69 = vec69.as_ptr().cast::<u8>();
+                                                        let len69 = vec69.len();
+                                                        ::core::mem::forget(vec69);
+                                                        *_param_ptr
+                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len69;
+                                                        *_param_ptr
+                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr69.cast_mut();
+                                                        match mime_type68 {
+                                                            Some(e) => {
+                                                                *_param_ptr
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<u8>() = (1i32) as u8;
+                                                                let vec70 = (e.into_bytes()).into_boxed_slice();
+                                                                let ptr70 = vec70.as_ptr().cast::<u8>();
+                                                                let len70 = vec70.len();
+                                                                ::core::mem::forget(vec70);
+                                                                *_param_ptr
+                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len70;
+                                                                *_param_ptr
+                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>() = ptr70.cast_mut();
+                                                            }
+                                                            None => {
+                                                                *_param_ptr
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<u8>() = (0i32) as u8;
+                                                            }
+                                                        };
+                                                        let vec71 = (text68.into_bytes()).into_boxed_slice();
+                                                        let ptr71 = vec71.as_ptr().cast::<u8>();
+                                                        let len71 = vec71.len();
+                                                        ::core::mem::forget(vec71);
+                                                        *_param_ptr
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len71;
+                                                        *_param_ptr
+                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr71.cast_mut();
+                                                    }
+                                                    V76::Blob(e) => {
+                                                        *_param_ptr.add(16).cast::<u8>() = (1i32) as u8;
+                                                        let super::super::super::yosh::acp::content::BlobResourceContents {
+                                                            uri: uri72,
+                                                            mime_type: mime_type72,
+                                                            blob: blob72,
+                                                        } = e;
+                                                        let vec73 = (uri72.into_bytes()).into_boxed_slice();
+                                                        let ptr73 = vec73.as_ptr().cast::<u8>();
+                                                        let len73 = vec73.len();
+                                                        ::core::mem::forget(vec73);
+                                                        *_param_ptr
+                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len73;
+                                                        *_param_ptr
+                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr73.cast_mut();
+                                                        match mime_type72 {
+                                                            Some(e) => {
+                                                                *_param_ptr
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<u8>() = (1i32) as u8;
+                                                                let vec74 = (e.into_bytes()).into_boxed_slice();
+                                                                let ptr74 = vec74.as_ptr().cast::<u8>();
+                                                                let len74 = vec74.len();
+                                                                ::core::mem::forget(vec74);
+                                                                *_param_ptr
+                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len74;
+                                                                *_param_ptr
+                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>() = ptr74.cast_mut();
+                                                            }
+                                                            None => {
+                                                                *_param_ptr
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<u8>() = (0i32) as u8;
+                                                            }
+                                                        };
+                                                        let vec75 = (blob72.into_bytes()).into_boxed_slice();
+                                                        let ptr75 = vec75.as_ptr().cast::<u8>();
+                                                        let len75 = vec75.len();
+                                                        ::core::mem::forget(vec75);
+                                                        *_param_ptr
+                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len75;
+                                                        *_param_ptr
+                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr75.cast_mut();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    V177::ToolCall(e) => {
+                                        *_param_ptr.add(0).cast::<u8>() = (3i32) as u8;
+                                        let super::super::super::yosh::acp::tools::ToolCallSnapshot {
+                                            id: id78,
+                                            title: title78,
+                                            kind: kind78,
+                                            status: status78,
+                                            content: content78,
+                                            locations: locations78,
+                                            raw_input: raw_input78,
+                                            raw_output: raw_output78,
+                                        } = e;
+                                        let vec79 = (id78.into_bytes()).into_boxed_slice();
+                                        let ptr79 = vec79.as_ptr().cast::<u8>();
+                                        let len79 = vec79.len();
+                                        ::core::mem::forget(vec79);
+                                        *_param_ptr
+                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len79;
+                                        *_param_ptr.add(8).cast::<*mut u8>() = ptr79.cast_mut();
+                                        let vec80 = (title78.into_bytes()).into_boxed_slice();
+                                        let ptr80 = vec80.as_ptr().cast::<u8>();
+                                        let len80 = vec80.len();
+                                        ::core::mem::forget(vec80);
+                                        *_param_ptr
+                                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len80;
+                                        *_param_ptr
+                                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>() = ptr80.cast_mut();
+                                        *_param_ptr
+                                            .add(8 + 4 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (kind78.clone() as i32) as u8;
+                                        *_param_ptr
+                                            .add(9 + 4 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (status78.clone() as i32) as u8;
+                                        let vec113 = content78;
+                                        let len113 = vec113.len();
+                                        let layout113 = _rt::alloc::Layout::from_size_align(
+                                                vec113.len()
+                                                    * (40 + 12 * ::core::mem::size_of::<*const u8>()),
+                                                8,
+                                            )
+                                            .unwrap();
+                                        let (result113, _cleanup113) = wit_bindgen::rt::Cleanup::new(
+                                            layout113,
+                                        );
+                                        if let Some(cleanup) = _cleanup113 {
+                                            cleanup.forget();
+                                        }
+                                        for (i, e) in vec113.into_iter().enumerate() {
+                                            let base = result113
+                                                .add(i * (40 + 12 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                use super::super::super::yosh::acp::tools::ToolCallContent as V112;
+                                                match e {
+                                                    V112::Content(e) => {
+                                                        *base.add(0).cast::<u8>() = (0i32) as u8;
+                                                        use super::super::super::yosh::acp::content::ContentBlock as V106;
+                                                        match e {
+                                                            V106::Text(e) => {
+                                                                *base.add(8).cast::<u8>() = (0i32) as u8;
+                                                                let super::super::super::yosh::acp::content::TextContent {
+                                                                    text: text81,
+                                                                } = e;
+                                                                let vec82 = (text81.into_bytes()).into_boxed_slice();
+                                                                let ptr82 = vec82.as_ptr().cast::<u8>();
+                                                                let len82 = vec82.len();
+                                                                ::core::mem::forget(vec82);
+                                                                *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len82;
+                                                                *base.add(16).cast::<*mut u8>() = ptr82.cast_mut();
+                                                            }
+                                                            V106::Image(e) => {
+                                                                *base.add(8).cast::<u8>() = (1i32) as u8;
+                                                                let super::super::super::yosh::acp::content::ImageContent {
+                                                                    data: data83,
+                                                                    mime_type: mime_type83,
+                                                                    uri: uri83,
+                                                                } = e;
+                                                                let vec84 = (data83.into_bytes()).into_boxed_slice();
+                                                                let ptr84 = vec84.as_ptr().cast::<u8>();
+                                                                let len84 = vec84.len();
+                                                                ::core::mem::forget(vec84);
+                                                                *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len84;
+                                                                *base.add(16).cast::<*mut u8>() = ptr84.cast_mut();
+                                                                let vec85 = (mime_type83.into_bytes()).into_boxed_slice();
+                                                                let ptr85 = vec85.as_ptr().cast::<u8>();
+                                                                let len85 = vec85.len();
+                                                                ::core::mem::forget(vec85);
+                                                                *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len85;
+                                                                *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>() = ptr85.cast_mut();
+                                                                match uri83 {
+                                                                    Some(e) => {
+                                                                        *base
+                                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (1i32) as u8;
+                                                                        let vec86 = (e.into_bytes()).into_boxed_slice();
+                                                                        let ptr86 = vec86.as_ptr().cast::<u8>();
+                                                                        let len86 = vec86.len();
+                                                                        ::core::mem::forget(vec86);
+                                                                        *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>() = len86;
+                                                                        *base
+                                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>() = ptr86.cast_mut();
+                                                                    }
+                                                                    None => {
+                                                                        *base
+                                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (0i32) as u8;
+                                                                    }
+                                                                };
+                                                            }
+                                                            V106::Audio(e) => {
+                                                                *base.add(8).cast::<u8>() = (2i32) as u8;
+                                                                let super::super::super::yosh::acp::content::AudioContent {
+                                                                    data: data87,
+                                                                    mime_type: mime_type87,
+                                                                } = e;
+                                                                let vec88 = (data87.into_bytes()).into_boxed_slice();
+                                                                let ptr88 = vec88.as_ptr().cast::<u8>();
+                                                                let len88 = vec88.len();
+                                                                ::core::mem::forget(vec88);
+                                                                *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len88;
+                                                                *base.add(16).cast::<*mut u8>() = ptr88.cast_mut();
+                                                                let vec89 = (mime_type87.into_bytes()).into_boxed_slice();
+                                                                let ptr89 = vec89.as_ptr().cast::<u8>();
+                                                                let len89 = vec89.len();
+                                                                ::core::mem::forget(vec89);
+                                                                *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len89;
+                                                                *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>() = ptr89.cast_mut();
+                                                            }
+                                                            V106::ResourceLink(e) => {
+                                                                *base.add(8).cast::<u8>() = (3i32) as u8;
+                                                                let super::super::super::yosh::acp::content::ResourceLink {
+                                                                    uri: uri90,
+                                                                    name: name90,
+                                                                    mime_type: mime_type90,
+                                                                    title: title90,
+                                                                    description: description90,
+                                                                    size: size90,
+                                                                } = e;
+                                                                let vec91 = (uri90.into_bytes()).into_boxed_slice();
+                                                                let ptr91 = vec91.as_ptr().cast::<u8>();
+                                                                let len91 = vec91.len();
+                                                                ::core::mem::forget(vec91);
+                                                                *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len91;
+                                                                *base.add(16).cast::<*mut u8>() = ptr91.cast_mut();
+                                                                let vec92 = (name90.into_bytes()).into_boxed_slice();
+                                                                let ptr92 = vec92.as_ptr().cast::<u8>();
+                                                                let len92 = vec92.len();
+                                                                ::core::mem::forget(vec92);
+                                                                *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len92;
+                                                                *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>() = ptr92.cast_mut();
+                                                                match mime_type90 {
+                                                                    Some(e) => {
+                                                                        *base
+                                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (1i32) as u8;
+                                                                        let vec93 = (e.into_bytes()).into_boxed_slice();
+                                                                        let ptr93 = vec93.as_ptr().cast::<u8>();
+                                                                        let len93 = vec93.len();
+                                                                        ::core::mem::forget(vec93);
+                                                                        *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>() = len93;
+                                                                        *base
+                                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>() = ptr93.cast_mut();
+                                                                    }
+                                                                    None => {
+                                                                        *base
+                                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (0i32) as u8;
+                                                                    }
+                                                                };
+                                                                match title90 {
+                                                                    Some(e) => {
+                                                                        *base
+                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (1i32) as u8;
+                                                                        let vec94 = (e.into_bytes()).into_boxed_slice();
+                                                                        let ptr94 = vec94.as_ptr().cast::<u8>();
+                                                                        let len94 = vec94.len();
+                                                                        ::core::mem::forget(vec94);
+                                                                        *base
+                                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>() = len94;
+                                                                        *base
+                                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>() = ptr94.cast_mut();
+                                                                    }
+                                                                    None => {
+                                                                        *base
+                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (0i32) as u8;
+                                                                    }
+                                                                };
+                                                                match description90 {
+                                                                    Some(e) => {
+                                                                        *base
+                                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (1i32) as u8;
+                                                                        let vec95 = (e.into_bytes()).into_boxed_slice();
+                                                                        let ptr95 = vec95.as_ptr().cast::<u8>();
+                                                                        let len95 = vec95.len();
+                                                                        ::core::mem::forget(vec95);
+                                                                        *base
+                                                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>() = len95;
+                                                                        *base
+                                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>() = ptr95.cast_mut();
+                                                                    }
+                                                                    None => {
+                                                                        *base
+                                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (0i32) as u8;
+                                                                    }
+                                                                };
+                                                                match size90 {
+                                                                    Some(e) => {
+                                                                        *base
+                                                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (1i32) as u8;
+                                                                        *base
+                                                                            .add(32 + 12 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<i64>() = _rt::as_i64(e);
+                                                                    }
+                                                                    None => {
+                                                                        *base
+                                                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (0i32) as u8;
+                                                                    }
+                                                                };
+                                                            }
+                                                            V106::Resource(e) => {
+                                                                *base.add(8).cast::<u8>() = (4i32) as u8;
+                                                                let super::super::super::yosh::acp::content::EmbeddedResource {
+                                                                    resource: resource96,
+                                                                } = e;
+                                                                use super::super::super::yosh::acp::content::ResourceContents as V105;
+                                                                match resource96 {
+                                                                    V105::Text(e) => {
+                                                                        *base.add(16).cast::<u8>() = (0i32) as u8;
+                                                                        let super::super::super::yosh::acp::content::TextResourceContents {
+                                                                            uri: uri97,
+                                                                            mime_type: mime_type97,
+                                                                            text: text97,
+                                                                        } = e;
+                                                                        let vec98 = (uri97.into_bytes()).into_boxed_slice();
+                                                                        let ptr98 = vec98.as_ptr().cast::<u8>();
+                                                                        let len98 = vec98.len();
+                                                                        ::core::mem::forget(vec98);
+                                                                        *base
+                                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>() = len98;
+                                                                        *base
+                                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>() = ptr98.cast_mut();
+                                                                        match mime_type97 {
+                                                                            Some(e) => {
+                                                                                *base
+                                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<u8>() = (1i32) as u8;
+                                                                                let vec99 = (e.into_bytes()).into_boxed_slice();
+                                                                                let ptr99 = vec99.as_ptr().cast::<u8>();
+                                                                                let len99 = vec99.len();
+                                                                                ::core::mem::forget(vec99);
+                                                                                *base
+                                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>() = len99;
+                                                                                *base
+                                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<*mut u8>() = ptr99.cast_mut();
+                                                                            }
+                                                                            None => {
+                                                                                *base
+                                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<u8>() = (0i32) as u8;
+                                                                            }
+                                                                        };
+                                                                        let vec100 = (text97.into_bytes()).into_boxed_slice();
+                                                                        let ptr100 = vec100.as_ptr().cast::<u8>();
+                                                                        let len100 = vec100.len();
+                                                                        ::core::mem::forget(vec100);
+                                                                        *base
+                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>() = len100;
+                                                                        *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>() = ptr100.cast_mut();
+                                                                    }
+                                                                    V105::Blob(e) => {
+                                                                        *base.add(16).cast::<u8>() = (1i32) as u8;
+                                                                        let super::super::super::yosh::acp::content::BlobResourceContents {
+                                                                            uri: uri101,
+                                                                            mime_type: mime_type101,
+                                                                            blob: blob101,
+                                                                        } = e;
+                                                                        let vec102 = (uri101.into_bytes()).into_boxed_slice();
+                                                                        let ptr102 = vec102.as_ptr().cast::<u8>();
+                                                                        let len102 = vec102.len();
+                                                                        ::core::mem::forget(vec102);
+                                                                        *base
+                                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>() = len102;
+                                                                        *base
+                                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>() = ptr102.cast_mut();
+                                                                        match mime_type101 {
+                                                                            Some(e) => {
+                                                                                *base
+                                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<u8>() = (1i32) as u8;
+                                                                                let vec103 = (e.into_bytes()).into_boxed_slice();
+                                                                                let ptr103 = vec103.as_ptr().cast::<u8>();
+                                                                                let len103 = vec103.len();
+                                                                                ::core::mem::forget(vec103);
+                                                                                *base
+                                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>() = len103;
+                                                                                *base
+                                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<*mut u8>() = ptr103.cast_mut();
+                                                                            }
+                                                                            None => {
+                                                                                *base
+                                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<u8>() = (0i32) as u8;
+                                                                            }
+                                                                        };
+                                                                        let vec104 = (blob101.into_bytes()).into_boxed_slice();
+                                                                        let ptr104 = vec104.as_ptr().cast::<u8>();
+                                                                        let len104 = vec104.len();
+                                                                        ::core::mem::forget(vec104);
+                                                                        *base
+                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>() = len104;
+                                                                        *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>() = ptr104.cast_mut();
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    V112::Diff(e) => {
+                                                        *base.add(0).cast::<u8>() = (1i32) as u8;
+                                                        let super::super::super::yosh::acp::tools::Diff {
+                                                            path: path107,
+                                                            old_text: old_text107,
+                                                            new_text: new_text107,
+                                                        } = e;
+                                                        let vec108 = (path107.into_bytes()).into_boxed_slice();
+                                                        let ptr108 = vec108.as_ptr().cast::<u8>();
+                                                        let len108 = vec108.len();
+                                                        ::core::mem::forget(vec108);
+                                                        *base
+                                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len108;
+                                                        *base.add(8).cast::<*mut u8>() = ptr108.cast_mut();
+                                                        match old_text107 {
+                                                            Some(e) => {
+                                                                *base
+                                                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<u8>() = (1i32) as u8;
+                                                                let vec109 = (e.into_bytes()).into_boxed_slice();
+                                                                let ptr109 = vec109.as_ptr().cast::<u8>();
+                                                                let len109 = vec109.len();
+                                                                ::core::mem::forget(vec109);
+                                                                *base
+                                                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len109;
+                                                                *base
+                                                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>() = ptr109.cast_mut();
+                                                            }
+                                                            None => {
+                                                                *base
+                                                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<u8>() = (0i32) as u8;
+                                                            }
+                                                        };
+                                                        let vec110 = (new_text107.into_bytes()).into_boxed_slice();
+                                                        let ptr110 = vec110.as_ptr().cast::<u8>();
+                                                        let len110 = vec110.len();
+                                                        ::core::mem::forget(vec110);
+                                                        *base
+                                                            .add(8 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len110;
+                                                        *base
+                                                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr110.cast_mut();
+                                                    }
+                                                    V112::Terminal(e) => {
+                                                        *base.add(0).cast::<u8>() = (2i32) as u8;
+                                                        let vec111 = (e.into_bytes()).into_boxed_slice();
+                                                        let ptr111 = vec111.as_ptr().cast::<u8>();
+                                                        let len111 = vec111.len();
+                                                        ::core::mem::forget(vec111);
+                                                        *base
+                                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len111;
+                                                        *base.add(8).cast::<*mut u8>() = ptr111.cast_mut();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        *_param_ptr
+                                            .add(8 + 6 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len113;
+                                        *_param_ptr
+                                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>() = result113;
+                                        let vec116 = locations78;
+                                        let len116 = vec116.len();
+                                        let layout116 = _rt::alloc::Layout::from_size_align(
+                                                vec116.len()
+                                                    * (8 + 2 * ::core::mem::size_of::<*const u8>()),
+                                                ::core::mem::size_of::<*const u8>(),
+                                            )
+                                            .unwrap();
+                                        let (result116, _cleanup116) = wit_bindgen::rt::Cleanup::new(
+                                            layout116,
+                                        );
+                                        if let Some(cleanup) = _cleanup116 {
+                                            cleanup.forget();
+                                        }
+                                        for (i, e) in vec116.into_iter().enumerate() {
+                                            let base = result116
+                                                .add(i * (8 + 2 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let super::super::super::yosh::acp::tools::ToolCallLocation {
+                                                    path: path114,
+                                                    line: line114,
+                                                } = e;
+                                                let vec115 = (path114.into_bytes()).into_boxed_slice();
+                                                let ptr115 = vec115.as_ptr().cast::<u8>();
+                                                let len115 = vec115.len();
+                                                ::core::mem::forget(vec115);
+                                                *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len115;
+                                                *base.add(0).cast::<*mut u8>() = ptr115.cast_mut();
+                                                match line114 {
+                                                    Some(e) => {
+                                                        *base
+                                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        *base
+                                                            .add(4 + 2 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<i32>() = _rt::as_i32(e);
+                                                    }
+                                                    None => {
+                                                        *base
+                                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                            }
+                                        }
+                                        *_param_ptr
+                                            .add(8 + 8 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len116;
+                                        *_param_ptr
+                                            .add(8 + 7 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>() = result116;
+                                        match raw_input78 {
+                                            Some(e) => {
+                                                *_param_ptr
+                                                    .add(8 + 9 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>() = (1i32) as u8;
+                                                let vec117 = (e.into_bytes()).into_boxed_slice();
+                                                let ptr117 = vec117.as_ptr().cast::<u8>();
+                                                let len117 = vec117.len();
+                                                ::core::mem::forget(vec117);
+                                                *_param_ptr
+                                                    .add(8 + 11 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len117;
+                                                *_param_ptr
+                                                    .add(8 + 10 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr117.cast_mut();
+                                            }
+                                            None => {
+                                                *_param_ptr
+                                                    .add(8 + 9 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>() = (0i32) as u8;
+                                            }
+                                        };
+                                        match raw_output78 {
+                                            Some(e) => {
+                                                *_param_ptr
+                                                    .add(8 + 12 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>() = (1i32) as u8;
+                                                let vec118 = (e.into_bytes()).into_boxed_slice();
+                                                let ptr118 = vec118.as_ptr().cast::<u8>();
+                                                let len118 = vec118.len();
+                                                ::core::mem::forget(vec118);
+                                                *_param_ptr
+                                                    .add(8 + 14 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len118;
+                                                *_param_ptr
+                                                    .add(8 + 13 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr118.cast_mut();
+                                            }
+                                            None => {
+                                                *_param_ptr
+                                                    .add(8 + 12 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>() = (0i32) as u8;
+                                            }
+                                        };
+                                    }
+                                    V177::ToolCallUpdate(e) => {
+                                        *_param_ptr.add(0).cast::<u8>() = (4i32) as u8;
+                                        let super::super::super::yosh::acp::tools::ToolCallSnapshot {
+                                            id: id119,
+                                            title: title119,
+                                            kind: kind119,
+                                            status: status119,
+                                            content: content119,
+                                            locations: locations119,
+                                            raw_input: raw_input119,
+                                            raw_output: raw_output119,
+                                        } = e;
+                                        let vec120 = (id119.into_bytes()).into_boxed_slice();
+                                        let ptr120 = vec120.as_ptr().cast::<u8>();
+                                        let len120 = vec120.len();
+                                        ::core::mem::forget(vec120);
+                                        *_param_ptr
+                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len120;
+                                        *_param_ptr.add(8).cast::<*mut u8>() = ptr120.cast_mut();
+                                        let vec121 = (title119.into_bytes()).into_boxed_slice();
+                                        let ptr121 = vec121.as_ptr().cast::<u8>();
+                                        let len121 = vec121.len();
+                                        ::core::mem::forget(vec121);
+                                        *_param_ptr
+                                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len121;
+                                        *_param_ptr
+                                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>() = ptr121.cast_mut();
+                                        *_param_ptr
+                                            .add(8 + 4 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (kind119.clone() as i32) as u8;
+                                        *_param_ptr
+                                            .add(9 + 4 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<u8>() = (status119.clone() as i32) as u8;
+                                        let vec154 = content119;
+                                        let len154 = vec154.len();
+                                        let layout154 = _rt::alloc::Layout::from_size_align(
+                                                vec154.len()
+                                                    * (40 + 12 * ::core::mem::size_of::<*const u8>()),
+                                                8,
+                                            )
+                                            .unwrap();
+                                        let (result154, _cleanup154) = wit_bindgen::rt::Cleanup::new(
+                                            layout154,
+                                        );
+                                        if let Some(cleanup) = _cleanup154 {
+                                            cleanup.forget();
+                                        }
+                                        for (i, e) in vec154.into_iter().enumerate() {
+                                            let base = result154
+                                                .add(i * (40 + 12 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                use super::super::super::yosh::acp::tools::ToolCallContent as V153;
+                                                match e {
+                                                    V153::Content(e) => {
+                                                        *base.add(0).cast::<u8>() = (0i32) as u8;
+                                                        use super::super::super::yosh::acp::content::ContentBlock as V147;
+                                                        match e {
+                                                            V147::Text(e) => {
+                                                                *base.add(8).cast::<u8>() = (0i32) as u8;
+                                                                let super::super::super::yosh::acp::content::TextContent {
+                                                                    text: text122,
+                                                                } = e;
+                                                                let vec123 = (text122.into_bytes()).into_boxed_slice();
+                                                                let ptr123 = vec123.as_ptr().cast::<u8>();
+                                                                let len123 = vec123.len();
+                                                                ::core::mem::forget(vec123);
+                                                                *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len123;
+                                                                *base.add(16).cast::<*mut u8>() = ptr123.cast_mut();
+                                                            }
+                                                            V147::Image(e) => {
+                                                                *base.add(8).cast::<u8>() = (1i32) as u8;
+                                                                let super::super::super::yosh::acp::content::ImageContent {
+                                                                    data: data124,
+                                                                    mime_type: mime_type124,
+                                                                    uri: uri124,
+                                                                } = e;
+                                                                let vec125 = (data124.into_bytes()).into_boxed_slice();
+                                                                let ptr125 = vec125.as_ptr().cast::<u8>();
+                                                                let len125 = vec125.len();
+                                                                ::core::mem::forget(vec125);
+                                                                *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len125;
+                                                                *base.add(16).cast::<*mut u8>() = ptr125.cast_mut();
+                                                                let vec126 = (mime_type124.into_bytes()).into_boxed_slice();
+                                                                let ptr126 = vec126.as_ptr().cast::<u8>();
+                                                                let len126 = vec126.len();
+                                                                ::core::mem::forget(vec126);
+                                                                *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len126;
+                                                                *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>() = ptr126.cast_mut();
+                                                                match uri124 {
+                                                                    Some(e) => {
+                                                                        *base
+                                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (1i32) as u8;
+                                                                        let vec127 = (e.into_bytes()).into_boxed_slice();
+                                                                        let ptr127 = vec127.as_ptr().cast::<u8>();
+                                                                        let len127 = vec127.len();
+                                                                        ::core::mem::forget(vec127);
+                                                                        *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>() = len127;
+                                                                        *base
+                                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>() = ptr127.cast_mut();
+                                                                    }
+                                                                    None => {
+                                                                        *base
+                                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (0i32) as u8;
+                                                                    }
+                                                                };
+                                                            }
+                                                            V147::Audio(e) => {
+                                                                *base.add(8).cast::<u8>() = (2i32) as u8;
+                                                                let super::super::super::yosh::acp::content::AudioContent {
+                                                                    data: data128,
+                                                                    mime_type: mime_type128,
+                                                                } = e;
+                                                                let vec129 = (data128.into_bytes()).into_boxed_slice();
+                                                                let ptr129 = vec129.as_ptr().cast::<u8>();
+                                                                let len129 = vec129.len();
+                                                                ::core::mem::forget(vec129);
+                                                                *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len129;
+                                                                *base.add(16).cast::<*mut u8>() = ptr129.cast_mut();
+                                                                let vec130 = (mime_type128.into_bytes()).into_boxed_slice();
+                                                                let ptr130 = vec130.as_ptr().cast::<u8>();
+                                                                let len130 = vec130.len();
+                                                                ::core::mem::forget(vec130);
+                                                                *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len130;
+                                                                *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>() = ptr130.cast_mut();
+                                                            }
+                                                            V147::ResourceLink(e) => {
+                                                                *base.add(8).cast::<u8>() = (3i32) as u8;
+                                                                let super::super::super::yosh::acp::content::ResourceLink {
+                                                                    uri: uri131,
+                                                                    name: name131,
+                                                                    mime_type: mime_type131,
+                                                                    title: title131,
+                                                                    description: description131,
+                                                                    size: size131,
+                                                                } = e;
+                                                                let vec132 = (uri131.into_bytes()).into_boxed_slice();
+                                                                let ptr132 = vec132.as_ptr().cast::<u8>();
+                                                                let len132 = vec132.len();
+                                                                ::core::mem::forget(vec132);
+                                                                *base
+                                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len132;
+                                                                *base.add(16).cast::<*mut u8>() = ptr132.cast_mut();
+                                                                let vec133 = (name131.into_bytes()).into_boxed_slice();
+                                                                let ptr133 = vec133.as_ptr().cast::<u8>();
+                                                                let len133 = vec133.len();
+                                                                ::core::mem::forget(vec133);
+                                                                *base
+                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len133;
+                                                                *base
+                                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>() = ptr133.cast_mut();
+                                                                match mime_type131 {
+                                                                    Some(e) => {
+                                                                        *base
+                                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (1i32) as u8;
+                                                                        let vec134 = (e.into_bytes()).into_boxed_slice();
+                                                                        let ptr134 = vec134.as_ptr().cast::<u8>();
+                                                                        let len134 = vec134.len();
+                                                                        ::core::mem::forget(vec134);
+                                                                        *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>() = len134;
+                                                                        *base
+                                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>() = ptr134.cast_mut();
+                                                                    }
+                                                                    None => {
+                                                                        *base
+                                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (0i32) as u8;
+                                                                    }
+                                                                };
+                                                                match title131 {
+                                                                    Some(e) => {
+                                                                        *base
+                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (1i32) as u8;
+                                                                        let vec135 = (e.into_bytes()).into_boxed_slice();
+                                                                        let ptr135 = vec135.as_ptr().cast::<u8>();
+                                                                        let len135 = vec135.len();
+                                                                        ::core::mem::forget(vec135);
+                                                                        *base
+                                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>() = len135;
+                                                                        *base
+                                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>() = ptr135.cast_mut();
+                                                                    }
+                                                                    None => {
+                                                                        *base
+                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (0i32) as u8;
+                                                                    }
+                                                                };
+                                                                match description131 {
+                                                                    Some(e) => {
+                                                                        *base
+                                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (1i32) as u8;
+                                                                        let vec136 = (e.into_bytes()).into_boxed_slice();
+                                                                        let ptr136 = vec136.as_ptr().cast::<u8>();
+                                                                        let len136 = vec136.len();
+                                                                        ::core::mem::forget(vec136);
+                                                                        *base
+                                                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>() = len136;
+                                                                        *base
+                                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>() = ptr136.cast_mut();
+                                                                    }
+                                                                    None => {
+                                                                        *base
+                                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (0i32) as u8;
+                                                                    }
+                                                                };
+                                                                match size131 {
+                                                                    Some(e) => {
+                                                                        *base
+                                                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (1i32) as u8;
+                                                                        *base
+                                                                            .add(32 + 12 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<i64>() = _rt::as_i64(e);
+                                                                    }
+                                                                    None => {
+                                                                        *base
+                                                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<u8>() = (0i32) as u8;
+                                                                    }
+                                                                };
+                                                            }
+                                                            V147::Resource(e) => {
+                                                                *base.add(8).cast::<u8>() = (4i32) as u8;
+                                                                let super::super::super::yosh::acp::content::EmbeddedResource {
+                                                                    resource: resource137,
+                                                                } = e;
+                                                                use super::super::super::yosh::acp::content::ResourceContents as V146;
+                                                                match resource137 {
+                                                                    V146::Text(e) => {
+                                                                        *base.add(16).cast::<u8>() = (0i32) as u8;
+                                                                        let super::super::super::yosh::acp::content::TextResourceContents {
+                                                                            uri: uri138,
+                                                                            mime_type: mime_type138,
+                                                                            text: text138,
+                                                                        } = e;
+                                                                        let vec139 = (uri138.into_bytes()).into_boxed_slice();
+                                                                        let ptr139 = vec139.as_ptr().cast::<u8>();
+                                                                        let len139 = vec139.len();
+                                                                        ::core::mem::forget(vec139);
+                                                                        *base
+                                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>() = len139;
+                                                                        *base
+                                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>() = ptr139.cast_mut();
+                                                                        match mime_type138 {
+                                                                            Some(e) => {
+                                                                                *base
+                                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<u8>() = (1i32) as u8;
+                                                                                let vec140 = (e.into_bytes()).into_boxed_slice();
+                                                                                let ptr140 = vec140.as_ptr().cast::<u8>();
+                                                                                let len140 = vec140.len();
+                                                                                ::core::mem::forget(vec140);
+                                                                                *base
+                                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>() = len140;
+                                                                                *base
+                                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<*mut u8>() = ptr140.cast_mut();
+                                                                            }
+                                                                            None => {
+                                                                                *base
+                                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<u8>() = (0i32) as u8;
+                                                                            }
+                                                                        };
+                                                                        let vec141 = (text138.into_bytes()).into_boxed_slice();
+                                                                        let ptr141 = vec141.as_ptr().cast::<u8>();
+                                                                        let len141 = vec141.len();
+                                                                        ::core::mem::forget(vec141);
+                                                                        *base
+                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>() = len141;
+                                                                        *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>() = ptr141.cast_mut();
+                                                                    }
+                                                                    V146::Blob(e) => {
+                                                                        *base.add(16).cast::<u8>() = (1i32) as u8;
+                                                                        let super::super::super::yosh::acp::content::BlobResourceContents {
+                                                                            uri: uri142,
+                                                                            mime_type: mime_type142,
+                                                                            blob: blob142,
+                                                                        } = e;
+                                                                        let vec143 = (uri142.into_bytes()).into_boxed_slice();
+                                                                        let ptr143 = vec143.as_ptr().cast::<u8>();
+                                                                        let len143 = vec143.len();
+                                                                        ::core::mem::forget(vec143);
+                                                                        *base
+                                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>() = len143;
+                                                                        *base
+                                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>() = ptr143.cast_mut();
+                                                                        match mime_type142 {
+                                                                            Some(e) => {
+                                                                                *base
+                                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<u8>() = (1i32) as u8;
+                                                                                let vec144 = (e.into_bytes()).into_boxed_slice();
+                                                                                let ptr144 = vec144.as_ptr().cast::<u8>();
+                                                                                let len144 = vec144.len();
+                                                                                ::core::mem::forget(vec144);
+                                                                                *base
+                                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<usize>() = len144;
+                                                                                *base
+                                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<*mut u8>() = ptr144.cast_mut();
+                                                                            }
+                                                                            None => {
+                                                                                *base
+                                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                                    .cast::<u8>() = (0i32) as u8;
+                                                                            }
+                                                                        };
+                                                                        let vec145 = (blob142.into_bytes()).into_boxed_slice();
+                                                                        let ptr145 = vec145.as_ptr().cast::<u8>();
+                                                                        let len145 = vec145.len();
+                                                                        ::core::mem::forget(vec145);
+                                                                        *base
+                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<usize>() = len145;
+                                                                        *base
+                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
+                                                                            .cast::<*mut u8>() = ptr145.cast_mut();
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    V153::Diff(e) => {
+                                                        *base.add(0).cast::<u8>() = (1i32) as u8;
+                                                        let super::super::super::yosh::acp::tools::Diff {
+                                                            path: path148,
+                                                            old_text: old_text148,
+                                                            new_text: new_text148,
+                                                        } = e;
+                                                        let vec149 = (path148.into_bytes()).into_boxed_slice();
+                                                        let ptr149 = vec149.as_ptr().cast::<u8>();
+                                                        let len149 = vec149.len();
+                                                        ::core::mem::forget(vec149);
+                                                        *base
+                                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len149;
+                                                        *base.add(8).cast::<*mut u8>() = ptr149.cast_mut();
+                                                        match old_text148 {
+                                                            Some(e) => {
+                                                                *base
+                                                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<u8>() = (1i32) as u8;
+                                                                let vec150 = (e.into_bytes()).into_boxed_slice();
+                                                                let ptr150 = vec150.as_ptr().cast::<u8>();
+                                                                let len150 = vec150.len();
+                                                                ::core::mem::forget(vec150);
+                                                                *base
+                                                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<usize>() = len150;
+                                                                *base
+                                                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<*mut u8>() = ptr150.cast_mut();
+                                                            }
+                                                            None => {
+                                                                *base
+                                                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                                    .cast::<u8>() = (0i32) as u8;
+                                                            }
+                                                        };
+                                                        let vec151 = (new_text148.into_bytes()).into_boxed_slice();
+                                                        let ptr151 = vec151.as_ptr().cast::<u8>();
+                                                        let len151 = vec151.len();
+                                                        ::core::mem::forget(vec151);
+                                                        *base
+                                                            .add(8 + 6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len151;
+                                                        *base
+                                                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr151.cast_mut();
+                                                    }
+                                                    V153::Terminal(e) => {
+                                                        *base.add(0).cast::<u8>() = (2i32) as u8;
+                                                        let vec152 = (e.into_bytes()).into_boxed_slice();
+                                                        let ptr152 = vec152.as_ptr().cast::<u8>();
+                                                        let len152 = vec152.len();
+                                                        ::core::mem::forget(vec152);
+                                                        *base
+                                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len152;
+                                                        *base.add(8).cast::<*mut u8>() = ptr152.cast_mut();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        *_param_ptr
+                                            .add(8 + 6 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len154;
+                                        *_param_ptr
+                                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>() = result154;
+                                        let vec157 = locations119;
+                                        let len157 = vec157.len();
+                                        let layout157 = _rt::alloc::Layout::from_size_align(
+                                                vec157.len()
+                                                    * (8 + 2 * ::core::mem::size_of::<*const u8>()),
+                                                ::core::mem::size_of::<*const u8>(),
+                                            )
+                                            .unwrap();
+                                        let (result157, _cleanup157) = wit_bindgen::rt::Cleanup::new(
+                                            layout157,
+                                        );
+                                        if let Some(cleanup) = _cleanup157 {
+                                            cleanup.forget();
+                                        }
+                                        for (i, e) in vec157.into_iter().enumerate() {
+                                            let base = result157
+                                                .add(i * (8 + 2 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let super::super::super::yosh::acp::tools::ToolCallLocation {
+                                                    path: path155,
+                                                    line: line155,
+                                                } = e;
+                                                let vec156 = (path155.into_bytes()).into_boxed_slice();
+                                                let ptr156 = vec156.as_ptr().cast::<u8>();
+                                                let len156 = vec156.len();
+                                                ::core::mem::forget(vec156);
+                                                *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len156;
+                                                *base.add(0).cast::<*mut u8>() = ptr156.cast_mut();
+                                                match line155 {
+                                                    Some(e) => {
+                                                        *base
+                                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        *base
+                                                            .add(4 + 2 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<i32>() = _rt::as_i32(e);
+                                                    }
+                                                    None => {
+                                                        *base
+                                                            .add(2 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                            }
+                                        }
+                                        *_param_ptr
+                                            .add(8 + 8 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len157;
+                                        *_param_ptr
+                                            .add(8 + 7 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<*mut u8>() = result157;
+                                        match raw_input119 {
+                                            Some(e) => {
+                                                *_param_ptr
+                                                    .add(8 + 9 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>() = (1i32) as u8;
+                                                let vec158 = (e.into_bytes()).into_boxed_slice();
+                                                let ptr158 = vec158.as_ptr().cast::<u8>();
+                                                let len158 = vec158.len();
+                                                ::core::mem::forget(vec158);
+                                                *_param_ptr
+                                                    .add(8 + 11 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len158;
+                                                *_param_ptr
+                                                    .add(8 + 10 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr158.cast_mut();
+                                            }
+                                            None => {
+                                                *_param_ptr
+                                                    .add(8 + 9 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>() = (0i32) as u8;
+                                            }
+                                        };
+                                        match raw_output119 {
+                                            Some(e) => {
+                                                *_param_ptr
+                                                    .add(8 + 12 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>() = (1i32) as u8;
+                                                let vec159 = (e.into_bytes()).into_boxed_slice();
+                                                let ptr159 = vec159.as_ptr().cast::<u8>();
+                                                let len159 = vec159.len();
+                                                ::core::mem::forget(vec159);
+                                                *_param_ptr
+                                                    .add(8 + 14 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len159;
+                                                *_param_ptr
+                                                    .add(8 + 13 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr159.cast_mut();
+                                            }
+                                            None => {
+                                                *_param_ptr
+                                                    .add(8 + 12 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>() = (0i32) as u8;
+                                            }
+                                        };
+                                    }
+                                    V177::Plan(e) => {
+                                        *_param_ptr.add(0).cast::<u8>() = (5i32) as u8;
+                                        let super::super::super::yosh::acp::tools::Plan {
+                                            entries: entries160,
+                                        } = e;
+                                        let vec163 = entries160;
+                                        let len163 = vec163.len();
+                                        let layout163 = _rt::alloc::Layout::from_size_align(
+                                                vec163.len() * (3 * ::core::mem::size_of::<*const u8>()),
+                                                ::core::mem::size_of::<*const u8>(),
+                                            )
+                                            .unwrap();
+                                        let (result163, _cleanup163) = wit_bindgen::rt::Cleanup::new(
+                                            layout163,
+                                        );
+                                        if let Some(cleanup) = _cleanup163 {
+                                            cleanup.forget();
+                                        }
+                                        for (i, e) in vec163.into_iter().enumerate() {
+                                            let base = result163
+                                                .add(i * (3 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let super::super::super::yosh::acp::tools::PlanEntry {
+                                                    content: content161,
+                                                    priority: priority161,
+                                                    status: status161,
+                                                } = e;
+                                                let vec162 = (content161.into_bytes()).into_boxed_slice();
+                                                let ptr162 = vec162.as_ptr().cast::<u8>();
+                                                let len162 = vec162.len();
+                                                ::core::mem::forget(vec162);
+                                                *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len162;
+                                                *base.add(0).cast::<*mut u8>() = ptr162.cast_mut();
+                                                *base
+                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>() = (priority161.clone() as i32) as u8;
+                                                *base
+                                                    .add(1 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>() = (status161.clone() as i32) as u8;
+                                            }
+                                        }
+                                        *_param_ptr
+                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len163;
+                                        *_param_ptr.add(8).cast::<*mut u8>() = result163;
+                                    }
+                                    V177::CurrentModeUpdate(e) => {
+                                        *_param_ptr.add(0).cast::<u8>() = (6i32) as u8;
+                                        let vec164 = (e.into_bytes()).into_boxed_slice();
+                                        let ptr164 = vec164.as_ptr().cast::<u8>();
+                                        let len164 = vec164.len();
+                                        ::core::mem::forget(vec164);
+                                        *_param_ptr
+                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len164;
+                                        *_param_ptr.add(8).cast::<*mut u8>() = ptr164.cast_mut();
+                                    }
+                                    V177::SessionInfoUpdate(e) => {
+                                        *_param_ptr.add(0).cast::<u8>() = (7i32) as u8;
+                                        let super::super::super::yosh::acp::sessions::SessionInfoUpdate {
+                                            title: title165,
+                                            updated_at: updated_at165,
+                                        } = e;
+                                        match title165 {
+                                            Some(e) => {
+                                                *_param_ptr.add(8).cast::<u8>() = (1i32) as u8;
+                                                let vec166 = (e.into_bytes()).into_boxed_slice();
+                                                let ptr166 = vec166.as_ptr().cast::<u8>();
+                                                let len166 = vec166.len();
+                                                ::core::mem::forget(vec166);
+                                                *_param_ptr
+                                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len166;
+                                                *_param_ptr
+                                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr166.cast_mut();
+                                            }
+                                            None => {
+                                                *_param_ptr.add(8).cast::<u8>() = (0i32) as u8;
+                                            }
+                                        };
+                                        match updated_at165 {
+                                            Some(e) => {
+                                                *_param_ptr
+                                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>() = (1i32) as u8;
+                                                let vec167 = (e.into_bytes()).into_boxed_slice();
+                                                let ptr167 = vec167.as_ptr().cast::<u8>();
+                                                let len167 = vec167.len();
+                                                ::core::mem::forget(vec167);
+                                                *_param_ptr
+                                                    .add(8 + 5 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len167;
+                                                *_param_ptr
+                                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr167.cast_mut();
+                                            }
+                                            None => {
+                                                *_param_ptr
+                                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<u8>() = (0i32) as u8;
+                                            }
+                                        };
+                                    }
+                                    V177::AvailableCommandsUpdate(e) => {
+                                        *_param_ptr.add(0).cast::<u8>() = (8i32) as u8;
+                                        let vec173 = e;
+                                        let len173 = vec173.len();
+                                        let layout173 = _rt::alloc::Layout::from_size_align(
+                                                vec173.len() * (7 * ::core::mem::size_of::<*const u8>()),
+                                                ::core::mem::size_of::<*const u8>(),
+                                            )
+                                            .unwrap();
+                                        let (result173, _cleanup173) = wit_bindgen::rt::Cleanup::new(
+                                            layout173,
+                                        );
+                                        if let Some(cleanup) = _cleanup173 {
+                                            cleanup.forget();
+                                        }
+                                        for (i, e) in vec173.into_iter().enumerate() {
+                                            let base = result173
+                                                .add(i * (7 * ::core::mem::size_of::<*const u8>()));
+                                            {
+                                                let super::super::super::yosh::acp::prompts::AvailableCommand {
+                                                    name: name168,
+                                                    description: description168,
+                                                    input: input168,
+                                                } = e;
+                                                let vec169 = (name168.into_bytes()).into_boxed_slice();
+                                                let ptr169 = vec169.as_ptr().cast::<u8>();
+                                                let len169 = vec169.len();
+                                                ::core::mem::forget(vec169);
+                                                *base
+                                                    .add(::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len169;
+                                                *base.add(0).cast::<*mut u8>() = ptr169.cast_mut();
+                                                let vec170 = (description168.into_bytes())
+                                                    .into_boxed_slice();
+                                                let ptr170 = vec170.as_ptr().cast::<u8>();
+                                                let len170 = vec170.len();
+                                                ::core::mem::forget(vec170);
+                                                *base
+                                                    .add(3 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len170;
+                                                *base
+                                                    .add(2 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<*mut u8>() = ptr170.cast_mut();
+                                                match input168 {
+                                                    Some(e) => {
+                                                        *base
+                                                            .add(4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (1i32) as u8;
+                                                        let super::super::super::yosh::acp::prompts::AvailableCommandInput {
+                                                            hint: hint171,
+                                                        } = e;
+                                                        let vec172 = (hint171.into_bytes()).into_boxed_slice();
+                                                        let ptr172 = vec172.as_ptr().cast::<u8>();
+                                                        let len172 = vec172.len();
+                                                        ::core::mem::forget(vec172);
+                                                        *base
+                                                            .add(6 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<usize>() = len172;
+                                                        *base
+                                                            .add(5 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<*mut u8>() = ptr172.cast_mut();
+                                                    }
+                                                    None => {
+                                                        *base
+                                                            .add(4 * ::core::mem::size_of::<*const u8>())
+                                                            .cast::<u8>() = (0i32) as u8;
+                                                    }
+                                                };
+                                            }
+                                        }
+                                        *_param_ptr
+                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
+                                            .cast::<usize>() = len173;
+                                        *_param_ptr.add(8).cast::<*mut u8>() = result173;
+                                    }
+                                    V177::UsageUpdate(e) => {
+                                        *_param_ptr.add(0).cast::<u8>() = (9i32) as u8;
+                                        let super::super::super::yosh::acp::prompts::UsageUpdate {
+                                            used: used174,
+                                            size: size174,
+                                            cost: cost174,
+                                        } = e;
+                                        *_param_ptr.add(8).cast::<i64>() = _rt::as_i64(used174);
+                                        *_param_ptr.add(16).cast::<i64>() = _rt::as_i64(size174);
+                                        match cost174 {
+                                            Some(e) => {
+                                                *_param_ptr.add(24).cast::<u8>() = (1i32) as u8;
+                                                let super::super::super::yosh::acp::prompts::UsageCost {
+                                                    amount: amount175,
+                                                    currency: currency175,
+                                                } = e;
+                                                *_param_ptr.add(32).cast::<f64>() = _rt::as_f64(amount175);
+                                                let vec176 = (currency175.into_bytes()).into_boxed_slice();
+                                                let ptr176 = vec176.as_ptr().cast::<u8>();
+                                                let len176 = vec176.len();
+                                                ::core::mem::forget(vec176);
+                                                *_param_ptr
+                                                    .add(40 + 1 * ::core::mem::size_of::<*const u8>())
+                                                    .cast::<usize>() = len176;
+                                                *_param_ptr.add(40).cast::<*mut u8>() = ptr176.cast_mut();
+                                            }
+                                            None => {
+                                                *_param_ptr.add(24).cast::<u8>() = (0i32) as u8;
+                                            }
+                                        };
+                                    }
+                                }
+                            }
+                            ParamsLower(_ptr)
+                        }
+                        unsafe fn results_lift(
+                            &mut self,
+                            _ptr: *mut u8,
+                        ) -> Self::Results {}
+                    }
+                    _MySubtask {
+                        _unused: core::marker::PhantomData,
+                    }
+                        .call((session_id, update))
+                        .await
                 }
             }
             #[allow(unused_unsafe, clippy::all)]
@@ -13891,11 +19202,11 @@ pub mod exports {
             /// resource alongside an initial state snapshot. Dropping the
             /// `session` closes it; there is no `close-session` method.
             ///
-            /// A prompt turn is also resource-shaped: `session.prompt(blocks)`
-            /// returns a [`prompt-turn`] that exposes the streaming
-            /// `session-update` body and the eventual final response. Dropping the
-            /// `prompt-turn` cancels the in-flight turn. This mirrors
-            /// `wasi:http`'s `handler.handle(request) -> response` shape.
+            /// `session.prompt` is a plain async function that returns the
+            /// terminal `prompt-response` when the turn ends. Intermediate
+            /// `session-update`s (agent message chunks, tool-call lifecycle,
+            /// plan/mode notifications, etc.) flow over `client.notify-session`
+            /// in the opposite direction.
             #[allow(dead_code, async_fn_in_trait, unused_imports, clippy::all)]
             pub mod agent {
                 #[used]
@@ -13920,7 +19231,6 @@ pub mod exports {
                 pub type ResumeSessionRequest = super::super::super::super::yosh::acp::sessions::ResumeSessionRequest;
                 pub type ResumeSessionResponse = super::super::super::super::yosh::acp::sessions::ResumeSessionResponse;
                 pub type ContentBlock = super::super::super::super::yosh::acp::content::ContentBlock;
-                pub type SessionUpdate = super::super::super::super::yosh::acp::prompts::SessionUpdate;
                 pub type PromptResponse = super::super::super::super::yosh::acp::prompts::PromptResponse;
                 /// Opaque handle to an active session.
                 ///
@@ -14039,139 +19349,6 @@ pub mod exports {
                         #[link(wasm_import_module = "[export]yosh:acp/agent@7.0.0")]
                         unsafe extern "C" {
                             #[link_name = "[resource-drop]session"]
-                            fn drop(_: i32);
-                        }
-                        #[cfg(not(target_arch = "wasm32"))]
-                        unsafe extern "C" fn drop(_: i32) {
-                            unreachable!()
-                        }
-                        unsafe {
-                            drop(_handle as i32);
-                        }
-                    }
-                }
-                /// An in-flight prompt turn.
-                ///
-                /// Holds the streaming "body" (session updates as they happen) and
-                /// the future final response. Dropping the resource cancels the
-                /// turn — the agent MUST resolve `response()` with
-                /// `stop-reason::cancelled` and the `updates` stream MUST end
-                /// promptly.
-                ///
-                /// Analogous to `wasi:http/types.response`: the body is consumed
-                /// separately from the terminal status.
-                #[derive(Debug)]
-                #[repr(transparent)]
-                pub struct PromptTurn {
-                    handle: _rt::Resource<PromptTurn>,
-                }
-                type _PromptTurnRep<T> = Option<T>;
-                impl PromptTurn {
-                    /// Creates a new resource from the specified representation.
-                    ///
-                    /// This function will create a new resource handle by moving `val` onto
-                    /// the heap and then passing that heap pointer to the component model to
-                    /// create a handle. The owned handle is then returned as `PromptTurn`.
-                    pub fn new<T: GuestPromptTurn>(val: T) -> Self {
-                        Self::type_guard::<T>();
-                        let val: _PromptTurnRep<T> = Some(val);
-                        let ptr: *mut _PromptTurnRep<T> = _rt::Box::into_raw(
-                            _rt::Box::new(val),
-                        );
-                        unsafe { Self::from_handle(T::_resource_new(ptr.cast())) }
-                    }
-                    /// Gets access to the underlying `T` which represents this resource.
-                    pub fn get<T: GuestPromptTurn>(&self) -> &T {
-                        let ptr = unsafe { &*self.as_ptr::<T>() };
-                        ptr.as_ref().unwrap()
-                    }
-                    /// Gets mutable access to the underlying `T` which represents this
-                    /// resource.
-                    pub fn get_mut<T: GuestPromptTurn>(&mut self) -> &mut T {
-                        let ptr = unsafe { &mut *self.as_ptr::<T>() };
-                        ptr.as_mut().unwrap()
-                    }
-                    /// Consumes this resource and returns the underlying `T`.
-                    pub fn into_inner<T: GuestPromptTurn>(self) -> T {
-                        let ptr = unsafe { &mut *self.as_ptr::<T>() };
-                        ptr.take().unwrap()
-                    }
-                    #[doc(hidden)]
-                    pub unsafe fn from_handle(handle: u32) -> Self {
-                        Self {
-                            handle: unsafe { _rt::Resource::from_handle(handle) },
-                        }
-                    }
-                    #[doc(hidden)]
-                    pub fn take_handle(&self) -> u32 {
-                        _rt::Resource::take_handle(&self.handle)
-                    }
-                    #[doc(hidden)]
-                    pub fn handle(&self) -> u32 {
-                        _rt::Resource::handle(&self.handle)
-                    }
-                    #[doc(hidden)]
-                    fn type_guard<T: 'static>() {
-                        use core::any::TypeId;
-                        static mut LAST_TYPE: Option<TypeId> = None;
-                        unsafe {
-                            assert!(! cfg!(target_feature = "atomics"));
-                            let id = TypeId::of::<T>();
-                            match LAST_TYPE {
-                                Some(ty) => {
-                                    assert!(
-                                        ty == id, "cannot use two types with this resource type"
-                                    )
-                                }
-                                None => LAST_TYPE = Some(id),
-                            }
-                        }
-                    }
-                    #[doc(hidden)]
-                    pub unsafe fn dtor<T: 'static>(handle: *mut u8) {
-                        Self::type_guard::<T>();
-                        let _ = unsafe {
-                            _rt::Box::from_raw(handle as *mut _PromptTurnRep<T>)
-                        };
-                    }
-                    fn as_ptr<T: GuestPromptTurn>(&self) -> *mut _PromptTurnRep<T> {
-                        PromptTurn::type_guard::<T>();
-                        T::_resource_rep(self.handle()).cast()
-                    }
-                }
-                /// A borrowed version of [`PromptTurn`] which represents a borrowed value
-                /// with the lifetime `'a`.
-                #[derive(Debug)]
-                #[repr(transparent)]
-                pub struct PromptTurnBorrow<'a> {
-                    rep: *mut u8,
-                    _marker: core::marker::PhantomData<&'a PromptTurn>,
-                }
-                impl<'a> PromptTurnBorrow<'a> {
-                    #[doc(hidden)]
-                    pub unsafe fn lift(rep: usize) -> Self {
-                        Self {
-                            rep: rep as *mut u8,
-                            _marker: core::marker::PhantomData,
-                        }
-                    }
-                    /// Gets access to the underlying `T` in this resource.
-                    pub fn get<T: GuestPromptTurn>(&self) -> &'a T {
-                        let ptr = unsafe { &mut *self.as_ptr::<T>() };
-                        ptr.as_ref().unwrap()
-                    }
-                    fn as_ptr<T: 'static>(&self) -> *mut _PromptTurnRep<T> {
-                        PromptTurn::type_guard::<T>();
-                        self.rep.cast()
-                    }
-                }
-                unsafe impl _rt::WasmResource for PromptTurn {
-                    #[inline]
-                    unsafe fn drop(_handle: u32) {
-                        #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "[export]yosh:acp/agent@7.0.0")]
-                        unsafe extern "C" {
-                            #[link_name = "[resource-drop]prompt-turn"]
                             fn drop(_: i32);
                         }
                         #[cfg(not(target_arch = "wasm32"))]
@@ -14592,18 +19769,77 @@ pub mod exports {
                                     )
                                     .await
                             };
+                            let (
+                                result70_0,
+                                result70_1,
+                                result70_2,
+                                result70_3,
+                                result70_4,
+                            ) = match result64 {
+                                Ok(e) => {
+                                    let super::super::super::super::yosh::acp::prompts::PromptResponse {
+                                        stop_reason: stop_reason65,
+                                    } = e;
+                                    (
+                                        0i32,
+                                        stop_reason65.clone() as i32,
+                                        0i32,
+                                        ::core::ptr::null_mut(),
+                                        0usize,
+                                    )
+                                }
+                                Err(e) => {
+                                    let super::super::super::super::yosh::acp::errors::Error {
+                                        code: code66,
+                                        message: message66,
+                                    } = e;
+                                    use super::super::super::super::yosh::acp::errors::ErrorCode as V67;
+                                    let (result68_0, result68_1) = match code66 {
+                                        V67::ParseError => (0i32, 0i32),
+                                        V67::InvalidRequest => (1i32, 0i32),
+                                        V67::MethodNotFound => (2i32, 0i32),
+                                        V67::InvalidParams => (3i32, 0i32),
+                                        V67::InternalError => (4i32, 0i32),
+                                        V67::AuthRequired => (5i32, 0i32),
+                                        V67::ResourceNotFound => (6i32, 0i32),
+                                        V67::Other(e) => (7i32, _rt::as_i32(e)),
+                                    };
+                                    let vec69 = message66;
+                                    let ptr69 = vec69.as_ptr().cast::<u8>();
+                                    let len69 = vec69.len();
+                                    (1i32, result68_0, result68_1, ptr69.cast_mut(), len69)
+                                }
+                            };
                             #[cfg(target_arch = "wasm32")]
                             #[link(wasm_import_module = "[export]yosh:acp/agent@7.0.0")]
                             unsafe extern "C" {
                                 #[link_name = "[task-return][method]session.prompt"]
-                                fn wit_import65(_: i32);
+                                fn wit_import71(
+                                    _: i32,
+                                    _: i32,
+                                    _: i32,
+                                    _: *mut u8,
+                                    _: usize,
+                                );
                             }
                             #[cfg(not(target_arch = "wasm32"))]
-                            unsafe extern "C" fn wit_import65(_: i32) {
+                            unsafe extern "C" fn wit_import71(
+                                _: i32,
+                                _: i32,
+                                _: i32,
+                                _: *mut u8,
+                                _: usize,
+                            ) {
                                 unreachable!()
                             }
                             _task_cancel.forget();
-                            wit_import65((result64).take_handle() as i32);
+                            wit_import71(
+                                result70_0,
+                                result70_1,
+                                result70_2,
+                                result70_3,
+                                result70_4,
+                            );
                         })
                     }
                 }
@@ -15117,147 +20353,6 @@ pub mod exports {
                 #[doc(hidden)]
                 #[allow(non_snake_case)]
                 pub unsafe fn __callback_method_session_set_config_option(
-                    event0: u32,
-                    event1: u32,
-                    event2: u32,
-                ) -> u32 {
-                    unsafe {
-                        wit_bindgen::rt::async_support::callback(event0, event1, event2)
-                    }
-                }
-                #[doc(hidden)]
-                #[allow(non_snake_case, unused_unsafe)]
-                pub unsafe fn _export_method_prompt_turn_updates_cabi<
-                    T_: GuestPromptTurn,
-                >(arg0: *mut u8) -> i32 {
-                    unsafe {
-                        #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
-                        wit_bindgen::rt::async_support::start_task(async move {
-                            let _task_cancel = wit_bindgen::rt::async_support::TaskCancelOnDrop::new();
-                            let result0 = &{
-                                T_::updates(
-                                        PromptTurnBorrow::lift(arg0 as u32 as usize).get(),
-                                    )
-                                    .await
-                            };
-                            #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/agent@7.0.0")]
-                            unsafe extern "C" {
-                                #[link_name = "[task-return][method]prompt-turn.updates"]
-                                fn wit_import1(_: i32);
-                            }
-                            #[cfg(not(target_arch = "wasm32"))]
-                            unsafe extern "C" fn wit_import1(_: i32) {
-                                unreachable!()
-                            }
-                            _task_cancel.forget();
-                            wit_import1((result0).take_handle() as i32);
-                        })
-                    }
-                }
-                #[doc(hidden)]
-                #[allow(non_snake_case)]
-                pub unsafe fn __callback_method_prompt_turn_updates(
-                    event0: u32,
-                    event1: u32,
-                    event2: u32,
-                ) -> u32 {
-                    unsafe {
-                        wit_bindgen::rt::async_support::callback(event0, event1, event2)
-                    }
-                }
-                #[doc(hidden)]
-                #[allow(non_snake_case, unused_unsafe)]
-                pub unsafe fn _export_method_prompt_turn_response_cabi<
-                    T_: GuestPromptTurn,
-                >(arg0: *mut u8) -> i32 {
-                    unsafe {
-                        #[cfg(target_arch = "wasm32")] _rt::run_ctors_once();
-                        wit_bindgen::rt::async_support::start_task(async move {
-                            let _task_cancel = wit_bindgen::rt::async_support::TaskCancelOnDrop::new();
-                            let result0 = &{
-                                T_::response(
-                                        PromptTurnBorrow::lift(arg0 as u32 as usize).get(),
-                                    )
-                                    .await
-                            };
-                            let (
-                                result6_0,
-                                result6_1,
-                                result6_2,
-                                result6_3,
-                                result6_4,
-                            ) = match result0 {
-                                Ok(e) => {
-                                    let super::super::super::super::yosh::acp::prompts::PromptResponse {
-                                        stop_reason: stop_reason1,
-                                    } = e;
-                                    (
-                                        0i32,
-                                        stop_reason1.clone() as i32,
-                                        0i32,
-                                        ::core::ptr::null_mut(),
-                                        0usize,
-                                    )
-                                }
-                                Err(e) => {
-                                    let super::super::super::super::yosh::acp::errors::Error {
-                                        code: code2,
-                                        message: message2,
-                                    } = e;
-                                    use super::super::super::super::yosh::acp::errors::ErrorCode as V3;
-                                    let (result4_0, result4_1) = match code2 {
-                                        V3::ParseError => (0i32, 0i32),
-                                        V3::InvalidRequest => (1i32, 0i32),
-                                        V3::MethodNotFound => (2i32, 0i32),
-                                        V3::InvalidParams => (3i32, 0i32),
-                                        V3::InternalError => (4i32, 0i32),
-                                        V3::AuthRequired => (5i32, 0i32),
-                                        V3::ResourceNotFound => (6i32, 0i32),
-                                        V3::Other(e) => (7i32, _rt::as_i32(e)),
-                                    };
-                                    let vec5 = message2;
-                                    let ptr5 = vec5.as_ptr().cast::<u8>();
-                                    let len5 = vec5.len();
-                                    (1i32, result4_0, result4_1, ptr5.cast_mut(), len5)
-                                }
-                            };
-                            #[cfg(target_arch = "wasm32")]
-                            #[link(wasm_import_module = "[export]yosh:acp/agent@7.0.0")]
-                            unsafe extern "C" {
-                                #[link_name = "[task-return][method]prompt-turn.response"]
-                                fn wit_import7(
-                                    _: i32,
-                                    _: i32,
-                                    _: i32,
-                                    _: *mut u8,
-                                    _: usize,
-                                );
-                            }
-                            #[cfg(not(target_arch = "wasm32"))]
-                            unsafe extern "C" fn wit_import7(
-                                _: i32,
-                                _: i32,
-                                _: i32,
-                                _: *mut u8,
-                                _: usize,
-                            ) {
-                                unreachable!()
-                            }
-                            _task_cancel.forget();
-                            wit_import7(
-                                result6_0,
-                                result6_1,
-                                result6_2,
-                                result6_3,
-                                result6_4,
-                            );
-                        })
-                    }
-                }
-                #[doc(hidden)]
-                #[allow(non_snake_case)]
-                pub unsafe fn __callback_method_prompt_turn_response(
                     event0: u32,
                     event1: u32,
                     event2: u32,
@@ -18596,7 +23691,6 @@ pub mod exports {
                 }
                 pub trait Guest {
                     type Session: GuestSession;
-                    type PromptTurn: GuestPromptTurn;
                     /// Establish the connection. Negotiate protocol version, exchange
                     /// capabilities, and identify implementations.
                     ///
@@ -18685,18 +23779,21 @@ pub mod exports {
                         }
                         unsafe { rep(handle as i32) }
                     }
-                    /// Begin a prompt turn. Returns an owned [`prompt-turn`] that
-                    /// streams `session-update`s on its body and resolves a
-                    /// `prompt-response` when the turn ends. Drop the turn to
-                    /// cancel; awaiting `response()` resolves with
-                    /// `stop-reason::cancelled` in that case.
+                    /// Run a prompt turn to completion. Resolves with the
+                    /// terminal `prompt-response` when the turn ends. Intermediate
+                    /// `session-update`s are emitted via `client.notify-session`
+                    /// during the call.
                     ///
-                    /// Multiple concurrent turns on the same session are allowed:
-                    /// each one is its own resource with its own body stream.
+                    /// To cancel, drop the future (or use the host's cancel
+                    /// machinery); the agent MUST resolve with
+                    /// `stop-reason::cancelled`.
                     ///
                     /// See: <https://agentclientprotocol.com/protocol/prompt-turn>
                     #[allow(async_fn_in_trait)]
-                    async fn prompt(&self, prompt: _rt::Vec<ContentBlock>) -> PromptTurn;
+                    async fn prompt(
+                        &self,
+                        prompt: _rt::Vec<ContentBlock>,
+                    ) -> Result<PromptResponse, Error>;
                     /// Switch the active mode for this session. The `mode-id` MUST
                     /// be one of the modes returned in the session's lifecycle
                     /// response.
@@ -18728,55 +23825,6 @@ pub mod exports {
                         config_id: SessionConfigId,
                         value: SessionConfigValueId,
                     ) -> Result<_rt::Vec<SessionConfigOption>, Error>;
-                }
-                pub trait GuestPromptTurn: 'static {
-                    #[doc(hidden)]
-                    unsafe fn _resource_new(val: *mut u8) -> u32
-                    where
-                        Self: Sized,
-                    {
-                        #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "[export]yosh:acp/agent@7.0.0")]
-                        unsafe extern "C" {
-                            #[link_name = "[resource-new]prompt-turn"]
-                            fn new(_: *mut u8) -> i32;
-                        }
-                        #[cfg(not(target_arch = "wasm32"))]
-                        unsafe extern "C" fn new(_: *mut u8) -> i32 {
-                            unreachable!()
-                        }
-                        unsafe { new(val) as u32 }
-                    }
-                    #[doc(hidden)]
-                    fn _resource_rep(handle: u32) -> *mut u8
-                    where
-                        Self: Sized,
-                    {
-                        #[cfg(target_arch = "wasm32")]
-                        #[link(wasm_import_module = "[export]yosh:acp/agent@7.0.0")]
-                        unsafe extern "C" {
-                            #[link_name = "[resource-rep]prompt-turn"]
-                            fn rep(_: i32) -> *mut u8;
-                        }
-                        #[cfg(not(target_arch = "wasm32"))]
-                        unsafe extern "C" fn rep(_: i32) -> *mut u8 {
-                            unreachable!()
-                        }
-                        unsafe { rep(handle as i32) }
-                    }
-                    /// The streaming body of the turn: every `session-update` the
-                    /// agent emits during the turn arrives here in order. The
-                    /// stream ends when the turn finishes (whether normally or by
-                    /// cancellation).
-                    #[allow(async_fn_in_trait)]
-                    async fn updates(
-                        &self,
-                    ) -> wit_bindgen::rt::async_support::StreamReader<SessionUpdate>;
-                    /// The terminal response for this turn. Resolves once the turn
-                    /// ends. Safe to call before, during, or after consuming the
-                    /// `updates` stream.
-                    #[allow(async_fn_in_trait)]
-                    async fn response(&self) -> Result<PromptResponse, Error>;
                 }
                 #[doc(hidden)]
                 #[macro_export]
@@ -18831,30 +23879,6 @@ pub mod exports {
                         u32, event2 : u32) -> u32 { unsafe { $($path_to_types)*::
                         __callback_method_session_set_config_option(event0, event1,
                         event2) } } #[unsafe (export_name =
-                        "[async-lift]yosh:acp/agent@7.0.0#[method]prompt-turn.updates")]
-                        unsafe extern "C" fn export_method_prompt_turn_updates(arg0 : *
-                        mut u8,) -> i32 { unsafe { $($path_to_types)*::
-                        _export_method_prompt_turn_updates_cabi::<<$ty as
-                        $($path_to_types)*:: Guest >::PromptTurn > (arg0) } } #[unsafe
-                        (export_name =
-                        "[callback][async-lift]yosh:acp/agent@7.0.0#[method]prompt-turn.updates")]
-                        unsafe extern "C" fn _callback_method_prompt_turn_updates(event0
-                        : u32, event1 : u32, event2 : u32) -> u32 { unsafe {
-                        $($path_to_types)*::
-                        __callback_method_prompt_turn_updates(event0, event1, event2) } }
-                        #[unsafe (export_name =
-                        "[async-lift]yosh:acp/agent@7.0.0#[method]prompt-turn.response")]
-                        unsafe extern "C" fn export_method_prompt_turn_response(arg0 : *
-                        mut u8,) -> i32 { unsafe { $($path_to_types)*::
-                        _export_method_prompt_turn_response_cabi::<<$ty as
-                        $($path_to_types)*:: Guest >::PromptTurn > (arg0) } } #[unsafe
-                        (export_name =
-                        "[callback][async-lift]yosh:acp/agent@7.0.0#[method]prompt-turn.response")]
-                        unsafe extern "C" fn _callback_method_prompt_turn_response(event0
-                        : u32, event1 : u32, event2 : u32) -> u32 { unsafe {
-                        $($path_to_types)*::
-                        __callback_method_prompt_turn_response(event0, event1, event2) }
-                        } #[unsafe (export_name =
                         "[async-lift]yosh:acp/agent@7.0.0#initialize")] unsafe extern "C"
                         fn export_initialize(arg0 : i32, arg1 : i32, arg2 : i32, arg3 :
                         i32, arg4 : i32, arg5 : * mut u8, arg6 : usize, arg7 : i32, arg8
@@ -18918,12 +23942,7 @@ pub mod exports {
                         = "yosh:acp/agent@7.0.0#[dtor]session")] #[allow(non_snake_case)]
                         unsafe extern "C" fn dtor(rep : * mut u8) { unsafe {
                         $($path_to_types)*:: Session::dtor::< <$ty as
-                        $($path_to_types)*:: Guest >::Session > (rep) } } }; const _ : ()
-                        = { #[doc(hidden)] #[unsafe (export_name =
-                        "yosh:acp/agent@7.0.0#[dtor]prompt-turn")]
-                        #[allow(non_snake_case)] unsafe extern "C" fn dtor(rep : * mut
-                        u8) { unsafe { $($path_to_types)*:: PromptTurn::dtor::< <$ty as
-                        $($path_to_types)*:: Guest >::PromptTurn > (rep) } } }; };
+                        $($path_to_types)*:: Guest >::Session > (rep) } } }; };
                     };
                 }
                 #[doc(hidden)]
@@ -19128,6 +24147,17 @@ mod _rt {
             unsafe { core::hint::unreachable_unchecked() }
         }
     }
+    pub unsafe fn bool_lift(val: u8) -> bool {
+        if cfg!(debug_assertions) {
+            match val {
+                0 => false,
+                1 => true,
+                _ => panic!("invalid bool discriminant"),
+            }
+        } else {
+            val != 0
+        }
+    }
     pub fn as_f64<T: AsF64>(t: T) -> f64 {
         t.as_f64()
     }
@@ -19145,17 +24175,6 @@ mod _rt {
             self as f64
         }
     }
-    pub unsafe fn bool_lift(val: u8) -> bool {
-        if cfg!(debug_assertions) {
-            match val {
-                0 => false,
-                1 => true,
-                _ => panic!("invalid bool discriminant"),
-            }
-        } else {
-            val != 0
-        }
-    }
     pub use alloc_crate::boxed::Box;
     #[cfg(target_arch = "wasm32")]
     pub fn run_ctors_once() {
@@ -19171,6348 +24190,6 @@ pub mod wit_stream {
     #[doc(hidden)]
     #[allow(unused_unsafe)]
     pub mod vtable0 {
-        #[cfg(not(target_arch = "wasm32"))]
-        unsafe extern "C" fn cancel_write(_: u32) -> u32 {
-            unreachable!()
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        unsafe extern "C" fn cancel_read(_: u32) -> u32 {
-            unreachable!()
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        unsafe extern "C" fn drop_writable(_: u32) {
-            unreachable!()
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        unsafe extern "C" fn drop_readable(_: u32) {
-            unreachable!()
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        unsafe extern "C" fn new() -> u64 {
-            unreachable!()
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        unsafe extern "C" fn start_read(_: u32, _: *mut u8, _: usize) -> u32 {
-            unreachable!()
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        unsafe extern "C" fn start_write(_: u32, _: *const u8, _: usize) -> u32 {
-            unreachable!()
-        }
-        #[cfg(target_arch = "wasm32")]
-        #[link(wasm_import_module = "yosh:acp/agent@7.0.0")]
-        unsafe extern "C" {
-            #[link_name = "[stream-new-0][method]prompt-turn.updates"]
-            fn new() -> u64;
-            #[link_name = "[stream-cancel-write-0][method]prompt-turn.updates"]
-            fn cancel_write(_: u32) -> u32;
-            #[link_name = "[stream-cancel-read-0][method]prompt-turn.updates"]
-            fn cancel_read(_: u32) -> u32;
-            #[link_name = "[stream-drop-writable-0][method]prompt-turn.updates"]
-            fn drop_writable(_: u32);
-            #[link_name = "[stream-drop-readable-0][method]prompt-turn.updates"]
-            fn drop_readable(_: u32);
-            #[link_name = "[async-lower][stream-read-0][method]prompt-turn.updates"]
-            fn start_read(_: u32, _: *mut u8, _: usize) -> u32;
-            #[link_name = "[async-lower][stream-write-0][method]prompt-turn.updates"]
-            fn start_write(_: u32, _: *const u8, _: usize) -> u32;
-        }
-        unsafe fn lift(ptr: *mut u8) -> super::super::yosh::acp::prompts::SessionUpdate {
-            unsafe {
-                let l0 = i32::from(*ptr.add(0).cast::<u8>());
-                use super::super::yosh::acp::prompts::SessionUpdate as V439;
-                let v439 = match l0 {
-                    0 => {
-                        let e439 = {
-                            let l1 = i32::from(*ptr.add(8).cast::<u8>());
-                            use super::super::yosh::acp::content::ContentBlock as V63;
-                            let v63 = match l1 {
-                                0 => {
-                                    let e63 = {
-                                        let l2 = *ptr.add(16).cast::<*mut u8>();
-                                        let l3 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len4 = l3;
-                                        let bytes4 = super::super::_rt::Vec::from_raw_parts(
-                                            l2.cast(),
-                                            len4,
-                                            len4,
-                                        );
-                                        super::super::yosh::acp::content::TextContent {
-                                            text: super::super::_rt::string_lift(bytes4),
-                                        }
-                                    };
-                                    V63::Text(e63)
-                                }
-                                1 => {
-                                    let e63 = {
-                                        let l5 = *ptr.add(16).cast::<*mut u8>();
-                                        let l6 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len7 = l6;
-                                        let bytes7 = super::super::_rt::Vec::from_raw_parts(
-                                            l5.cast(),
-                                            len7,
-                                            len7,
-                                        );
-                                        let l8 = *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l9 = *ptr
-                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len10 = l9;
-                                        let bytes10 = super::super::_rt::Vec::from_raw_parts(
-                                            l8.cast(),
-                                            len10,
-                                            len10,
-                                        );
-                                        let l11 = i32::from(
-                                            *ptr
-                                                .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        super::super::yosh::acp::content::ImageContent {
-                                            data: super::super::_rt::string_lift(bytes7),
-                                            mime_type: super::super::_rt::string_lift(bytes10),
-                                            uri: match l11 {
-                                                0 => None,
-                                                1 => {
-                                                    let e = {
-                                                        let l12 = *ptr
-                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l13 = *ptr
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        let len14 = l13;
-                                                        let bytes14 = super::super::_rt::Vec::from_raw_parts(
-                                                            l12.cast(),
-                                                            len14,
-                                                            len14,
-                                                        );
-                                                        super::super::_rt::string_lift(bytes14)
-                                                    };
-                                                    Some(e)
-                                                }
-                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                            },
-                                        }
-                                    };
-                                    V63::Image(e63)
-                                }
-                                2 => {
-                                    let e63 = {
-                                        let l15 = *ptr.add(16).cast::<*mut u8>();
-                                        let l16 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len17 = l16;
-                                        let bytes17 = super::super::_rt::Vec::from_raw_parts(
-                                            l15.cast(),
-                                            len17,
-                                            len17,
-                                        );
-                                        let l18 = *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l19 = *ptr
-                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len20 = l19;
-                                        let bytes20 = super::super::_rt::Vec::from_raw_parts(
-                                            l18.cast(),
-                                            len20,
-                                            len20,
-                                        );
-                                        super::super::yosh::acp::content::AudioContent {
-                                            data: super::super::_rt::string_lift(bytes17),
-                                            mime_type: super::super::_rt::string_lift(bytes20),
-                                        }
-                                    };
-                                    V63::Audio(e63)
-                                }
-                                3 => {
-                                    let e63 = {
-                                        let l21 = *ptr.add(16).cast::<*mut u8>();
-                                        let l22 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len23 = l22;
-                                        let bytes23 = super::super::_rt::Vec::from_raw_parts(
-                                            l21.cast(),
-                                            len23,
-                                            len23,
-                                        );
-                                        let l24 = *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l25 = *ptr
-                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len26 = l25;
-                                        let bytes26 = super::super::_rt::Vec::from_raw_parts(
-                                            l24.cast(),
-                                            len26,
-                                            len26,
-                                        );
-                                        let l27 = i32::from(
-                                            *ptr
-                                                .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        let l31 = i32::from(
-                                            *ptr
-                                                .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        let l35 = i32::from(
-                                            *ptr
-                                                .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        let l39 = i32::from(
-                                            *ptr
-                                                .add(24 + 12 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        super::super::yosh::acp::content::ResourceLink {
-                                            uri: super::super::_rt::string_lift(bytes23),
-                                            name: super::super::_rt::string_lift(bytes26),
-                                            mime_type: match l27 {
-                                                0 => None,
-                                                1 => {
-                                                    let e = {
-                                                        let l28 = *ptr
-                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l29 = *ptr
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        let len30 = l29;
-                                                        let bytes30 = super::super::_rt::Vec::from_raw_parts(
-                                                            l28.cast(),
-                                                            len30,
-                                                            len30,
-                                                        );
-                                                        super::super::_rt::string_lift(bytes30)
-                                                    };
-                                                    Some(e)
-                                                }
-                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                            },
-                                            title: match l31 {
-                                                0 => None,
-                                                1 => {
-                                                    let e = {
-                                                        let l32 = *ptr
-                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l33 = *ptr
-                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        let len34 = l33;
-                                                        let bytes34 = super::super::_rt::Vec::from_raw_parts(
-                                                            l32.cast(),
-                                                            len34,
-                                                            len34,
-                                                        );
-                                                        super::super::_rt::string_lift(bytes34)
-                                                    };
-                                                    Some(e)
-                                                }
-                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                            },
-                                            description: match l35 {
-                                                0 => None,
-                                                1 => {
-                                                    let e = {
-                                                        let l36 = *ptr
-                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l37 = *ptr
-                                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        let len38 = l37;
-                                                        let bytes38 = super::super::_rt::Vec::from_raw_parts(
-                                                            l36.cast(),
-                                                            len38,
-                                                            len38,
-                                                        );
-                                                        super::super::_rt::string_lift(bytes38)
-                                                    };
-                                                    Some(e)
-                                                }
-                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                            },
-                                            size: match l39 {
-                                                0 => None,
-                                                1 => {
-                                                    let e = {
-                                                        let l40 = *ptr
-                                                            .add(32 + 12 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<i64>();
-                                                        l40 as u64
-                                                    };
-                                                    Some(e)
-                                                }
-                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                            },
-                                        }
-                                    };
-                                    V63::ResourceLink(e63)
-                                }
-                                n => {
-                                    debug_assert_eq!(n, 4, "invalid enum discriminant");
-                                    let e63 = {
-                                        let l41 = i32::from(*ptr.add(16).cast::<u8>());
-                                        use super::super::yosh::acp::content::ResourceContents as V62;
-                                        let v62 = match l41 {
-                                            0 => {
-                                                let e62 = {
-                                                    let l42 = *ptr
-                                                        .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<*mut u8>();
-                                                    let l43 = *ptr
-                                                        .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<usize>();
-                                                    let len44 = l43;
-                                                    let bytes44 = super::super::_rt::Vec::from_raw_parts(
-                                                        l42.cast(),
-                                                        len44,
-                                                        len44,
-                                                    );
-                                                    let l45 = i32::from(
-                                                        *ptr
-                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>(),
-                                                    );
-                                                    let l49 = *ptr
-                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<*mut u8>();
-                                                    let l50 = *ptr
-                                                        .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<usize>();
-                                                    let len51 = l50;
-                                                    let bytes51 = super::super::_rt::Vec::from_raw_parts(
-                                                        l49.cast(),
-                                                        len51,
-                                                        len51,
-                                                    );
-                                                    super::super::yosh::acp::content::TextResourceContents {
-                                                        uri: super::super::_rt::string_lift(bytes44),
-                                                        mime_type: match l45 {
-                                                            0 => None,
-                                                            1 => {
-                                                                let e = {
-                                                                    let l46 = *ptr
-                                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                        .cast::<*mut u8>();
-                                                                    let l47 = *ptr
-                                                                        .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                        .cast::<usize>();
-                                                                    let len48 = l47;
-                                                                    let bytes48 = super::super::_rt::Vec::from_raw_parts(
-                                                                        l46.cast(),
-                                                                        len48,
-                                                                        len48,
-                                                                    );
-                                                                    super::super::_rt::string_lift(bytes48)
-                                                                };
-                                                                Some(e)
-                                                            }
-                                                            _ => super::super::_rt::invalid_enum_discriminant(),
-                                                        },
-                                                        text: super::super::_rt::string_lift(bytes51),
-                                                    }
-                                                };
-                                                V62::Text(e62)
-                                            }
-                                            n => {
-                                                debug_assert_eq!(n, 1, "invalid enum discriminant");
-                                                let e62 = {
-                                                    let l52 = *ptr
-                                                        .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<*mut u8>();
-                                                    let l53 = *ptr
-                                                        .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<usize>();
-                                                    let len54 = l53;
-                                                    let bytes54 = super::super::_rt::Vec::from_raw_parts(
-                                                        l52.cast(),
-                                                        len54,
-                                                        len54,
-                                                    );
-                                                    let l55 = i32::from(
-                                                        *ptr
-                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>(),
-                                                    );
-                                                    let l59 = *ptr
-                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<*mut u8>();
-                                                    let l60 = *ptr
-                                                        .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<usize>();
-                                                    let len61 = l60;
-                                                    let bytes61 = super::super::_rt::Vec::from_raw_parts(
-                                                        l59.cast(),
-                                                        len61,
-                                                        len61,
-                                                    );
-                                                    super::super::yosh::acp::content::BlobResourceContents {
-                                                        uri: super::super::_rt::string_lift(bytes54),
-                                                        mime_type: match l55 {
-                                                            0 => None,
-                                                            1 => {
-                                                                let e = {
-                                                                    let l56 = *ptr
-                                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                        .cast::<*mut u8>();
-                                                                    let l57 = *ptr
-                                                                        .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                        .cast::<usize>();
-                                                                    let len58 = l57;
-                                                                    let bytes58 = super::super::_rt::Vec::from_raw_parts(
-                                                                        l56.cast(),
-                                                                        len58,
-                                                                        len58,
-                                                                    );
-                                                                    super::super::_rt::string_lift(bytes58)
-                                                                };
-                                                                Some(e)
-                                                            }
-                                                            _ => super::super::_rt::invalid_enum_discriminant(),
-                                                        },
-                                                        blob: super::super::_rt::string_lift(bytes61),
-                                                    }
-                                                };
-                                                V62::Blob(e62)
-                                            }
-                                        };
-                                        super::super::yosh::acp::content::EmbeddedResource {
-                                            resource: v62,
-                                        }
-                                    };
-                                    V63::Resource(e63)
-                                }
-                            };
-                            v63
-                        };
-                        V439::UserMessageChunk(e439)
-                    }
-                    1 => {
-                        let e439 = {
-                            let l64 = i32::from(*ptr.add(8).cast::<u8>());
-                            use super::super::yosh::acp::content::ContentBlock as V126;
-                            let v126 = match l64 {
-                                0 => {
-                                    let e126 = {
-                                        let l65 = *ptr.add(16).cast::<*mut u8>();
-                                        let l66 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len67 = l66;
-                                        let bytes67 = super::super::_rt::Vec::from_raw_parts(
-                                            l65.cast(),
-                                            len67,
-                                            len67,
-                                        );
-                                        super::super::yosh::acp::content::TextContent {
-                                            text: super::super::_rt::string_lift(bytes67),
-                                        }
-                                    };
-                                    V126::Text(e126)
-                                }
-                                1 => {
-                                    let e126 = {
-                                        let l68 = *ptr.add(16).cast::<*mut u8>();
-                                        let l69 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len70 = l69;
-                                        let bytes70 = super::super::_rt::Vec::from_raw_parts(
-                                            l68.cast(),
-                                            len70,
-                                            len70,
-                                        );
-                                        let l71 = *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l72 = *ptr
-                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len73 = l72;
-                                        let bytes73 = super::super::_rt::Vec::from_raw_parts(
-                                            l71.cast(),
-                                            len73,
-                                            len73,
-                                        );
-                                        let l74 = i32::from(
-                                            *ptr
-                                                .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        super::super::yosh::acp::content::ImageContent {
-                                            data: super::super::_rt::string_lift(bytes70),
-                                            mime_type: super::super::_rt::string_lift(bytes73),
-                                            uri: match l74 {
-                                                0 => None,
-                                                1 => {
-                                                    let e = {
-                                                        let l75 = *ptr
-                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l76 = *ptr
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        let len77 = l76;
-                                                        let bytes77 = super::super::_rt::Vec::from_raw_parts(
-                                                            l75.cast(),
-                                                            len77,
-                                                            len77,
-                                                        );
-                                                        super::super::_rt::string_lift(bytes77)
-                                                    };
-                                                    Some(e)
-                                                }
-                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                            },
-                                        }
-                                    };
-                                    V126::Image(e126)
-                                }
-                                2 => {
-                                    let e126 = {
-                                        let l78 = *ptr.add(16).cast::<*mut u8>();
-                                        let l79 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len80 = l79;
-                                        let bytes80 = super::super::_rt::Vec::from_raw_parts(
-                                            l78.cast(),
-                                            len80,
-                                            len80,
-                                        );
-                                        let l81 = *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l82 = *ptr
-                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len83 = l82;
-                                        let bytes83 = super::super::_rt::Vec::from_raw_parts(
-                                            l81.cast(),
-                                            len83,
-                                            len83,
-                                        );
-                                        super::super::yosh::acp::content::AudioContent {
-                                            data: super::super::_rt::string_lift(bytes80),
-                                            mime_type: super::super::_rt::string_lift(bytes83),
-                                        }
-                                    };
-                                    V126::Audio(e126)
-                                }
-                                3 => {
-                                    let e126 = {
-                                        let l84 = *ptr.add(16).cast::<*mut u8>();
-                                        let l85 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len86 = l85;
-                                        let bytes86 = super::super::_rt::Vec::from_raw_parts(
-                                            l84.cast(),
-                                            len86,
-                                            len86,
-                                        );
-                                        let l87 = *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l88 = *ptr
-                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len89 = l88;
-                                        let bytes89 = super::super::_rt::Vec::from_raw_parts(
-                                            l87.cast(),
-                                            len89,
-                                            len89,
-                                        );
-                                        let l90 = i32::from(
-                                            *ptr
-                                                .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        let l94 = i32::from(
-                                            *ptr
-                                                .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        let l98 = i32::from(
-                                            *ptr
-                                                .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        let l102 = i32::from(
-                                            *ptr
-                                                .add(24 + 12 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        super::super::yosh::acp::content::ResourceLink {
-                                            uri: super::super::_rt::string_lift(bytes86),
-                                            name: super::super::_rt::string_lift(bytes89),
-                                            mime_type: match l90 {
-                                                0 => None,
-                                                1 => {
-                                                    let e = {
-                                                        let l91 = *ptr
-                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l92 = *ptr
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        let len93 = l92;
-                                                        let bytes93 = super::super::_rt::Vec::from_raw_parts(
-                                                            l91.cast(),
-                                                            len93,
-                                                            len93,
-                                                        );
-                                                        super::super::_rt::string_lift(bytes93)
-                                                    };
-                                                    Some(e)
-                                                }
-                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                            },
-                                            title: match l94 {
-                                                0 => None,
-                                                1 => {
-                                                    let e = {
-                                                        let l95 = *ptr
-                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l96 = *ptr
-                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        let len97 = l96;
-                                                        let bytes97 = super::super::_rt::Vec::from_raw_parts(
-                                                            l95.cast(),
-                                                            len97,
-                                                            len97,
-                                                        );
-                                                        super::super::_rt::string_lift(bytes97)
-                                                    };
-                                                    Some(e)
-                                                }
-                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                            },
-                                            description: match l98 {
-                                                0 => None,
-                                                1 => {
-                                                    let e = {
-                                                        let l99 = *ptr
-                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l100 = *ptr
-                                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        let len101 = l100;
-                                                        let bytes101 = super::super::_rt::Vec::from_raw_parts(
-                                                            l99.cast(),
-                                                            len101,
-                                                            len101,
-                                                        );
-                                                        super::super::_rt::string_lift(bytes101)
-                                                    };
-                                                    Some(e)
-                                                }
-                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                            },
-                                            size: match l102 {
-                                                0 => None,
-                                                1 => {
-                                                    let e = {
-                                                        let l103 = *ptr
-                                                            .add(32 + 12 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<i64>();
-                                                        l103 as u64
-                                                    };
-                                                    Some(e)
-                                                }
-                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                            },
-                                        }
-                                    };
-                                    V126::ResourceLink(e126)
-                                }
-                                n => {
-                                    debug_assert_eq!(n, 4, "invalid enum discriminant");
-                                    let e126 = {
-                                        let l104 = i32::from(*ptr.add(16).cast::<u8>());
-                                        use super::super::yosh::acp::content::ResourceContents as V125;
-                                        let v125 = match l104 {
-                                            0 => {
-                                                let e125 = {
-                                                    let l105 = *ptr
-                                                        .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<*mut u8>();
-                                                    let l106 = *ptr
-                                                        .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<usize>();
-                                                    let len107 = l106;
-                                                    let bytes107 = super::super::_rt::Vec::from_raw_parts(
-                                                        l105.cast(),
-                                                        len107,
-                                                        len107,
-                                                    );
-                                                    let l108 = i32::from(
-                                                        *ptr
-                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>(),
-                                                    );
-                                                    let l112 = *ptr
-                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<*mut u8>();
-                                                    let l113 = *ptr
-                                                        .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<usize>();
-                                                    let len114 = l113;
-                                                    let bytes114 = super::super::_rt::Vec::from_raw_parts(
-                                                        l112.cast(),
-                                                        len114,
-                                                        len114,
-                                                    );
-                                                    super::super::yosh::acp::content::TextResourceContents {
-                                                        uri: super::super::_rt::string_lift(bytes107),
-                                                        mime_type: match l108 {
-                                                            0 => None,
-                                                            1 => {
-                                                                let e = {
-                                                                    let l109 = *ptr
-                                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                        .cast::<*mut u8>();
-                                                                    let l110 = *ptr
-                                                                        .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                        .cast::<usize>();
-                                                                    let len111 = l110;
-                                                                    let bytes111 = super::super::_rt::Vec::from_raw_parts(
-                                                                        l109.cast(),
-                                                                        len111,
-                                                                        len111,
-                                                                    );
-                                                                    super::super::_rt::string_lift(bytes111)
-                                                                };
-                                                                Some(e)
-                                                            }
-                                                            _ => super::super::_rt::invalid_enum_discriminant(),
-                                                        },
-                                                        text: super::super::_rt::string_lift(bytes114),
-                                                    }
-                                                };
-                                                V125::Text(e125)
-                                            }
-                                            n => {
-                                                debug_assert_eq!(n, 1, "invalid enum discriminant");
-                                                let e125 = {
-                                                    let l115 = *ptr
-                                                        .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<*mut u8>();
-                                                    let l116 = *ptr
-                                                        .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<usize>();
-                                                    let len117 = l116;
-                                                    let bytes117 = super::super::_rt::Vec::from_raw_parts(
-                                                        l115.cast(),
-                                                        len117,
-                                                        len117,
-                                                    );
-                                                    let l118 = i32::from(
-                                                        *ptr
-                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>(),
-                                                    );
-                                                    let l122 = *ptr
-                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<*mut u8>();
-                                                    let l123 = *ptr
-                                                        .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<usize>();
-                                                    let len124 = l123;
-                                                    let bytes124 = super::super::_rt::Vec::from_raw_parts(
-                                                        l122.cast(),
-                                                        len124,
-                                                        len124,
-                                                    );
-                                                    super::super::yosh::acp::content::BlobResourceContents {
-                                                        uri: super::super::_rt::string_lift(bytes117),
-                                                        mime_type: match l118 {
-                                                            0 => None,
-                                                            1 => {
-                                                                let e = {
-                                                                    let l119 = *ptr
-                                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                        .cast::<*mut u8>();
-                                                                    let l120 = *ptr
-                                                                        .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                        .cast::<usize>();
-                                                                    let len121 = l120;
-                                                                    let bytes121 = super::super::_rt::Vec::from_raw_parts(
-                                                                        l119.cast(),
-                                                                        len121,
-                                                                        len121,
-                                                                    );
-                                                                    super::super::_rt::string_lift(bytes121)
-                                                                };
-                                                                Some(e)
-                                                            }
-                                                            _ => super::super::_rt::invalid_enum_discriminant(),
-                                                        },
-                                                        blob: super::super::_rt::string_lift(bytes124),
-                                                    }
-                                                };
-                                                V125::Blob(e125)
-                                            }
-                                        };
-                                        super::super::yosh::acp::content::EmbeddedResource {
-                                            resource: v125,
-                                        }
-                                    };
-                                    V126::Resource(e126)
-                                }
-                            };
-                            v126
-                        };
-                        V439::AgentMessageChunk(e439)
-                    }
-                    2 => {
-                        let e439 = {
-                            let l127 = i32::from(*ptr.add(8).cast::<u8>());
-                            use super::super::yosh::acp::content::ContentBlock as V189;
-                            let v189 = match l127 {
-                                0 => {
-                                    let e189 = {
-                                        let l128 = *ptr.add(16).cast::<*mut u8>();
-                                        let l129 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len130 = l129;
-                                        let bytes130 = super::super::_rt::Vec::from_raw_parts(
-                                            l128.cast(),
-                                            len130,
-                                            len130,
-                                        );
-                                        super::super::yosh::acp::content::TextContent {
-                                            text: super::super::_rt::string_lift(bytes130),
-                                        }
-                                    };
-                                    V189::Text(e189)
-                                }
-                                1 => {
-                                    let e189 = {
-                                        let l131 = *ptr.add(16).cast::<*mut u8>();
-                                        let l132 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len133 = l132;
-                                        let bytes133 = super::super::_rt::Vec::from_raw_parts(
-                                            l131.cast(),
-                                            len133,
-                                            len133,
-                                        );
-                                        let l134 = *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l135 = *ptr
-                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len136 = l135;
-                                        let bytes136 = super::super::_rt::Vec::from_raw_parts(
-                                            l134.cast(),
-                                            len136,
-                                            len136,
-                                        );
-                                        let l137 = i32::from(
-                                            *ptr
-                                                .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        super::super::yosh::acp::content::ImageContent {
-                                            data: super::super::_rt::string_lift(bytes133),
-                                            mime_type: super::super::_rt::string_lift(bytes136),
-                                            uri: match l137 {
-                                                0 => None,
-                                                1 => {
-                                                    let e = {
-                                                        let l138 = *ptr
-                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l139 = *ptr
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        let len140 = l139;
-                                                        let bytes140 = super::super::_rt::Vec::from_raw_parts(
-                                                            l138.cast(),
-                                                            len140,
-                                                            len140,
-                                                        );
-                                                        super::super::_rt::string_lift(bytes140)
-                                                    };
-                                                    Some(e)
-                                                }
-                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                            },
-                                        }
-                                    };
-                                    V189::Image(e189)
-                                }
-                                2 => {
-                                    let e189 = {
-                                        let l141 = *ptr.add(16).cast::<*mut u8>();
-                                        let l142 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len143 = l142;
-                                        let bytes143 = super::super::_rt::Vec::from_raw_parts(
-                                            l141.cast(),
-                                            len143,
-                                            len143,
-                                        );
-                                        let l144 = *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l145 = *ptr
-                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len146 = l145;
-                                        let bytes146 = super::super::_rt::Vec::from_raw_parts(
-                                            l144.cast(),
-                                            len146,
-                                            len146,
-                                        );
-                                        super::super::yosh::acp::content::AudioContent {
-                                            data: super::super::_rt::string_lift(bytes143),
-                                            mime_type: super::super::_rt::string_lift(bytes146),
-                                        }
-                                    };
-                                    V189::Audio(e189)
-                                }
-                                3 => {
-                                    let e189 = {
-                                        let l147 = *ptr.add(16).cast::<*mut u8>();
-                                        let l148 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len149 = l148;
-                                        let bytes149 = super::super::_rt::Vec::from_raw_parts(
-                                            l147.cast(),
-                                            len149,
-                                            len149,
-                                        );
-                                        let l150 = *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l151 = *ptr
-                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        let len152 = l151;
-                                        let bytes152 = super::super::_rt::Vec::from_raw_parts(
-                                            l150.cast(),
-                                            len152,
-                                            len152,
-                                        );
-                                        let l153 = i32::from(
-                                            *ptr
-                                                .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        let l157 = i32::from(
-                                            *ptr
-                                                .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        let l161 = i32::from(
-                                            *ptr
-                                                .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        let l165 = i32::from(
-                                            *ptr
-                                                .add(24 + 12 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        super::super::yosh::acp::content::ResourceLink {
-                                            uri: super::super::_rt::string_lift(bytes149),
-                                            name: super::super::_rt::string_lift(bytes152),
-                                            mime_type: match l153 {
-                                                0 => None,
-                                                1 => {
-                                                    let e = {
-                                                        let l154 = *ptr
-                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l155 = *ptr
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        let len156 = l155;
-                                                        let bytes156 = super::super::_rt::Vec::from_raw_parts(
-                                                            l154.cast(),
-                                                            len156,
-                                                            len156,
-                                                        );
-                                                        super::super::_rt::string_lift(bytes156)
-                                                    };
-                                                    Some(e)
-                                                }
-                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                            },
-                                            title: match l157 {
-                                                0 => None,
-                                                1 => {
-                                                    let e = {
-                                                        let l158 = *ptr
-                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l159 = *ptr
-                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        let len160 = l159;
-                                                        let bytes160 = super::super::_rt::Vec::from_raw_parts(
-                                                            l158.cast(),
-                                                            len160,
-                                                            len160,
-                                                        );
-                                                        super::super::_rt::string_lift(bytes160)
-                                                    };
-                                                    Some(e)
-                                                }
-                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                            },
-                                            description: match l161 {
-                                                0 => None,
-                                                1 => {
-                                                    let e = {
-                                                        let l162 = *ptr
-                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l163 = *ptr
-                                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        let len164 = l163;
-                                                        let bytes164 = super::super::_rt::Vec::from_raw_parts(
-                                                            l162.cast(),
-                                                            len164,
-                                                            len164,
-                                                        );
-                                                        super::super::_rt::string_lift(bytes164)
-                                                    };
-                                                    Some(e)
-                                                }
-                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                            },
-                                            size: match l165 {
-                                                0 => None,
-                                                1 => {
-                                                    let e = {
-                                                        let l166 = *ptr
-                                                            .add(32 + 12 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<i64>();
-                                                        l166 as u64
-                                                    };
-                                                    Some(e)
-                                                }
-                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                            },
-                                        }
-                                    };
-                                    V189::ResourceLink(e189)
-                                }
-                                n => {
-                                    debug_assert_eq!(n, 4, "invalid enum discriminant");
-                                    let e189 = {
-                                        let l167 = i32::from(*ptr.add(16).cast::<u8>());
-                                        use super::super::yosh::acp::content::ResourceContents as V188;
-                                        let v188 = match l167 {
-                                            0 => {
-                                                let e188 = {
-                                                    let l168 = *ptr
-                                                        .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<*mut u8>();
-                                                    let l169 = *ptr
-                                                        .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<usize>();
-                                                    let len170 = l169;
-                                                    let bytes170 = super::super::_rt::Vec::from_raw_parts(
-                                                        l168.cast(),
-                                                        len170,
-                                                        len170,
-                                                    );
-                                                    let l171 = i32::from(
-                                                        *ptr
-                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>(),
-                                                    );
-                                                    let l175 = *ptr
-                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<*mut u8>();
-                                                    let l176 = *ptr
-                                                        .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<usize>();
-                                                    let len177 = l176;
-                                                    let bytes177 = super::super::_rt::Vec::from_raw_parts(
-                                                        l175.cast(),
-                                                        len177,
-                                                        len177,
-                                                    );
-                                                    super::super::yosh::acp::content::TextResourceContents {
-                                                        uri: super::super::_rt::string_lift(bytes170),
-                                                        mime_type: match l171 {
-                                                            0 => None,
-                                                            1 => {
-                                                                let e = {
-                                                                    let l172 = *ptr
-                                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                        .cast::<*mut u8>();
-                                                                    let l173 = *ptr
-                                                                        .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                        .cast::<usize>();
-                                                                    let len174 = l173;
-                                                                    let bytes174 = super::super::_rt::Vec::from_raw_parts(
-                                                                        l172.cast(),
-                                                                        len174,
-                                                                        len174,
-                                                                    );
-                                                                    super::super::_rt::string_lift(bytes174)
-                                                                };
-                                                                Some(e)
-                                                            }
-                                                            _ => super::super::_rt::invalid_enum_discriminant(),
-                                                        },
-                                                        text: super::super::_rt::string_lift(bytes177),
-                                                    }
-                                                };
-                                                V188::Text(e188)
-                                            }
-                                            n => {
-                                                debug_assert_eq!(n, 1, "invalid enum discriminant");
-                                                let e188 = {
-                                                    let l178 = *ptr
-                                                        .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<*mut u8>();
-                                                    let l179 = *ptr
-                                                        .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<usize>();
-                                                    let len180 = l179;
-                                                    let bytes180 = super::super::_rt::Vec::from_raw_parts(
-                                                        l178.cast(),
-                                                        len180,
-                                                        len180,
-                                                    );
-                                                    let l181 = i32::from(
-                                                        *ptr
-                                                            .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>(),
-                                                    );
-                                                    let l185 = *ptr
-                                                        .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<*mut u8>();
-                                                    let l186 = *ptr
-                                                        .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<usize>();
-                                                    let len187 = l186;
-                                                    let bytes187 = super::super::_rt::Vec::from_raw_parts(
-                                                        l185.cast(),
-                                                        len187,
-                                                        len187,
-                                                    );
-                                                    super::super::yosh::acp::content::BlobResourceContents {
-                                                        uri: super::super::_rt::string_lift(bytes180),
-                                                        mime_type: match l181 {
-                                                            0 => None,
-                                                            1 => {
-                                                                let e = {
-                                                                    let l182 = *ptr
-                                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                        .cast::<*mut u8>();
-                                                                    let l183 = *ptr
-                                                                        .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                        .cast::<usize>();
-                                                                    let len184 = l183;
-                                                                    let bytes184 = super::super::_rt::Vec::from_raw_parts(
-                                                                        l182.cast(),
-                                                                        len184,
-                                                                        len184,
-                                                                    );
-                                                                    super::super::_rt::string_lift(bytes184)
-                                                                };
-                                                                Some(e)
-                                                            }
-                                                            _ => super::super::_rt::invalid_enum_discriminant(),
-                                                        },
-                                                        blob: super::super::_rt::string_lift(bytes187),
-                                                    }
-                                                };
-                                                V188::Blob(e188)
-                                            }
-                                        };
-                                        super::super::yosh::acp::content::EmbeddedResource {
-                                            resource: v188,
-                                        }
-                                    };
-                                    V189::Resource(e189)
-                                }
-                            };
-                            v189
-                        };
-                        V439::AgentThoughtChunk(e439)
-                    }
-                    3 => {
-                        let e439 = {
-                            let l190 = *ptr.add(8).cast::<*mut u8>();
-                            let l191 = *ptr
-                                .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            let len192 = l191;
-                            let bytes192 = super::super::_rt::Vec::from_raw_parts(
-                                l190.cast(),
-                                len192,
-                                len192,
-                            );
-                            let l193 = *ptr
-                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>();
-                            let l194 = *ptr
-                                .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            let len195 = l194;
-                            let bytes195 = super::super::_rt::Vec::from_raw_parts(
-                                l193.cast(),
-                                len195,
-                                len195,
-                            );
-                            let l196 = i32::from(
-                                *ptr
-                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>(),
-                            );
-                            let l197 = i32::from(
-                                *ptr
-                                    .add(9 + 4 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>(),
-                            );
-                            let l198 = *ptr
-                                .add(8 + 5 * ::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>();
-                            let l199 = *ptr
-                                .add(8 + 6 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            let base278 = l198;
-                            let len278 = l199;
-                            let mut result278 = super::super::_rt::Vec::with_capacity(
-                                len278,
-                            );
-                            for i in 0..len278 {
-                                let base = base278
-                                    .add(i * (40 + 12 * ::core::mem::size_of::<*const u8>()));
-                                let e278 = {
-                                    let l200 = i32::from(*base.add(0).cast::<u8>());
-                                    use super::super::yosh::acp::tools::ToolCallContent as V277;
-                                    let v277 = match l200 {
-                                        0 => {
-                                            let e277 = {
-                                                let l201 = i32::from(*base.add(8).cast::<u8>());
-                                                use super::super::yosh::acp::content::ContentBlock as V263;
-                                                let v263 = match l201 {
-                                                    0 => {
-                                                        let e263 = {
-                                                            let l202 = *base.add(16).cast::<*mut u8>();
-                                                            let l203 = *base
-                                                                .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<usize>();
-                                                            let len204 = l203;
-                                                            let bytes204 = super::super::_rt::Vec::from_raw_parts(
-                                                                l202.cast(),
-                                                                len204,
-                                                                len204,
-                                                            );
-                                                            super::super::yosh::acp::content::TextContent {
-                                                                text: super::super::_rt::string_lift(bytes204),
-                                                            }
-                                                        };
-                                                        V263::Text(e263)
-                                                    }
-                                                    1 => {
-                                                        let e263 = {
-                                                            let l205 = *base.add(16).cast::<*mut u8>();
-                                                            let l206 = *base
-                                                                .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<usize>();
-                                                            let len207 = l206;
-                                                            let bytes207 = super::super::_rt::Vec::from_raw_parts(
-                                                                l205.cast(),
-                                                                len207,
-                                                                len207,
-                                                            );
-                                                            let l208 = *base
-                                                                .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<*mut u8>();
-                                                            let l209 = *base
-                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<usize>();
-                                                            let len210 = l209;
-                                                            let bytes210 = super::super::_rt::Vec::from_raw_parts(
-                                                                l208.cast(),
-                                                                len210,
-                                                                len210,
-                                                            );
-                                                            let l211 = i32::from(
-                                                                *base
-                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>(),
-                                                            );
-                                                            super::super::yosh::acp::content::ImageContent {
-                                                                data: super::super::_rt::string_lift(bytes207),
-                                                                mime_type: super::super::_rt::string_lift(bytes210),
-                                                                uri: match l211 {
-                                                                    0 => None,
-                                                                    1 => {
-                                                                        let e = {
-                                                                            let l212 = *base
-                                                                                .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<*mut u8>();
-                                                                            let l213 = *base
-                                                                                .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<usize>();
-                                                                            let len214 = l213;
-                                                                            let bytes214 = super::super::_rt::Vec::from_raw_parts(
-                                                                                l212.cast(),
-                                                                                len214,
-                                                                                len214,
-                                                                            );
-                                                                            super::super::_rt::string_lift(bytes214)
-                                                                        };
-                                                                        Some(e)
-                                                                    }
-                                                                    _ => super::super::_rt::invalid_enum_discriminant(),
-                                                                },
-                                                            }
-                                                        };
-                                                        V263::Image(e263)
-                                                    }
-                                                    2 => {
-                                                        let e263 = {
-                                                            let l215 = *base.add(16).cast::<*mut u8>();
-                                                            let l216 = *base
-                                                                .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<usize>();
-                                                            let len217 = l216;
-                                                            let bytes217 = super::super::_rt::Vec::from_raw_parts(
-                                                                l215.cast(),
-                                                                len217,
-                                                                len217,
-                                                            );
-                                                            let l218 = *base
-                                                                .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<*mut u8>();
-                                                            let l219 = *base
-                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<usize>();
-                                                            let len220 = l219;
-                                                            let bytes220 = super::super::_rt::Vec::from_raw_parts(
-                                                                l218.cast(),
-                                                                len220,
-                                                                len220,
-                                                            );
-                                                            super::super::yosh::acp::content::AudioContent {
-                                                                data: super::super::_rt::string_lift(bytes217),
-                                                                mime_type: super::super::_rt::string_lift(bytes220),
-                                                            }
-                                                        };
-                                                        V263::Audio(e263)
-                                                    }
-                                                    3 => {
-                                                        let e263 = {
-                                                            let l221 = *base.add(16).cast::<*mut u8>();
-                                                            let l222 = *base
-                                                                .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<usize>();
-                                                            let len223 = l222;
-                                                            let bytes223 = super::super::_rt::Vec::from_raw_parts(
-                                                                l221.cast(),
-                                                                len223,
-                                                                len223,
-                                                            );
-                                                            let l224 = *base
-                                                                .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<*mut u8>();
-                                                            let l225 = *base
-                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<usize>();
-                                                            let len226 = l225;
-                                                            let bytes226 = super::super::_rt::Vec::from_raw_parts(
-                                                                l224.cast(),
-                                                                len226,
-                                                                len226,
-                                                            );
-                                                            let l227 = i32::from(
-                                                                *base
-                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>(),
-                                                            );
-                                                            let l231 = i32::from(
-                                                                *base
-                                                                    .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>(),
-                                                            );
-                                                            let l235 = i32::from(
-                                                                *base
-                                                                    .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>(),
-                                                            );
-                                                            let l239 = i32::from(
-                                                                *base
-                                                                    .add(24 + 12 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>(),
-                                                            );
-                                                            super::super::yosh::acp::content::ResourceLink {
-                                                                uri: super::super::_rt::string_lift(bytes223),
-                                                                name: super::super::_rt::string_lift(bytes226),
-                                                                mime_type: match l227 {
-                                                                    0 => None,
-                                                                    1 => {
-                                                                        let e = {
-                                                                            let l228 = *base
-                                                                                .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<*mut u8>();
-                                                                            let l229 = *base
-                                                                                .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<usize>();
-                                                                            let len230 = l229;
-                                                                            let bytes230 = super::super::_rt::Vec::from_raw_parts(
-                                                                                l228.cast(),
-                                                                                len230,
-                                                                                len230,
-                                                                            );
-                                                                            super::super::_rt::string_lift(bytes230)
-                                                                        };
-                                                                        Some(e)
-                                                                    }
-                                                                    _ => super::super::_rt::invalid_enum_discriminant(),
-                                                                },
-                                                                title: match l231 {
-                                                                    0 => None,
-                                                                    1 => {
-                                                                        let e = {
-                                                                            let l232 = *base
-                                                                                .add(16 + 8 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<*mut u8>();
-                                                                            let l233 = *base
-                                                                                .add(16 + 9 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<usize>();
-                                                                            let len234 = l233;
-                                                                            let bytes234 = super::super::_rt::Vec::from_raw_parts(
-                                                                                l232.cast(),
-                                                                                len234,
-                                                                                len234,
-                                                                            );
-                                                                            super::super::_rt::string_lift(bytes234)
-                                                                        };
-                                                                        Some(e)
-                                                                    }
-                                                                    _ => super::super::_rt::invalid_enum_discriminant(),
-                                                                },
-                                                                description: match l235 {
-                                                                    0 => None,
-                                                                    1 => {
-                                                                        let e = {
-                                                                            let l236 = *base
-                                                                                .add(16 + 11 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<*mut u8>();
-                                                                            let l237 = *base
-                                                                                .add(16 + 12 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<usize>();
-                                                                            let len238 = l237;
-                                                                            let bytes238 = super::super::_rt::Vec::from_raw_parts(
-                                                                                l236.cast(),
-                                                                                len238,
-                                                                                len238,
-                                                                            );
-                                                                            super::super::_rt::string_lift(bytes238)
-                                                                        };
-                                                                        Some(e)
-                                                                    }
-                                                                    _ => super::super::_rt::invalid_enum_discriminant(),
-                                                                },
-                                                                size: match l239 {
-                                                                    0 => None,
-                                                                    1 => {
-                                                                        let e = {
-                                                                            let l240 = *base
-                                                                                .add(32 + 12 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<i64>();
-                                                                            l240 as u64
-                                                                        };
-                                                                        Some(e)
-                                                                    }
-                                                                    _ => super::super::_rt::invalid_enum_discriminant(),
-                                                                },
-                                                            }
-                                                        };
-                                                        V263::ResourceLink(e263)
-                                                    }
-                                                    n => {
-                                                        debug_assert_eq!(n, 4, "invalid enum discriminant");
-                                                        let e263 = {
-                                                            let l241 = i32::from(*base.add(16).cast::<u8>());
-                                                            use super::super::yosh::acp::content::ResourceContents as V262;
-                                                            let v262 = match l241 {
-                                                                0 => {
-                                                                    let e262 = {
-                                                                        let l242 = *base
-                                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                                            .cast::<*mut u8>();
-                                                                        let l243 = *base
-                                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                                            .cast::<usize>();
-                                                                        let len244 = l243;
-                                                                        let bytes244 = super::super::_rt::Vec::from_raw_parts(
-                                                                            l242.cast(),
-                                                                            len244,
-                                                                            len244,
-                                                                        );
-                                                                        let l245 = i32::from(
-                                                                            *base
-                                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<u8>(),
-                                                                        );
-                                                                        let l249 = *base
-                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                                            .cast::<*mut u8>();
-                                                                        let l250 = *base
-                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                                            .cast::<usize>();
-                                                                        let len251 = l250;
-                                                                        let bytes251 = super::super::_rt::Vec::from_raw_parts(
-                                                                            l249.cast(),
-                                                                            len251,
-                                                                            len251,
-                                                                        );
-                                                                        super::super::yosh::acp::content::TextResourceContents {
-                                                                            uri: super::super::_rt::string_lift(bytes244),
-                                                                            mime_type: match l245 {
-                                                                                0 => None,
-                                                                                1 => {
-                                                                                    let e = {
-                                                                                        let l246 = *base
-                                                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                                            .cast::<*mut u8>();
-                                                                                        let l247 = *base
-                                                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                                            .cast::<usize>();
-                                                                                        let len248 = l247;
-                                                                                        let bytes248 = super::super::_rt::Vec::from_raw_parts(
-                                                                                            l246.cast(),
-                                                                                            len248,
-                                                                                            len248,
-                                                                                        );
-                                                                                        super::super::_rt::string_lift(bytes248)
-                                                                                    };
-                                                                                    Some(e)
-                                                                                }
-                                                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                                                            },
-                                                                            text: super::super::_rt::string_lift(bytes251),
-                                                                        }
-                                                                    };
-                                                                    V262::Text(e262)
-                                                                }
-                                                                n => {
-                                                                    debug_assert_eq!(n, 1, "invalid enum discriminant");
-                                                                    let e262 = {
-                                                                        let l252 = *base
-                                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                                            .cast::<*mut u8>();
-                                                                        let l253 = *base
-                                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                                            .cast::<usize>();
-                                                                        let len254 = l253;
-                                                                        let bytes254 = super::super::_rt::Vec::from_raw_parts(
-                                                                            l252.cast(),
-                                                                            len254,
-                                                                            len254,
-                                                                        );
-                                                                        let l255 = i32::from(
-                                                                            *base
-                                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<u8>(),
-                                                                        );
-                                                                        let l259 = *base
-                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                                            .cast::<*mut u8>();
-                                                                        let l260 = *base
-                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                                            .cast::<usize>();
-                                                                        let len261 = l260;
-                                                                        let bytes261 = super::super::_rt::Vec::from_raw_parts(
-                                                                            l259.cast(),
-                                                                            len261,
-                                                                            len261,
-                                                                        );
-                                                                        super::super::yosh::acp::content::BlobResourceContents {
-                                                                            uri: super::super::_rt::string_lift(bytes254),
-                                                                            mime_type: match l255 {
-                                                                                0 => None,
-                                                                                1 => {
-                                                                                    let e = {
-                                                                                        let l256 = *base
-                                                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                                            .cast::<*mut u8>();
-                                                                                        let l257 = *base
-                                                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                                            .cast::<usize>();
-                                                                                        let len258 = l257;
-                                                                                        let bytes258 = super::super::_rt::Vec::from_raw_parts(
-                                                                                            l256.cast(),
-                                                                                            len258,
-                                                                                            len258,
-                                                                                        );
-                                                                                        super::super::_rt::string_lift(bytes258)
-                                                                                    };
-                                                                                    Some(e)
-                                                                                }
-                                                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                                                            },
-                                                                            blob: super::super::_rt::string_lift(bytes261),
-                                                                        }
-                                                                    };
-                                                                    V262::Blob(e262)
-                                                                }
-                                                            };
-                                                            super::super::yosh::acp::content::EmbeddedResource {
-                                                                resource: v262,
-                                                            }
-                                                        };
-                                                        V263::Resource(e263)
-                                                    }
-                                                };
-                                                v263
-                                            };
-                                            V277::Content(e277)
-                                        }
-                                        1 => {
-                                            let e277 = {
-                                                let l264 = *base.add(8).cast::<*mut u8>();
-                                                let l265 = *base
-                                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                let len266 = l265;
-                                                let bytes266 = super::super::_rt::Vec::from_raw_parts(
-                                                    l264.cast(),
-                                                    len266,
-                                                    len266,
-                                                );
-                                                let l267 = i32::from(
-                                                    *base
-                                                        .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<u8>(),
-                                                );
-                                                let l271 = *base
-                                                    .add(8 + 5 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>();
-                                                let l272 = *base
-                                                    .add(8 + 6 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                let len273 = l272;
-                                                let bytes273 = super::super::_rt::Vec::from_raw_parts(
-                                                    l271.cast(),
-                                                    len273,
-                                                    len273,
-                                                );
-                                                super::super::yosh::acp::tools::Diff {
-                                                    path: super::super::_rt::string_lift(bytes266),
-                                                    old_text: match l267 {
-                                                        0 => None,
-                                                        1 => {
-                                                            let e = {
-                                                                let l268 = *base
-                                                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<*mut u8>();
-                                                                let l269 = *base
-                                                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<usize>();
-                                                                let len270 = l269;
-                                                                let bytes270 = super::super::_rt::Vec::from_raw_parts(
-                                                                    l268.cast(),
-                                                                    len270,
-                                                                    len270,
-                                                                );
-                                                                super::super::_rt::string_lift(bytes270)
-                                                            };
-                                                            Some(e)
-                                                        }
-                                                        _ => super::super::_rt::invalid_enum_discriminant(),
-                                                    },
-                                                    new_text: super::super::_rt::string_lift(bytes273),
-                                                }
-                                            };
-                                            V277::Diff(e277)
-                                        }
-                                        n => {
-                                            debug_assert_eq!(n, 2, "invalid enum discriminant");
-                                            let e277 = {
-                                                let l274 = *base.add(8).cast::<*mut u8>();
-                                                let l275 = *base
-                                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                let len276 = l275;
-                                                let bytes276 = super::super::_rt::Vec::from_raw_parts(
-                                                    l274.cast(),
-                                                    len276,
-                                                    len276,
-                                                );
-                                                super::super::_rt::string_lift(bytes276)
-                                            };
-                                            V277::Terminal(e277)
-                                        }
-                                    };
-                                    v277
-                                };
-                                result278.push(e278);
-                            }
-                            super::super::_rt::cabi_dealloc(
-                                base278,
-                                len278 * (40 + 12 * ::core::mem::size_of::<*const u8>()),
-                                8,
-                            );
-                            let l279 = *ptr
-                                .add(8 + 7 * ::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>();
-                            let l280 = *ptr
-                                .add(8 + 8 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            let base286 = l279;
-                            let len286 = l280;
-                            let mut result286 = super::super::_rt::Vec::with_capacity(
-                                len286,
-                            );
-                            for i in 0..len286 {
-                                let base = base286
-                                    .add(i * (8 + 2 * ::core::mem::size_of::<*const u8>()));
-                                let e286 = {
-                                    let l281 = *base.add(0).cast::<*mut u8>();
-                                    let l282 = *base
-                                        .add(::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let len283 = l282;
-                                    let bytes283 = super::super::_rt::Vec::from_raw_parts(
-                                        l281.cast(),
-                                        len283,
-                                        len283,
-                                    );
-                                    let l284 = i32::from(
-                                        *base
-                                            .add(2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>(),
-                                    );
-                                    super::super::yosh::acp::tools::ToolCallLocation {
-                                        path: super::super::_rt::string_lift(bytes283),
-                                        line: match l284 {
-                                            0 => None,
-                                            1 => {
-                                                let e = {
-                                                    let l285 = *base
-                                                        .add(4 + 2 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<i32>();
-                                                    l285 as u32
-                                                };
-                                                Some(e)
-                                            }
-                                            _ => super::super::_rt::invalid_enum_discriminant(),
-                                        },
-                                    }
-                                };
-                                result286.push(e286);
-                            }
-                            super::super::_rt::cabi_dealloc(
-                                base286,
-                                len286 * (8 + 2 * ::core::mem::size_of::<*const u8>()),
-                                ::core::mem::size_of::<*const u8>(),
-                            );
-                            let l287 = i32::from(
-                                *ptr
-                                    .add(8 + 9 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>(),
-                            );
-                            let l291 = i32::from(
-                                *ptr
-                                    .add(8 + 12 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>(),
-                            );
-                            super::super::yosh::acp::tools::ToolCallSnapshot {
-                                id: super::super::_rt::string_lift(bytes192),
-                                title: super::super::_rt::string_lift(bytes195),
-                                kind: super::super::yosh::acp::tools::ToolKind::_lift(
-                                    l196 as u8,
-                                ),
-                                status: super::super::yosh::acp::tools::ToolCallStatus::_lift(
-                                    l197 as u8,
-                                ),
-                                content: result278,
-                                locations: result286,
-                                raw_input: match l287 {
-                                    0 => None,
-                                    1 => {
-                                        let e = {
-                                            let l288 = *ptr
-                                                .add(8 + 10 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>();
-                                            let l289 = *ptr
-                                                .add(8 + 11 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            let len290 = l289;
-                                            let bytes290 = super::super::_rt::Vec::from_raw_parts(
-                                                l288.cast(),
-                                                len290,
-                                                len290,
-                                            );
-                                            super::super::_rt::string_lift(bytes290)
-                                        };
-                                        Some(e)
-                                    }
-                                    _ => super::super::_rt::invalid_enum_discriminant(),
-                                },
-                                raw_output: match l291 {
-                                    0 => None,
-                                    1 => {
-                                        let e = {
-                                            let l292 = *ptr
-                                                .add(8 + 13 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>();
-                                            let l293 = *ptr
-                                                .add(8 + 14 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            let len294 = l293;
-                                            let bytes294 = super::super::_rt::Vec::from_raw_parts(
-                                                l292.cast(),
-                                                len294,
-                                                len294,
-                                            );
-                                            super::super::_rt::string_lift(bytes294)
-                                        };
-                                        Some(e)
-                                    }
-                                    _ => super::super::_rt::invalid_enum_discriminant(),
-                                },
-                            }
-                        };
-                        V439::ToolCall(e439)
-                    }
-                    4 => {
-                        let e439 = {
-                            let l295 = *ptr.add(8).cast::<*mut u8>();
-                            let l296 = *ptr
-                                .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            let len297 = l296;
-                            let bytes297 = super::super::_rt::Vec::from_raw_parts(
-                                l295.cast(),
-                                len297,
-                                len297,
-                            );
-                            let l298 = *ptr
-                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>();
-                            let l299 = *ptr
-                                .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            let len300 = l299;
-                            let bytes300 = super::super::_rt::Vec::from_raw_parts(
-                                l298.cast(),
-                                len300,
-                                len300,
-                            );
-                            let l301 = i32::from(
-                                *ptr
-                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>(),
-                            );
-                            let l302 = i32::from(
-                                *ptr
-                                    .add(9 + 4 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>(),
-                            );
-                            let l303 = *ptr
-                                .add(8 + 5 * ::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>();
-                            let l304 = *ptr
-                                .add(8 + 6 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            let base383 = l303;
-                            let len383 = l304;
-                            let mut result383 = super::super::_rt::Vec::with_capacity(
-                                len383,
-                            );
-                            for i in 0..len383 {
-                                let base = base383
-                                    .add(i * (40 + 12 * ::core::mem::size_of::<*const u8>()));
-                                let e383 = {
-                                    let l305 = i32::from(*base.add(0).cast::<u8>());
-                                    use super::super::yosh::acp::tools::ToolCallContent as V382;
-                                    let v382 = match l305 {
-                                        0 => {
-                                            let e382 = {
-                                                let l306 = i32::from(*base.add(8).cast::<u8>());
-                                                use super::super::yosh::acp::content::ContentBlock as V368;
-                                                let v368 = match l306 {
-                                                    0 => {
-                                                        let e368 = {
-                                                            let l307 = *base.add(16).cast::<*mut u8>();
-                                                            let l308 = *base
-                                                                .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<usize>();
-                                                            let len309 = l308;
-                                                            let bytes309 = super::super::_rt::Vec::from_raw_parts(
-                                                                l307.cast(),
-                                                                len309,
-                                                                len309,
-                                                            );
-                                                            super::super::yosh::acp::content::TextContent {
-                                                                text: super::super::_rt::string_lift(bytes309),
-                                                            }
-                                                        };
-                                                        V368::Text(e368)
-                                                    }
-                                                    1 => {
-                                                        let e368 = {
-                                                            let l310 = *base.add(16).cast::<*mut u8>();
-                                                            let l311 = *base
-                                                                .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<usize>();
-                                                            let len312 = l311;
-                                                            let bytes312 = super::super::_rt::Vec::from_raw_parts(
-                                                                l310.cast(),
-                                                                len312,
-                                                                len312,
-                                                            );
-                                                            let l313 = *base
-                                                                .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<*mut u8>();
-                                                            let l314 = *base
-                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<usize>();
-                                                            let len315 = l314;
-                                                            let bytes315 = super::super::_rt::Vec::from_raw_parts(
-                                                                l313.cast(),
-                                                                len315,
-                                                                len315,
-                                                            );
-                                                            let l316 = i32::from(
-                                                                *base
-                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>(),
-                                                            );
-                                                            super::super::yosh::acp::content::ImageContent {
-                                                                data: super::super::_rt::string_lift(bytes312),
-                                                                mime_type: super::super::_rt::string_lift(bytes315),
-                                                                uri: match l316 {
-                                                                    0 => None,
-                                                                    1 => {
-                                                                        let e = {
-                                                                            let l317 = *base
-                                                                                .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<*mut u8>();
-                                                                            let l318 = *base
-                                                                                .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<usize>();
-                                                                            let len319 = l318;
-                                                                            let bytes319 = super::super::_rt::Vec::from_raw_parts(
-                                                                                l317.cast(),
-                                                                                len319,
-                                                                                len319,
-                                                                            );
-                                                                            super::super::_rt::string_lift(bytes319)
-                                                                        };
-                                                                        Some(e)
-                                                                    }
-                                                                    _ => super::super::_rt::invalid_enum_discriminant(),
-                                                                },
-                                                            }
-                                                        };
-                                                        V368::Image(e368)
-                                                    }
-                                                    2 => {
-                                                        let e368 = {
-                                                            let l320 = *base.add(16).cast::<*mut u8>();
-                                                            let l321 = *base
-                                                                .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<usize>();
-                                                            let len322 = l321;
-                                                            let bytes322 = super::super::_rt::Vec::from_raw_parts(
-                                                                l320.cast(),
-                                                                len322,
-                                                                len322,
-                                                            );
-                                                            let l323 = *base
-                                                                .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<*mut u8>();
-                                                            let l324 = *base
-                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<usize>();
-                                                            let len325 = l324;
-                                                            let bytes325 = super::super::_rt::Vec::from_raw_parts(
-                                                                l323.cast(),
-                                                                len325,
-                                                                len325,
-                                                            );
-                                                            super::super::yosh::acp::content::AudioContent {
-                                                                data: super::super::_rt::string_lift(bytes322),
-                                                                mime_type: super::super::_rt::string_lift(bytes325),
-                                                            }
-                                                        };
-                                                        V368::Audio(e368)
-                                                    }
-                                                    3 => {
-                                                        let e368 = {
-                                                            let l326 = *base.add(16).cast::<*mut u8>();
-                                                            let l327 = *base
-                                                                .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<usize>();
-                                                            let len328 = l327;
-                                                            let bytes328 = super::super::_rt::Vec::from_raw_parts(
-                                                                l326.cast(),
-                                                                len328,
-                                                                len328,
-                                                            );
-                                                            let l329 = *base
-                                                                .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<*mut u8>();
-                                                            let l330 = *base
-                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<usize>();
-                                                            let len331 = l330;
-                                                            let bytes331 = super::super::_rt::Vec::from_raw_parts(
-                                                                l329.cast(),
-                                                                len331,
-                                                                len331,
-                                                            );
-                                                            let l332 = i32::from(
-                                                                *base
-                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>(),
-                                                            );
-                                                            let l336 = i32::from(
-                                                                *base
-                                                                    .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>(),
-                                                            );
-                                                            let l340 = i32::from(
-                                                                *base
-                                                                    .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>(),
-                                                            );
-                                                            let l344 = i32::from(
-                                                                *base
-                                                                    .add(24 + 12 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>(),
-                                                            );
-                                                            super::super::yosh::acp::content::ResourceLink {
-                                                                uri: super::super::_rt::string_lift(bytes328),
-                                                                name: super::super::_rt::string_lift(bytes331),
-                                                                mime_type: match l332 {
-                                                                    0 => None,
-                                                                    1 => {
-                                                                        let e = {
-                                                                            let l333 = *base
-                                                                                .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<*mut u8>();
-                                                                            let l334 = *base
-                                                                                .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<usize>();
-                                                                            let len335 = l334;
-                                                                            let bytes335 = super::super::_rt::Vec::from_raw_parts(
-                                                                                l333.cast(),
-                                                                                len335,
-                                                                                len335,
-                                                                            );
-                                                                            super::super::_rt::string_lift(bytes335)
-                                                                        };
-                                                                        Some(e)
-                                                                    }
-                                                                    _ => super::super::_rt::invalid_enum_discriminant(),
-                                                                },
-                                                                title: match l336 {
-                                                                    0 => None,
-                                                                    1 => {
-                                                                        let e = {
-                                                                            let l337 = *base
-                                                                                .add(16 + 8 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<*mut u8>();
-                                                                            let l338 = *base
-                                                                                .add(16 + 9 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<usize>();
-                                                                            let len339 = l338;
-                                                                            let bytes339 = super::super::_rt::Vec::from_raw_parts(
-                                                                                l337.cast(),
-                                                                                len339,
-                                                                                len339,
-                                                                            );
-                                                                            super::super::_rt::string_lift(bytes339)
-                                                                        };
-                                                                        Some(e)
-                                                                    }
-                                                                    _ => super::super::_rt::invalid_enum_discriminant(),
-                                                                },
-                                                                description: match l340 {
-                                                                    0 => None,
-                                                                    1 => {
-                                                                        let e = {
-                                                                            let l341 = *base
-                                                                                .add(16 + 11 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<*mut u8>();
-                                                                            let l342 = *base
-                                                                                .add(16 + 12 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<usize>();
-                                                                            let len343 = l342;
-                                                                            let bytes343 = super::super::_rt::Vec::from_raw_parts(
-                                                                                l341.cast(),
-                                                                                len343,
-                                                                                len343,
-                                                                            );
-                                                                            super::super::_rt::string_lift(bytes343)
-                                                                        };
-                                                                        Some(e)
-                                                                    }
-                                                                    _ => super::super::_rt::invalid_enum_discriminant(),
-                                                                },
-                                                                size: match l344 {
-                                                                    0 => None,
-                                                                    1 => {
-                                                                        let e = {
-                                                                            let l345 = *base
-                                                                                .add(32 + 12 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<i64>();
-                                                                            l345 as u64
-                                                                        };
-                                                                        Some(e)
-                                                                    }
-                                                                    _ => super::super::_rt::invalid_enum_discriminant(),
-                                                                },
-                                                            }
-                                                        };
-                                                        V368::ResourceLink(e368)
-                                                    }
-                                                    n => {
-                                                        debug_assert_eq!(n, 4, "invalid enum discriminant");
-                                                        let e368 = {
-                                                            let l346 = i32::from(*base.add(16).cast::<u8>());
-                                                            use super::super::yosh::acp::content::ResourceContents as V367;
-                                                            let v367 = match l346 {
-                                                                0 => {
-                                                                    let e367 = {
-                                                                        let l347 = *base
-                                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                                            .cast::<*mut u8>();
-                                                                        let l348 = *base
-                                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                                            .cast::<usize>();
-                                                                        let len349 = l348;
-                                                                        let bytes349 = super::super::_rt::Vec::from_raw_parts(
-                                                                            l347.cast(),
-                                                                            len349,
-                                                                            len349,
-                                                                        );
-                                                                        let l350 = i32::from(
-                                                                            *base
-                                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<u8>(),
-                                                                        );
-                                                                        let l354 = *base
-                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                                            .cast::<*mut u8>();
-                                                                        let l355 = *base
-                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                                            .cast::<usize>();
-                                                                        let len356 = l355;
-                                                                        let bytes356 = super::super::_rt::Vec::from_raw_parts(
-                                                                            l354.cast(),
-                                                                            len356,
-                                                                            len356,
-                                                                        );
-                                                                        super::super::yosh::acp::content::TextResourceContents {
-                                                                            uri: super::super::_rt::string_lift(bytes349),
-                                                                            mime_type: match l350 {
-                                                                                0 => None,
-                                                                                1 => {
-                                                                                    let e = {
-                                                                                        let l351 = *base
-                                                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                                            .cast::<*mut u8>();
-                                                                                        let l352 = *base
-                                                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                                            .cast::<usize>();
-                                                                                        let len353 = l352;
-                                                                                        let bytes353 = super::super::_rt::Vec::from_raw_parts(
-                                                                                            l351.cast(),
-                                                                                            len353,
-                                                                                            len353,
-                                                                                        );
-                                                                                        super::super::_rt::string_lift(bytes353)
-                                                                                    };
-                                                                                    Some(e)
-                                                                                }
-                                                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                                                            },
-                                                                            text: super::super::_rt::string_lift(bytes356),
-                                                                        }
-                                                                    };
-                                                                    V367::Text(e367)
-                                                                }
-                                                                n => {
-                                                                    debug_assert_eq!(n, 1, "invalid enum discriminant");
-                                                                    let e367 = {
-                                                                        let l357 = *base
-                                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                                            .cast::<*mut u8>();
-                                                                        let l358 = *base
-                                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                                            .cast::<usize>();
-                                                                        let len359 = l358;
-                                                                        let bytes359 = super::super::_rt::Vec::from_raw_parts(
-                                                                            l357.cast(),
-                                                                            len359,
-                                                                            len359,
-                                                                        );
-                                                                        let l360 = i32::from(
-                                                                            *base
-                                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                                .cast::<u8>(),
-                                                                        );
-                                                                        let l364 = *base
-                                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                                            .cast::<*mut u8>();
-                                                                        let l365 = *base
-                                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                                            .cast::<usize>();
-                                                                        let len366 = l365;
-                                                                        let bytes366 = super::super::_rt::Vec::from_raw_parts(
-                                                                            l364.cast(),
-                                                                            len366,
-                                                                            len366,
-                                                                        );
-                                                                        super::super::yosh::acp::content::BlobResourceContents {
-                                                                            uri: super::super::_rt::string_lift(bytes359),
-                                                                            mime_type: match l360 {
-                                                                                0 => None,
-                                                                                1 => {
-                                                                                    let e = {
-                                                                                        let l361 = *base
-                                                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                                            .cast::<*mut u8>();
-                                                                                        let l362 = *base
-                                                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                                            .cast::<usize>();
-                                                                                        let len363 = l362;
-                                                                                        let bytes363 = super::super::_rt::Vec::from_raw_parts(
-                                                                                            l361.cast(),
-                                                                                            len363,
-                                                                                            len363,
-                                                                                        );
-                                                                                        super::super::_rt::string_lift(bytes363)
-                                                                                    };
-                                                                                    Some(e)
-                                                                                }
-                                                                                _ => super::super::_rt::invalid_enum_discriminant(),
-                                                                            },
-                                                                            blob: super::super::_rt::string_lift(bytes366),
-                                                                        }
-                                                                    };
-                                                                    V367::Blob(e367)
-                                                                }
-                                                            };
-                                                            super::super::yosh::acp::content::EmbeddedResource {
-                                                                resource: v367,
-                                                            }
-                                                        };
-                                                        V368::Resource(e368)
-                                                    }
-                                                };
-                                                v368
-                                            };
-                                            V382::Content(e382)
-                                        }
-                                        1 => {
-                                            let e382 = {
-                                                let l369 = *base.add(8).cast::<*mut u8>();
-                                                let l370 = *base
-                                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                let len371 = l370;
-                                                let bytes371 = super::super::_rt::Vec::from_raw_parts(
-                                                    l369.cast(),
-                                                    len371,
-                                                    len371,
-                                                );
-                                                let l372 = i32::from(
-                                                    *base
-                                                        .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<u8>(),
-                                                );
-                                                let l376 = *base
-                                                    .add(8 + 5 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>();
-                                                let l377 = *base
-                                                    .add(8 + 6 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                let len378 = l377;
-                                                let bytes378 = super::super::_rt::Vec::from_raw_parts(
-                                                    l376.cast(),
-                                                    len378,
-                                                    len378,
-                                                );
-                                                super::super::yosh::acp::tools::Diff {
-                                                    path: super::super::_rt::string_lift(bytes371),
-                                                    old_text: match l372 {
-                                                        0 => None,
-                                                        1 => {
-                                                            let e = {
-                                                                let l373 = *base
-                                                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<*mut u8>();
-                                                                let l374 = *base
-                                                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<usize>();
-                                                                let len375 = l374;
-                                                                let bytes375 = super::super::_rt::Vec::from_raw_parts(
-                                                                    l373.cast(),
-                                                                    len375,
-                                                                    len375,
-                                                                );
-                                                                super::super::_rt::string_lift(bytes375)
-                                                            };
-                                                            Some(e)
-                                                        }
-                                                        _ => super::super::_rt::invalid_enum_discriminant(),
-                                                    },
-                                                    new_text: super::super::_rt::string_lift(bytes378),
-                                                }
-                                            };
-                                            V382::Diff(e382)
-                                        }
-                                        n => {
-                                            debug_assert_eq!(n, 2, "invalid enum discriminant");
-                                            let e382 = {
-                                                let l379 = *base.add(8).cast::<*mut u8>();
-                                                let l380 = *base
-                                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                let len381 = l380;
-                                                let bytes381 = super::super::_rt::Vec::from_raw_parts(
-                                                    l379.cast(),
-                                                    len381,
-                                                    len381,
-                                                );
-                                                super::super::_rt::string_lift(bytes381)
-                                            };
-                                            V382::Terminal(e382)
-                                        }
-                                    };
-                                    v382
-                                };
-                                result383.push(e383);
-                            }
-                            super::super::_rt::cabi_dealloc(
-                                base383,
-                                len383 * (40 + 12 * ::core::mem::size_of::<*const u8>()),
-                                8,
-                            );
-                            let l384 = *ptr
-                                .add(8 + 7 * ::core::mem::size_of::<*const u8>())
-                                .cast::<*mut u8>();
-                            let l385 = *ptr
-                                .add(8 + 8 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            let base391 = l384;
-                            let len391 = l385;
-                            let mut result391 = super::super::_rt::Vec::with_capacity(
-                                len391,
-                            );
-                            for i in 0..len391 {
-                                let base = base391
-                                    .add(i * (8 + 2 * ::core::mem::size_of::<*const u8>()));
-                                let e391 = {
-                                    let l386 = *base.add(0).cast::<*mut u8>();
-                                    let l387 = *base
-                                        .add(::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let len388 = l387;
-                                    let bytes388 = super::super::_rt::Vec::from_raw_parts(
-                                        l386.cast(),
-                                        len388,
-                                        len388,
-                                    );
-                                    let l389 = i32::from(
-                                        *base
-                                            .add(2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>(),
-                                    );
-                                    super::super::yosh::acp::tools::ToolCallLocation {
-                                        path: super::super::_rt::string_lift(bytes388),
-                                        line: match l389 {
-                                            0 => None,
-                                            1 => {
-                                                let e = {
-                                                    let l390 = *base
-                                                        .add(4 + 2 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<i32>();
-                                                    l390 as u32
-                                                };
-                                                Some(e)
-                                            }
-                                            _ => super::super::_rt::invalid_enum_discriminant(),
-                                        },
-                                    }
-                                };
-                                result391.push(e391);
-                            }
-                            super::super::_rt::cabi_dealloc(
-                                base391,
-                                len391 * (8 + 2 * ::core::mem::size_of::<*const u8>()),
-                                ::core::mem::size_of::<*const u8>(),
-                            );
-                            let l392 = i32::from(
-                                *ptr
-                                    .add(8 + 9 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>(),
-                            );
-                            let l396 = i32::from(
-                                *ptr
-                                    .add(8 + 12 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>(),
-                            );
-                            super::super::yosh::acp::tools::ToolCallSnapshot {
-                                id: super::super::_rt::string_lift(bytes297),
-                                title: super::super::_rt::string_lift(bytes300),
-                                kind: super::super::yosh::acp::tools::ToolKind::_lift(
-                                    l301 as u8,
-                                ),
-                                status: super::super::yosh::acp::tools::ToolCallStatus::_lift(
-                                    l302 as u8,
-                                ),
-                                content: result383,
-                                locations: result391,
-                                raw_input: match l392 {
-                                    0 => None,
-                                    1 => {
-                                        let e = {
-                                            let l393 = *ptr
-                                                .add(8 + 10 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>();
-                                            let l394 = *ptr
-                                                .add(8 + 11 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            let len395 = l394;
-                                            let bytes395 = super::super::_rt::Vec::from_raw_parts(
-                                                l393.cast(),
-                                                len395,
-                                                len395,
-                                            );
-                                            super::super::_rt::string_lift(bytes395)
-                                        };
-                                        Some(e)
-                                    }
-                                    _ => super::super::_rt::invalid_enum_discriminant(),
-                                },
-                                raw_output: match l396 {
-                                    0 => None,
-                                    1 => {
-                                        let e = {
-                                            let l397 = *ptr
-                                                .add(8 + 13 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>();
-                                            let l398 = *ptr
-                                                .add(8 + 14 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            let len399 = l398;
-                                            let bytes399 = super::super::_rt::Vec::from_raw_parts(
-                                                l397.cast(),
-                                                len399,
-                                                len399,
-                                            );
-                                            super::super::_rt::string_lift(bytes399)
-                                        };
-                                        Some(e)
-                                    }
-                                    _ => super::super::_rt::invalid_enum_discriminant(),
-                                },
-                            }
-                        };
-                        V439::ToolCallUpdate(e439)
-                    }
-                    5 => {
-                        let e439 = {
-                            let l400 = *ptr.add(8).cast::<*mut u8>();
-                            let l401 = *ptr
-                                .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            let base407 = l400;
-                            let len407 = l401;
-                            let mut result407 = super::super::_rt::Vec::with_capacity(
-                                len407,
-                            );
-                            for i in 0..len407 {
-                                let base = base407
-                                    .add(i * (3 * ::core::mem::size_of::<*const u8>()));
-                                let e407 = {
-                                    let l402 = *base.add(0).cast::<*mut u8>();
-                                    let l403 = *base
-                                        .add(::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let len404 = l403;
-                                    let bytes404 = super::super::_rt::Vec::from_raw_parts(
-                                        l402.cast(),
-                                        len404,
-                                        len404,
-                                    );
-                                    let l405 = i32::from(
-                                        *base
-                                            .add(2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>(),
-                                    );
-                                    let l406 = i32::from(
-                                        *base
-                                            .add(1 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>(),
-                                    );
-                                    super::super::yosh::acp::tools::PlanEntry {
-                                        content: super::super::_rt::string_lift(bytes404),
-                                        priority: super::super::yosh::acp::tools::PlanEntryPriority::_lift(
-                                            l405 as u8,
-                                        ),
-                                        status: super::super::yosh::acp::tools::PlanEntryStatus::_lift(
-                                            l406 as u8,
-                                        ),
-                                    }
-                                };
-                                result407.push(e407);
-                            }
-                            super::super::_rt::cabi_dealloc(
-                                base407,
-                                len407 * (3 * ::core::mem::size_of::<*const u8>()),
-                                ::core::mem::size_of::<*const u8>(),
-                            );
-                            super::super::yosh::acp::tools::Plan {
-                                entries: result407,
-                            }
-                        };
-                        V439::Plan(e439)
-                    }
-                    6 => {
-                        let e439 = {
-                            let l408 = *ptr.add(8).cast::<*mut u8>();
-                            let l409 = *ptr
-                                .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            let len410 = l409;
-                            let bytes410 = super::super::_rt::Vec::from_raw_parts(
-                                l408.cast(),
-                                len410,
-                                len410,
-                            );
-                            super::super::_rt::string_lift(bytes410)
-                        };
-                        V439::CurrentModeUpdate(e439)
-                    }
-                    7 => {
-                        let e439 = {
-                            let l411 = i32::from(*ptr.add(8).cast::<u8>());
-                            let l415 = i32::from(
-                                *ptr
-                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>(),
-                            );
-                            super::super::yosh::acp::sessions::SessionInfoUpdate {
-                                title: match l411 {
-                                    0 => None,
-                                    1 => {
-                                        let e = {
-                                            let l412 = *ptr
-                                                .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>();
-                                            let l413 = *ptr
-                                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            let len414 = l413;
-                                            let bytes414 = super::super::_rt::Vec::from_raw_parts(
-                                                l412.cast(),
-                                                len414,
-                                                len414,
-                                            );
-                                            super::super::_rt::string_lift(bytes414)
-                                        };
-                                        Some(e)
-                                    }
-                                    _ => super::super::_rt::invalid_enum_discriminant(),
-                                },
-                                updated_at: match l415 {
-                                    0 => None,
-                                    1 => {
-                                        let e = {
-                                            let l416 = *ptr
-                                                .add(8 + 4 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<*mut u8>();
-                                            let l417 = *ptr
-                                                .add(8 + 5 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            let len418 = l417;
-                                            let bytes418 = super::super::_rt::Vec::from_raw_parts(
-                                                l416.cast(),
-                                                len418,
-                                                len418,
-                                            );
-                                            super::super::_rt::string_lift(bytes418)
-                                        };
-                                        Some(e)
-                                    }
-                                    _ => super::super::_rt::invalid_enum_discriminant(),
-                                },
-                            }
-                        };
-                        V439::SessionInfoUpdate(e439)
-                    }
-                    8 => {
-                        let e439 = {
-                            let l419 = *ptr.add(8).cast::<*mut u8>();
-                            let l420 = *ptr
-                                .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                .cast::<usize>();
-                            let base431 = l419;
-                            let len431 = l420;
-                            let mut result431 = super::super::_rt::Vec::with_capacity(
-                                len431,
-                            );
-                            for i in 0..len431 {
-                                let base = base431
-                                    .add(i * (7 * ::core::mem::size_of::<*const u8>()));
-                                let e431 = {
-                                    let l421 = *base.add(0).cast::<*mut u8>();
-                                    let l422 = *base
-                                        .add(::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let len423 = l422;
-                                    let bytes423 = super::super::_rt::Vec::from_raw_parts(
-                                        l421.cast(),
-                                        len423,
-                                        len423,
-                                    );
-                                    let l424 = *base
-                                        .add(2 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<*mut u8>();
-                                    let l425 = *base
-                                        .add(3 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<usize>();
-                                    let len426 = l425;
-                                    let bytes426 = super::super::_rt::Vec::from_raw_parts(
-                                        l424.cast(),
-                                        len426,
-                                        len426,
-                                    );
-                                    let l427 = i32::from(
-                                        *base
-                                            .add(4 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>(),
-                                    );
-                                    super::super::yosh::acp::prompts::AvailableCommand {
-                                        name: super::super::_rt::string_lift(bytes423),
-                                        description: super::super::_rt::string_lift(bytes426),
-                                        input: match l427 {
-                                            0 => None,
-                                            1 => {
-                                                let e = {
-                                                    let l428 = *base
-                                                        .add(5 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<*mut u8>();
-                                                    let l429 = *base
-                                                        .add(6 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<usize>();
-                                                    let len430 = l429;
-                                                    let bytes430 = super::super::_rt::Vec::from_raw_parts(
-                                                        l428.cast(),
-                                                        len430,
-                                                        len430,
-                                                    );
-                                                    super::super::yosh::acp::prompts::AvailableCommandInput {
-                                                        hint: super::super::_rt::string_lift(bytes430),
-                                                    }
-                                                };
-                                                Some(e)
-                                            }
-                                            _ => super::super::_rt::invalid_enum_discriminant(),
-                                        },
-                                    }
-                                };
-                                result431.push(e431);
-                            }
-                            super::super::_rt::cabi_dealloc(
-                                base431,
-                                len431 * (7 * ::core::mem::size_of::<*const u8>()),
-                                ::core::mem::size_of::<*const u8>(),
-                            );
-                            result431
-                        };
-                        V439::AvailableCommandsUpdate(e439)
-                    }
-                    n => {
-                        debug_assert_eq!(n, 9, "invalid enum discriminant");
-                        let e439 = {
-                            let l432 = *ptr.add(8).cast::<i64>();
-                            let l433 = *ptr.add(16).cast::<i64>();
-                            let l434 = i32::from(*ptr.add(24).cast::<u8>());
-                            super::super::yosh::acp::prompts::UsageUpdate {
-                                used: l432 as u64,
-                                size: l433 as u64,
-                                cost: match l434 {
-                                    0 => None,
-                                    1 => {
-                                        let e = {
-                                            let l435 = *ptr.add(32).cast::<f64>();
-                                            let l436 = *ptr.add(40).cast::<*mut u8>();
-                                            let l437 = *ptr
-                                                .add(40 + 1 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<usize>();
-                                            let len438 = l437;
-                                            let bytes438 = super::super::_rt::Vec::from_raw_parts(
-                                                l436.cast(),
-                                                len438,
-                                                len438,
-                                            );
-                                            super::super::yosh::acp::prompts::UsageCost {
-                                                amount: l435,
-                                                currency: super::super::_rt::string_lift(bytes438),
-                                            }
-                                        };
-                                        Some(e)
-                                    }
-                                    _ => super::super::_rt::invalid_enum_discriminant(),
-                                },
-                            }
-                        };
-                        V439::UsageUpdate(e439)
-                    }
-                };
-                v439
-            }
-        }
-        unsafe fn lower(
-            value: super::super::yosh::acp::prompts::SessionUpdate,
-            ptr: *mut u8,
-        ) {
-            unsafe {
-                use super::super::yosh::acp::prompts::SessionUpdate as V177;
-                match value {
-                    V177::UserMessageChunk(e) => {
-                        *ptr.add(0).cast::<u8>() = (0i32) as u8;
-                        use super::super::yosh::acp::content::ContentBlock as V25;
-                        match e {
-                            V25::Text(e) => {
-                                *ptr.add(8).cast::<u8>() = (0i32) as u8;
-                                let super::super::yosh::acp::content::TextContent {
-                                    text: text0,
-                                } = e;
-                                let vec1 = (text0.into_bytes()).into_boxed_slice();
-                                let ptr1 = vec1.as_ptr().cast::<u8>();
-                                let len1 = vec1.len();
-                                ::core::mem::forget(vec1);
-                                *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len1;
-                                *ptr.add(16).cast::<*mut u8>() = ptr1.cast_mut();
-                            }
-                            V25::Image(e) => {
-                                *ptr.add(8).cast::<u8>() = (1i32) as u8;
-                                let super::super::yosh::acp::content::ImageContent {
-                                    data: data2,
-                                    mime_type: mime_type2,
-                                    uri: uri2,
-                                } = e;
-                                let vec3 = (data2.into_bytes()).into_boxed_slice();
-                                let ptr3 = vec3.as_ptr().cast::<u8>();
-                                let len3 = vec3.len();
-                                ::core::mem::forget(vec3);
-                                *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len3;
-                                *ptr.add(16).cast::<*mut u8>() = ptr3.cast_mut();
-                                let vec4 = (mime_type2.into_bytes()).into_boxed_slice();
-                                let ptr4 = vec4.as_ptr().cast::<u8>();
-                                let len4 = vec4.len();
-                                ::core::mem::forget(vec4);
-                                *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len4;
-                                *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr4.cast_mut();
-                                match uri2 {
-                                    Some(e) => {
-                                        *ptr
-                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        let vec5 = (e.into_bytes()).into_boxed_slice();
-                                        let ptr5 = vec5.as_ptr().cast::<u8>();
-                                        let len5 = vec5.len();
-                                        ::core::mem::forget(vec5);
-                                        *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len5;
-                                        *ptr
-                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr5.cast_mut();
-                                    }
-                                    None => {
-                                        *ptr
-                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                            }
-                            V25::Audio(e) => {
-                                *ptr.add(8).cast::<u8>() = (2i32) as u8;
-                                let super::super::yosh::acp::content::AudioContent {
-                                    data: data6,
-                                    mime_type: mime_type6,
-                                } = e;
-                                let vec7 = (data6.into_bytes()).into_boxed_slice();
-                                let ptr7 = vec7.as_ptr().cast::<u8>();
-                                let len7 = vec7.len();
-                                ::core::mem::forget(vec7);
-                                *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len7;
-                                *ptr.add(16).cast::<*mut u8>() = ptr7.cast_mut();
-                                let vec8 = (mime_type6.into_bytes()).into_boxed_slice();
-                                let ptr8 = vec8.as_ptr().cast::<u8>();
-                                let len8 = vec8.len();
-                                ::core::mem::forget(vec8);
-                                *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len8;
-                                *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr8.cast_mut();
-                            }
-                            V25::ResourceLink(e) => {
-                                *ptr.add(8).cast::<u8>() = (3i32) as u8;
-                                let super::super::yosh::acp::content::ResourceLink {
-                                    uri: uri9,
-                                    name: name9,
-                                    mime_type: mime_type9,
-                                    title: title9,
-                                    description: description9,
-                                    size: size9,
-                                } = e;
-                                let vec10 = (uri9.into_bytes()).into_boxed_slice();
-                                let ptr10 = vec10.as_ptr().cast::<u8>();
-                                let len10 = vec10.len();
-                                ::core::mem::forget(vec10);
-                                *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len10;
-                                *ptr.add(16).cast::<*mut u8>() = ptr10.cast_mut();
-                                let vec11 = (name9.into_bytes()).into_boxed_slice();
-                                let ptr11 = vec11.as_ptr().cast::<u8>();
-                                let len11 = vec11.len();
-                                ::core::mem::forget(vec11);
-                                *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len11;
-                                *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr11.cast_mut();
-                                match mime_type9 {
-                                    Some(e) => {
-                                        *ptr
-                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        let vec12 = (e.into_bytes()).into_boxed_slice();
-                                        let ptr12 = vec12.as_ptr().cast::<u8>();
-                                        let len12 = vec12.len();
-                                        ::core::mem::forget(vec12);
-                                        *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len12;
-                                        *ptr
-                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr12.cast_mut();
-                                    }
-                                    None => {
-                                        *ptr
-                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                                match title9 {
-                                    Some(e) => {
-                                        *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        let vec13 = (e.into_bytes()).into_boxed_slice();
-                                        let ptr13 = vec13.as_ptr().cast::<u8>();
-                                        let len13 = vec13.len();
-                                        ::core::mem::forget(vec13);
-                                        *ptr
-                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len13;
-                                        *ptr
-                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr13.cast_mut();
-                                    }
-                                    None => {
-                                        *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                                match description9 {
-                                    Some(e) => {
-                                        *ptr
-                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        let vec14 = (e.into_bytes()).into_boxed_slice();
-                                        let ptr14 = vec14.as_ptr().cast::<u8>();
-                                        let len14 = vec14.len();
-                                        ::core::mem::forget(vec14);
-                                        *ptr
-                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len14;
-                                        *ptr
-                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr14.cast_mut();
-                                    }
-                                    None => {
-                                        *ptr
-                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                                match size9 {
-                                    Some(e) => {
-                                        *ptr
-                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        *ptr
-                                            .add(32 + 12 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<i64>() = super::super::_rt::as_i64(e);
-                                    }
-                                    None => {
-                                        *ptr
-                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                            }
-                            V25::Resource(e) => {
-                                *ptr.add(8).cast::<u8>() = (4i32) as u8;
-                                let super::super::yosh::acp::content::EmbeddedResource {
-                                    resource: resource15,
-                                } = e;
-                                use super::super::yosh::acp::content::ResourceContents as V24;
-                                match resource15 {
-                                    V24::Text(e) => {
-                                        *ptr.add(16).cast::<u8>() = (0i32) as u8;
-                                        let super::super::yosh::acp::content::TextResourceContents {
-                                            uri: uri16,
-                                            mime_type: mime_type16,
-                                            text: text16,
-                                        } = e;
-                                        let vec17 = (uri16.into_bytes()).into_boxed_slice();
-                                        let ptr17 = vec17.as_ptr().cast::<u8>();
-                                        let len17 = vec17.len();
-                                        ::core::mem::forget(vec17);
-                                        *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len17;
-                                        *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr17.cast_mut();
-                                        match mime_type16 {
-                                            Some(e) => {
-                                                *ptr
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<u8>() = (1i32) as u8;
-                                                let vec18 = (e.into_bytes()).into_boxed_slice();
-                                                let ptr18 = vec18.as_ptr().cast::<u8>();
-                                                let len18 = vec18.len();
-                                                ::core::mem::forget(vec18);
-                                                *ptr
-                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len18;
-                                                *ptr
-                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>() = ptr18.cast_mut();
-                                            }
-                                            None => {
-                                                *ptr
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<u8>() = (0i32) as u8;
-                                            }
-                                        };
-                                        let vec19 = (text16.into_bytes()).into_boxed_slice();
-                                        let ptr19 = vec19.as_ptr().cast::<u8>();
-                                        let len19 = vec19.len();
-                                        ::core::mem::forget(vec19);
-                                        *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len19;
-                                        *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr19.cast_mut();
-                                    }
-                                    V24::Blob(e) => {
-                                        *ptr.add(16).cast::<u8>() = (1i32) as u8;
-                                        let super::super::yosh::acp::content::BlobResourceContents {
-                                            uri: uri20,
-                                            mime_type: mime_type20,
-                                            blob: blob20,
-                                        } = e;
-                                        let vec21 = (uri20.into_bytes()).into_boxed_slice();
-                                        let ptr21 = vec21.as_ptr().cast::<u8>();
-                                        let len21 = vec21.len();
-                                        ::core::mem::forget(vec21);
-                                        *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len21;
-                                        *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr21.cast_mut();
-                                        match mime_type20 {
-                                            Some(e) => {
-                                                *ptr
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<u8>() = (1i32) as u8;
-                                                let vec22 = (e.into_bytes()).into_boxed_slice();
-                                                let ptr22 = vec22.as_ptr().cast::<u8>();
-                                                let len22 = vec22.len();
-                                                ::core::mem::forget(vec22);
-                                                *ptr
-                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len22;
-                                                *ptr
-                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>() = ptr22.cast_mut();
-                                            }
-                                            None => {
-                                                *ptr
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<u8>() = (0i32) as u8;
-                                            }
-                                        };
-                                        let vec23 = (blob20.into_bytes()).into_boxed_slice();
-                                        let ptr23 = vec23.as_ptr().cast::<u8>();
-                                        let len23 = vec23.len();
-                                        ::core::mem::forget(vec23);
-                                        *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len23;
-                                        *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr23.cast_mut();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    V177::AgentMessageChunk(e) => {
-                        *ptr.add(0).cast::<u8>() = (1i32) as u8;
-                        use super::super::yosh::acp::content::ContentBlock as V51;
-                        match e {
-                            V51::Text(e) => {
-                                *ptr.add(8).cast::<u8>() = (0i32) as u8;
-                                let super::super::yosh::acp::content::TextContent {
-                                    text: text26,
-                                } = e;
-                                let vec27 = (text26.into_bytes()).into_boxed_slice();
-                                let ptr27 = vec27.as_ptr().cast::<u8>();
-                                let len27 = vec27.len();
-                                ::core::mem::forget(vec27);
-                                *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len27;
-                                *ptr.add(16).cast::<*mut u8>() = ptr27.cast_mut();
-                            }
-                            V51::Image(e) => {
-                                *ptr.add(8).cast::<u8>() = (1i32) as u8;
-                                let super::super::yosh::acp::content::ImageContent {
-                                    data: data28,
-                                    mime_type: mime_type28,
-                                    uri: uri28,
-                                } = e;
-                                let vec29 = (data28.into_bytes()).into_boxed_slice();
-                                let ptr29 = vec29.as_ptr().cast::<u8>();
-                                let len29 = vec29.len();
-                                ::core::mem::forget(vec29);
-                                *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len29;
-                                *ptr.add(16).cast::<*mut u8>() = ptr29.cast_mut();
-                                let vec30 = (mime_type28.into_bytes()).into_boxed_slice();
-                                let ptr30 = vec30.as_ptr().cast::<u8>();
-                                let len30 = vec30.len();
-                                ::core::mem::forget(vec30);
-                                *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len30;
-                                *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr30.cast_mut();
-                                match uri28 {
-                                    Some(e) => {
-                                        *ptr
-                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        let vec31 = (e.into_bytes()).into_boxed_slice();
-                                        let ptr31 = vec31.as_ptr().cast::<u8>();
-                                        let len31 = vec31.len();
-                                        ::core::mem::forget(vec31);
-                                        *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len31;
-                                        *ptr
-                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr31.cast_mut();
-                                    }
-                                    None => {
-                                        *ptr
-                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                            }
-                            V51::Audio(e) => {
-                                *ptr.add(8).cast::<u8>() = (2i32) as u8;
-                                let super::super::yosh::acp::content::AudioContent {
-                                    data: data32,
-                                    mime_type: mime_type32,
-                                } = e;
-                                let vec33 = (data32.into_bytes()).into_boxed_slice();
-                                let ptr33 = vec33.as_ptr().cast::<u8>();
-                                let len33 = vec33.len();
-                                ::core::mem::forget(vec33);
-                                *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len33;
-                                *ptr.add(16).cast::<*mut u8>() = ptr33.cast_mut();
-                                let vec34 = (mime_type32.into_bytes()).into_boxed_slice();
-                                let ptr34 = vec34.as_ptr().cast::<u8>();
-                                let len34 = vec34.len();
-                                ::core::mem::forget(vec34);
-                                *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len34;
-                                *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr34.cast_mut();
-                            }
-                            V51::ResourceLink(e) => {
-                                *ptr.add(8).cast::<u8>() = (3i32) as u8;
-                                let super::super::yosh::acp::content::ResourceLink {
-                                    uri: uri35,
-                                    name: name35,
-                                    mime_type: mime_type35,
-                                    title: title35,
-                                    description: description35,
-                                    size: size35,
-                                } = e;
-                                let vec36 = (uri35.into_bytes()).into_boxed_slice();
-                                let ptr36 = vec36.as_ptr().cast::<u8>();
-                                let len36 = vec36.len();
-                                ::core::mem::forget(vec36);
-                                *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len36;
-                                *ptr.add(16).cast::<*mut u8>() = ptr36.cast_mut();
-                                let vec37 = (name35.into_bytes()).into_boxed_slice();
-                                let ptr37 = vec37.as_ptr().cast::<u8>();
-                                let len37 = vec37.len();
-                                ::core::mem::forget(vec37);
-                                *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len37;
-                                *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr37.cast_mut();
-                                match mime_type35 {
-                                    Some(e) => {
-                                        *ptr
-                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        let vec38 = (e.into_bytes()).into_boxed_slice();
-                                        let ptr38 = vec38.as_ptr().cast::<u8>();
-                                        let len38 = vec38.len();
-                                        ::core::mem::forget(vec38);
-                                        *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len38;
-                                        *ptr
-                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr38.cast_mut();
-                                    }
-                                    None => {
-                                        *ptr
-                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                                match title35 {
-                                    Some(e) => {
-                                        *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        let vec39 = (e.into_bytes()).into_boxed_slice();
-                                        let ptr39 = vec39.as_ptr().cast::<u8>();
-                                        let len39 = vec39.len();
-                                        ::core::mem::forget(vec39);
-                                        *ptr
-                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len39;
-                                        *ptr
-                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr39.cast_mut();
-                                    }
-                                    None => {
-                                        *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                                match description35 {
-                                    Some(e) => {
-                                        *ptr
-                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        let vec40 = (e.into_bytes()).into_boxed_slice();
-                                        let ptr40 = vec40.as_ptr().cast::<u8>();
-                                        let len40 = vec40.len();
-                                        ::core::mem::forget(vec40);
-                                        *ptr
-                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len40;
-                                        *ptr
-                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr40.cast_mut();
-                                    }
-                                    None => {
-                                        *ptr
-                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                                match size35 {
-                                    Some(e) => {
-                                        *ptr
-                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        *ptr
-                                            .add(32 + 12 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<i64>() = super::super::_rt::as_i64(e);
-                                    }
-                                    None => {
-                                        *ptr
-                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                            }
-                            V51::Resource(e) => {
-                                *ptr.add(8).cast::<u8>() = (4i32) as u8;
-                                let super::super::yosh::acp::content::EmbeddedResource {
-                                    resource: resource41,
-                                } = e;
-                                use super::super::yosh::acp::content::ResourceContents as V50;
-                                match resource41 {
-                                    V50::Text(e) => {
-                                        *ptr.add(16).cast::<u8>() = (0i32) as u8;
-                                        let super::super::yosh::acp::content::TextResourceContents {
-                                            uri: uri42,
-                                            mime_type: mime_type42,
-                                            text: text42,
-                                        } = e;
-                                        let vec43 = (uri42.into_bytes()).into_boxed_slice();
-                                        let ptr43 = vec43.as_ptr().cast::<u8>();
-                                        let len43 = vec43.len();
-                                        ::core::mem::forget(vec43);
-                                        *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len43;
-                                        *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr43.cast_mut();
-                                        match mime_type42 {
-                                            Some(e) => {
-                                                *ptr
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<u8>() = (1i32) as u8;
-                                                let vec44 = (e.into_bytes()).into_boxed_slice();
-                                                let ptr44 = vec44.as_ptr().cast::<u8>();
-                                                let len44 = vec44.len();
-                                                ::core::mem::forget(vec44);
-                                                *ptr
-                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len44;
-                                                *ptr
-                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>() = ptr44.cast_mut();
-                                            }
-                                            None => {
-                                                *ptr
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<u8>() = (0i32) as u8;
-                                            }
-                                        };
-                                        let vec45 = (text42.into_bytes()).into_boxed_slice();
-                                        let ptr45 = vec45.as_ptr().cast::<u8>();
-                                        let len45 = vec45.len();
-                                        ::core::mem::forget(vec45);
-                                        *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len45;
-                                        *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr45.cast_mut();
-                                    }
-                                    V50::Blob(e) => {
-                                        *ptr.add(16).cast::<u8>() = (1i32) as u8;
-                                        let super::super::yosh::acp::content::BlobResourceContents {
-                                            uri: uri46,
-                                            mime_type: mime_type46,
-                                            blob: blob46,
-                                        } = e;
-                                        let vec47 = (uri46.into_bytes()).into_boxed_slice();
-                                        let ptr47 = vec47.as_ptr().cast::<u8>();
-                                        let len47 = vec47.len();
-                                        ::core::mem::forget(vec47);
-                                        *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len47;
-                                        *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr47.cast_mut();
-                                        match mime_type46 {
-                                            Some(e) => {
-                                                *ptr
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<u8>() = (1i32) as u8;
-                                                let vec48 = (e.into_bytes()).into_boxed_slice();
-                                                let ptr48 = vec48.as_ptr().cast::<u8>();
-                                                let len48 = vec48.len();
-                                                ::core::mem::forget(vec48);
-                                                *ptr
-                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len48;
-                                                *ptr
-                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>() = ptr48.cast_mut();
-                                            }
-                                            None => {
-                                                *ptr
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<u8>() = (0i32) as u8;
-                                            }
-                                        };
-                                        let vec49 = (blob46.into_bytes()).into_boxed_slice();
-                                        let ptr49 = vec49.as_ptr().cast::<u8>();
-                                        let len49 = vec49.len();
-                                        ::core::mem::forget(vec49);
-                                        *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len49;
-                                        *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr49.cast_mut();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    V177::AgentThoughtChunk(e) => {
-                        *ptr.add(0).cast::<u8>() = (2i32) as u8;
-                        use super::super::yosh::acp::content::ContentBlock as V77;
-                        match e {
-                            V77::Text(e) => {
-                                *ptr.add(8).cast::<u8>() = (0i32) as u8;
-                                let super::super::yosh::acp::content::TextContent {
-                                    text: text52,
-                                } = e;
-                                let vec53 = (text52.into_bytes()).into_boxed_slice();
-                                let ptr53 = vec53.as_ptr().cast::<u8>();
-                                let len53 = vec53.len();
-                                ::core::mem::forget(vec53);
-                                *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len53;
-                                *ptr.add(16).cast::<*mut u8>() = ptr53.cast_mut();
-                            }
-                            V77::Image(e) => {
-                                *ptr.add(8).cast::<u8>() = (1i32) as u8;
-                                let super::super::yosh::acp::content::ImageContent {
-                                    data: data54,
-                                    mime_type: mime_type54,
-                                    uri: uri54,
-                                } = e;
-                                let vec55 = (data54.into_bytes()).into_boxed_slice();
-                                let ptr55 = vec55.as_ptr().cast::<u8>();
-                                let len55 = vec55.len();
-                                ::core::mem::forget(vec55);
-                                *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len55;
-                                *ptr.add(16).cast::<*mut u8>() = ptr55.cast_mut();
-                                let vec56 = (mime_type54.into_bytes()).into_boxed_slice();
-                                let ptr56 = vec56.as_ptr().cast::<u8>();
-                                let len56 = vec56.len();
-                                ::core::mem::forget(vec56);
-                                *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len56;
-                                *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr56.cast_mut();
-                                match uri54 {
-                                    Some(e) => {
-                                        *ptr
-                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        let vec57 = (e.into_bytes()).into_boxed_slice();
-                                        let ptr57 = vec57.as_ptr().cast::<u8>();
-                                        let len57 = vec57.len();
-                                        ::core::mem::forget(vec57);
-                                        *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len57;
-                                        *ptr
-                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr57.cast_mut();
-                                    }
-                                    None => {
-                                        *ptr
-                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                            }
-                            V77::Audio(e) => {
-                                *ptr.add(8).cast::<u8>() = (2i32) as u8;
-                                let super::super::yosh::acp::content::AudioContent {
-                                    data: data58,
-                                    mime_type: mime_type58,
-                                } = e;
-                                let vec59 = (data58.into_bytes()).into_boxed_slice();
-                                let ptr59 = vec59.as_ptr().cast::<u8>();
-                                let len59 = vec59.len();
-                                ::core::mem::forget(vec59);
-                                *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len59;
-                                *ptr.add(16).cast::<*mut u8>() = ptr59.cast_mut();
-                                let vec60 = (mime_type58.into_bytes()).into_boxed_slice();
-                                let ptr60 = vec60.as_ptr().cast::<u8>();
-                                let len60 = vec60.len();
-                                ::core::mem::forget(vec60);
-                                *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len60;
-                                *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr60.cast_mut();
-                            }
-                            V77::ResourceLink(e) => {
-                                *ptr.add(8).cast::<u8>() = (3i32) as u8;
-                                let super::super::yosh::acp::content::ResourceLink {
-                                    uri: uri61,
-                                    name: name61,
-                                    mime_type: mime_type61,
-                                    title: title61,
-                                    description: description61,
-                                    size: size61,
-                                } = e;
-                                let vec62 = (uri61.into_bytes()).into_boxed_slice();
-                                let ptr62 = vec62.as_ptr().cast::<u8>();
-                                let len62 = vec62.len();
-                                ::core::mem::forget(vec62);
-                                *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len62;
-                                *ptr.add(16).cast::<*mut u8>() = ptr62.cast_mut();
-                                let vec63 = (name61.into_bytes()).into_boxed_slice();
-                                let ptr63 = vec63.as_ptr().cast::<u8>();
-                                let len63 = vec63.len();
-                                ::core::mem::forget(vec63);
-                                *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len63;
-                                *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr63.cast_mut();
-                                match mime_type61 {
-                                    Some(e) => {
-                                        *ptr
-                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        let vec64 = (e.into_bytes()).into_boxed_slice();
-                                        let ptr64 = vec64.as_ptr().cast::<u8>();
-                                        let len64 = vec64.len();
-                                        ::core::mem::forget(vec64);
-                                        *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len64;
-                                        *ptr
-                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr64.cast_mut();
-                                    }
-                                    None => {
-                                        *ptr
-                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                                match title61 {
-                                    Some(e) => {
-                                        *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        let vec65 = (e.into_bytes()).into_boxed_slice();
-                                        let ptr65 = vec65.as_ptr().cast::<u8>();
-                                        let len65 = vec65.len();
-                                        ::core::mem::forget(vec65);
-                                        *ptr
-                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len65;
-                                        *ptr
-                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr65.cast_mut();
-                                    }
-                                    None => {
-                                        *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                                match description61 {
-                                    Some(e) => {
-                                        *ptr
-                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        let vec66 = (e.into_bytes()).into_boxed_slice();
-                                        let ptr66 = vec66.as_ptr().cast::<u8>();
-                                        let len66 = vec66.len();
-                                        ::core::mem::forget(vec66);
-                                        *ptr
-                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len66;
-                                        *ptr
-                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr66.cast_mut();
-                                    }
-                                    None => {
-                                        *ptr
-                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                                match size61 {
-                                    Some(e) => {
-                                        *ptr
-                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        *ptr
-                                            .add(32 + 12 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<i64>() = super::super::_rt::as_i64(e);
-                                    }
-                                    None => {
-                                        *ptr
-                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                            }
-                            V77::Resource(e) => {
-                                *ptr.add(8).cast::<u8>() = (4i32) as u8;
-                                let super::super::yosh::acp::content::EmbeddedResource {
-                                    resource: resource67,
-                                } = e;
-                                use super::super::yosh::acp::content::ResourceContents as V76;
-                                match resource67 {
-                                    V76::Text(e) => {
-                                        *ptr.add(16).cast::<u8>() = (0i32) as u8;
-                                        let super::super::yosh::acp::content::TextResourceContents {
-                                            uri: uri68,
-                                            mime_type: mime_type68,
-                                            text: text68,
-                                        } = e;
-                                        let vec69 = (uri68.into_bytes()).into_boxed_slice();
-                                        let ptr69 = vec69.as_ptr().cast::<u8>();
-                                        let len69 = vec69.len();
-                                        ::core::mem::forget(vec69);
-                                        *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len69;
-                                        *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr69.cast_mut();
-                                        match mime_type68 {
-                                            Some(e) => {
-                                                *ptr
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<u8>() = (1i32) as u8;
-                                                let vec70 = (e.into_bytes()).into_boxed_slice();
-                                                let ptr70 = vec70.as_ptr().cast::<u8>();
-                                                let len70 = vec70.len();
-                                                ::core::mem::forget(vec70);
-                                                *ptr
-                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len70;
-                                                *ptr
-                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>() = ptr70.cast_mut();
-                                            }
-                                            None => {
-                                                *ptr
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<u8>() = (0i32) as u8;
-                                            }
-                                        };
-                                        let vec71 = (text68.into_bytes()).into_boxed_slice();
-                                        let ptr71 = vec71.as_ptr().cast::<u8>();
-                                        let len71 = vec71.len();
-                                        ::core::mem::forget(vec71);
-                                        *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len71;
-                                        *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr71.cast_mut();
-                                    }
-                                    V76::Blob(e) => {
-                                        *ptr.add(16).cast::<u8>() = (1i32) as u8;
-                                        let super::super::yosh::acp::content::BlobResourceContents {
-                                            uri: uri72,
-                                            mime_type: mime_type72,
-                                            blob: blob72,
-                                        } = e;
-                                        let vec73 = (uri72.into_bytes()).into_boxed_slice();
-                                        let ptr73 = vec73.as_ptr().cast::<u8>();
-                                        let len73 = vec73.len();
-                                        ::core::mem::forget(vec73);
-                                        *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len73;
-                                        *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr73.cast_mut();
-                                        match mime_type72 {
-                                            Some(e) => {
-                                                *ptr
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<u8>() = (1i32) as u8;
-                                                let vec74 = (e.into_bytes()).into_boxed_slice();
-                                                let ptr74 = vec74.as_ptr().cast::<u8>();
-                                                let len74 = vec74.len();
-                                                ::core::mem::forget(vec74);
-                                                *ptr
-                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len74;
-                                                *ptr
-                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>() = ptr74.cast_mut();
-                                            }
-                                            None => {
-                                                *ptr
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<u8>() = (0i32) as u8;
-                                            }
-                                        };
-                                        let vec75 = (blob72.into_bytes()).into_boxed_slice();
-                                        let ptr75 = vec75.as_ptr().cast::<u8>();
-                                        let len75 = vec75.len();
-                                        ::core::mem::forget(vec75);
-                                        *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len75;
-                                        *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr75.cast_mut();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    V177::ToolCall(e) => {
-                        *ptr.add(0).cast::<u8>() = (3i32) as u8;
-                        let super::super::yosh::acp::tools::ToolCallSnapshot {
-                            id: id78,
-                            title: title78,
-                            kind: kind78,
-                            status: status78,
-                            content: content78,
-                            locations: locations78,
-                            raw_input: raw_input78,
-                            raw_output: raw_output78,
-                        } = e;
-                        let vec79 = (id78.into_bytes()).into_boxed_slice();
-                        let ptr79 = vec79.as_ptr().cast::<u8>();
-                        let len79 = vec79.len();
-                        ::core::mem::forget(vec79);
-                        *ptr
-                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>() = len79;
-                        *ptr.add(8).cast::<*mut u8>() = ptr79.cast_mut();
-                        let vec80 = (title78.into_bytes()).into_boxed_slice();
-                        let ptr80 = vec80.as_ptr().cast::<u8>();
-                        let len80 = vec80.len();
-                        ::core::mem::forget(vec80);
-                        *ptr
-                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>() = len80;
-                        *ptr
-                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                            .cast::<*mut u8>() = ptr80.cast_mut();
-                        *ptr
-                            .add(8 + 4 * ::core::mem::size_of::<*const u8>())
-                            .cast::<u8>() = (kind78.clone() as i32) as u8;
-                        *ptr
-                            .add(9 + 4 * ::core::mem::size_of::<*const u8>())
-                            .cast::<u8>() = (status78.clone() as i32) as u8;
-                        let vec113 = content78;
-                        let len113 = vec113.len();
-                        let layout113 = super::super::_rt::alloc::Layout::from_size_align(
-                                vec113.len()
-                                    * (40 + 12 * ::core::mem::size_of::<*const u8>()),
-                                8,
-                            )
-                            .unwrap();
-                        let (result113, _cleanup113) = wit_bindgen::rt::Cleanup::new(
-                            layout113,
-                        );
-                        if let Some(cleanup) = _cleanup113 {
-                            cleanup.forget();
-                        }
-                        for (i, e) in vec113.into_iter().enumerate() {
-                            let base = result113
-                                .add(i * (40 + 12 * ::core::mem::size_of::<*const u8>()));
-                            {
-                                use super::super::yosh::acp::tools::ToolCallContent as V112;
-                                match e {
-                                    V112::Content(e) => {
-                                        *base.add(0).cast::<u8>() = (0i32) as u8;
-                                        use super::super::yosh::acp::content::ContentBlock as V106;
-                                        match e {
-                                            V106::Text(e) => {
-                                                *base.add(8).cast::<u8>() = (0i32) as u8;
-                                                let super::super::yosh::acp::content::TextContent {
-                                                    text: text81,
-                                                } = e;
-                                                let vec82 = (text81.into_bytes()).into_boxed_slice();
-                                                let ptr82 = vec82.as_ptr().cast::<u8>();
-                                                let len82 = vec82.len();
-                                                ::core::mem::forget(vec82);
-                                                *base
-                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len82;
-                                                *base.add(16).cast::<*mut u8>() = ptr82.cast_mut();
-                                            }
-                                            V106::Image(e) => {
-                                                *base.add(8).cast::<u8>() = (1i32) as u8;
-                                                let super::super::yosh::acp::content::ImageContent {
-                                                    data: data83,
-                                                    mime_type: mime_type83,
-                                                    uri: uri83,
-                                                } = e;
-                                                let vec84 = (data83.into_bytes()).into_boxed_slice();
-                                                let ptr84 = vec84.as_ptr().cast::<u8>();
-                                                let len84 = vec84.len();
-                                                ::core::mem::forget(vec84);
-                                                *base
-                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len84;
-                                                *base.add(16).cast::<*mut u8>() = ptr84.cast_mut();
-                                                let vec85 = (mime_type83.into_bytes()).into_boxed_slice();
-                                                let ptr85 = vec85.as_ptr().cast::<u8>();
-                                                let len85 = vec85.len();
-                                                ::core::mem::forget(vec85);
-                                                *base
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len85;
-                                                *base
-                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>() = ptr85.cast_mut();
-                                                match uri83 {
-                                                    Some(e) => {
-                                                        *base
-                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (1i32) as u8;
-                                                        let vec86 = (e.into_bytes()).into_boxed_slice();
-                                                        let ptr86 = vec86.as_ptr().cast::<u8>();
-                                                        let len86 = vec86.len();
-                                                        ::core::mem::forget(vec86);
-                                                        *base
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>() = len86;
-                                                        *base
-                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>() = ptr86.cast_mut();
-                                                    }
-                                                    None => {
-                                                        *base
-                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (0i32) as u8;
-                                                    }
-                                                };
-                                            }
-                                            V106::Audio(e) => {
-                                                *base.add(8).cast::<u8>() = (2i32) as u8;
-                                                let super::super::yosh::acp::content::AudioContent {
-                                                    data: data87,
-                                                    mime_type: mime_type87,
-                                                } = e;
-                                                let vec88 = (data87.into_bytes()).into_boxed_slice();
-                                                let ptr88 = vec88.as_ptr().cast::<u8>();
-                                                let len88 = vec88.len();
-                                                ::core::mem::forget(vec88);
-                                                *base
-                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len88;
-                                                *base.add(16).cast::<*mut u8>() = ptr88.cast_mut();
-                                                let vec89 = (mime_type87.into_bytes()).into_boxed_slice();
-                                                let ptr89 = vec89.as_ptr().cast::<u8>();
-                                                let len89 = vec89.len();
-                                                ::core::mem::forget(vec89);
-                                                *base
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len89;
-                                                *base
-                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>() = ptr89.cast_mut();
-                                            }
-                                            V106::ResourceLink(e) => {
-                                                *base.add(8).cast::<u8>() = (3i32) as u8;
-                                                let super::super::yosh::acp::content::ResourceLink {
-                                                    uri: uri90,
-                                                    name: name90,
-                                                    mime_type: mime_type90,
-                                                    title: title90,
-                                                    description: description90,
-                                                    size: size90,
-                                                } = e;
-                                                let vec91 = (uri90.into_bytes()).into_boxed_slice();
-                                                let ptr91 = vec91.as_ptr().cast::<u8>();
-                                                let len91 = vec91.len();
-                                                ::core::mem::forget(vec91);
-                                                *base
-                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len91;
-                                                *base.add(16).cast::<*mut u8>() = ptr91.cast_mut();
-                                                let vec92 = (name90.into_bytes()).into_boxed_slice();
-                                                let ptr92 = vec92.as_ptr().cast::<u8>();
-                                                let len92 = vec92.len();
-                                                ::core::mem::forget(vec92);
-                                                *base
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len92;
-                                                *base
-                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>() = ptr92.cast_mut();
-                                                match mime_type90 {
-                                                    Some(e) => {
-                                                        *base
-                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (1i32) as u8;
-                                                        let vec93 = (e.into_bytes()).into_boxed_slice();
-                                                        let ptr93 = vec93.as_ptr().cast::<u8>();
-                                                        let len93 = vec93.len();
-                                                        ::core::mem::forget(vec93);
-                                                        *base
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>() = len93;
-                                                        *base
-                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>() = ptr93.cast_mut();
-                                                    }
-                                                    None => {
-                                                        *base
-                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (0i32) as u8;
-                                                    }
-                                                };
-                                                match title90 {
-                                                    Some(e) => {
-                                                        *base
-                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (1i32) as u8;
-                                                        let vec94 = (e.into_bytes()).into_boxed_slice();
-                                                        let ptr94 = vec94.as_ptr().cast::<u8>();
-                                                        let len94 = vec94.len();
-                                                        ::core::mem::forget(vec94);
-                                                        *base
-                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>() = len94;
-                                                        *base
-                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>() = ptr94.cast_mut();
-                                                    }
-                                                    None => {
-                                                        *base
-                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (0i32) as u8;
-                                                    }
-                                                };
-                                                match description90 {
-                                                    Some(e) => {
-                                                        *base
-                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (1i32) as u8;
-                                                        let vec95 = (e.into_bytes()).into_boxed_slice();
-                                                        let ptr95 = vec95.as_ptr().cast::<u8>();
-                                                        let len95 = vec95.len();
-                                                        ::core::mem::forget(vec95);
-                                                        *base
-                                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>() = len95;
-                                                        *base
-                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>() = ptr95.cast_mut();
-                                                    }
-                                                    None => {
-                                                        *base
-                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (0i32) as u8;
-                                                    }
-                                                };
-                                                match size90 {
-                                                    Some(e) => {
-                                                        *base
-                                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (1i32) as u8;
-                                                        *base
-                                                            .add(32 + 12 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<i64>() = super::super::_rt::as_i64(e);
-                                                    }
-                                                    None => {
-                                                        *base
-                                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (0i32) as u8;
-                                                    }
-                                                };
-                                            }
-                                            V106::Resource(e) => {
-                                                *base.add(8).cast::<u8>() = (4i32) as u8;
-                                                let super::super::yosh::acp::content::EmbeddedResource {
-                                                    resource: resource96,
-                                                } = e;
-                                                use super::super::yosh::acp::content::ResourceContents as V105;
-                                                match resource96 {
-                                                    V105::Text(e) => {
-                                                        *base.add(16).cast::<u8>() = (0i32) as u8;
-                                                        let super::super::yosh::acp::content::TextResourceContents {
-                                                            uri: uri97,
-                                                            mime_type: mime_type97,
-                                                            text: text97,
-                                                        } = e;
-                                                        let vec98 = (uri97.into_bytes()).into_boxed_slice();
-                                                        let ptr98 = vec98.as_ptr().cast::<u8>();
-                                                        let len98 = vec98.len();
-                                                        ::core::mem::forget(vec98);
-                                                        *base
-                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>() = len98;
-                                                        *base
-                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>() = ptr98.cast_mut();
-                                                        match mime_type97 {
-                                                            Some(e) => {
-                                                                *base
-                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>() = (1i32) as u8;
-                                                                let vec99 = (e.into_bytes()).into_boxed_slice();
-                                                                let ptr99 = vec99.as_ptr().cast::<u8>();
-                                                                let len99 = vec99.len();
-                                                                ::core::mem::forget(vec99);
-                                                                *base
-                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<usize>() = len99;
-                                                                *base
-                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<*mut u8>() = ptr99.cast_mut();
-                                                            }
-                                                            None => {
-                                                                *base
-                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>() = (0i32) as u8;
-                                                            }
-                                                        };
-                                                        let vec100 = (text97.into_bytes()).into_boxed_slice();
-                                                        let ptr100 = vec100.as_ptr().cast::<u8>();
-                                                        let len100 = vec100.len();
-                                                        ::core::mem::forget(vec100);
-                                                        *base
-                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>() = len100;
-                                                        *base
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>() = ptr100.cast_mut();
-                                                    }
-                                                    V105::Blob(e) => {
-                                                        *base.add(16).cast::<u8>() = (1i32) as u8;
-                                                        let super::super::yosh::acp::content::BlobResourceContents {
-                                                            uri: uri101,
-                                                            mime_type: mime_type101,
-                                                            blob: blob101,
-                                                        } = e;
-                                                        let vec102 = (uri101.into_bytes()).into_boxed_slice();
-                                                        let ptr102 = vec102.as_ptr().cast::<u8>();
-                                                        let len102 = vec102.len();
-                                                        ::core::mem::forget(vec102);
-                                                        *base
-                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>() = len102;
-                                                        *base
-                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>() = ptr102.cast_mut();
-                                                        match mime_type101 {
-                                                            Some(e) => {
-                                                                *base
-                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>() = (1i32) as u8;
-                                                                let vec103 = (e.into_bytes()).into_boxed_slice();
-                                                                let ptr103 = vec103.as_ptr().cast::<u8>();
-                                                                let len103 = vec103.len();
-                                                                ::core::mem::forget(vec103);
-                                                                *base
-                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<usize>() = len103;
-                                                                *base
-                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<*mut u8>() = ptr103.cast_mut();
-                                                            }
-                                                            None => {
-                                                                *base
-                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>() = (0i32) as u8;
-                                                            }
-                                                        };
-                                                        let vec104 = (blob101.into_bytes()).into_boxed_slice();
-                                                        let ptr104 = vec104.as_ptr().cast::<u8>();
-                                                        let len104 = vec104.len();
-                                                        ::core::mem::forget(vec104);
-                                                        *base
-                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>() = len104;
-                                                        *base
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>() = ptr104.cast_mut();
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    V112::Diff(e) => {
-                                        *base.add(0).cast::<u8>() = (1i32) as u8;
-                                        let super::super::yosh::acp::tools::Diff {
-                                            path: path107,
-                                            old_text: old_text107,
-                                            new_text: new_text107,
-                                        } = e;
-                                        let vec108 = (path107.into_bytes()).into_boxed_slice();
-                                        let ptr108 = vec108.as_ptr().cast::<u8>();
-                                        let len108 = vec108.len();
-                                        ::core::mem::forget(vec108);
-                                        *base
-                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len108;
-                                        *base.add(8).cast::<*mut u8>() = ptr108.cast_mut();
-                                        match old_text107 {
-                                            Some(e) => {
-                                                *base
-                                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<u8>() = (1i32) as u8;
-                                                let vec109 = (e.into_bytes()).into_boxed_slice();
-                                                let ptr109 = vec109.as_ptr().cast::<u8>();
-                                                let len109 = vec109.len();
-                                                ::core::mem::forget(vec109);
-                                                *base
-                                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len109;
-                                                *base
-                                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>() = ptr109.cast_mut();
-                                            }
-                                            None => {
-                                                *base
-                                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<u8>() = (0i32) as u8;
-                                            }
-                                        };
-                                        let vec110 = (new_text107.into_bytes()).into_boxed_slice();
-                                        let ptr110 = vec110.as_ptr().cast::<u8>();
-                                        let len110 = vec110.len();
-                                        ::core::mem::forget(vec110);
-                                        *base
-                                            .add(8 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len110;
-                                        *base
-                                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr110.cast_mut();
-                                    }
-                                    V112::Terminal(e) => {
-                                        *base.add(0).cast::<u8>() = (2i32) as u8;
-                                        let vec111 = (e.into_bytes()).into_boxed_slice();
-                                        let ptr111 = vec111.as_ptr().cast::<u8>();
-                                        let len111 = vec111.len();
-                                        ::core::mem::forget(vec111);
-                                        *base
-                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len111;
-                                        *base.add(8).cast::<*mut u8>() = ptr111.cast_mut();
-                                    }
-                                }
-                            }
-                        }
-                        *ptr
-                            .add(8 + 6 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>() = len113;
-                        *ptr
-                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
-                            .cast::<*mut u8>() = result113;
-                        let vec116 = locations78;
-                        let len116 = vec116.len();
-                        let layout116 = super::super::_rt::alloc::Layout::from_size_align(
-                                vec116.len()
-                                    * (8 + 2 * ::core::mem::size_of::<*const u8>()),
-                                ::core::mem::size_of::<*const u8>(),
-                            )
-                            .unwrap();
-                        let (result116, _cleanup116) = wit_bindgen::rt::Cleanup::new(
-                            layout116,
-                        );
-                        if let Some(cleanup) = _cleanup116 {
-                            cleanup.forget();
-                        }
-                        for (i, e) in vec116.into_iter().enumerate() {
-                            let base = result116
-                                .add(i * (8 + 2 * ::core::mem::size_of::<*const u8>()));
-                            {
-                                let super::super::yosh::acp::tools::ToolCallLocation {
-                                    path: path114,
-                                    line: line114,
-                                } = e;
-                                let vec115 = (path114.into_bytes()).into_boxed_slice();
-                                let ptr115 = vec115.as_ptr().cast::<u8>();
-                                let len115 = vec115.len();
-                                ::core::mem::forget(vec115);
-                                *base
-                                    .add(::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len115;
-                                *base.add(0).cast::<*mut u8>() = ptr115.cast_mut();
-                                match line114 {
-                                    Some(e) => {
-                                        *base
-                                            .add(2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        *base
-                                            .add(4 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<i32>() = super::super::_rt::as_i32(e);
-                                    }
-                                    None => {
-                                        *base
-                                            .add(2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                            }
-                        }
-                        *ptr
-                            .add(8 + 8 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>() = len116;
-                        *ptr
-                            .add(8 + 7 * ::core::mem::size_of::<*const u8>())
-                            .cast::<*mut u8>() = result116;
-                        match raw_input78 {
-                            Some(e) => {
-                                *ptr
-                                    .add(8 + 9 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>() = (1i32) as u8;
-                                let vec117 = (e.into_bytes()).into_boxed_slice();
-                                let ptr117 = vec117.as_ptr().cast::<u8>();
-                                let len117 = vec117.len();
-                                ::core::mem::forget(vec117);
-                                *ptr
-                                    .add(8 + 11 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len117;
-                                *ptr
-                                    .add(8 + 10 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr117.cast_mut();
-                            }
-                            None => {
-                                *ptr
-                                    .add(8 + 9 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>() = (0i32) as u8;
-                            }
-                        };
-                        match raw_output78 {
-                            Some(e) => {
-                                *ptr
-                                    .add(8 + 12 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>() = (1i32) as u8;
-                                let vec118 = (e.into_bytes()).into_boxed_slice();
-                                let ptr118 = vec118.as_ptr().cast::<u8>();
-                                let len118 = vec118.len();
-                                ::core::mem::forget(vec118);
-                                *ptr
-                                    .add(8 + 14 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len118;
-                                *ptr
-                                    .add(8 + 13 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr118.cast_mut();
-                            }
-                            None => {
-                                *ptr
-                                    .add(8 + 12 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>() = (0i32) as u8;
-                            }
-                        };
-                    }
-                    V177::ToolCallUpdate(e) => {
-                        *ptr.add(0).cast::<u8>() = (4i32) as u8;
-                        let super::super::yosh::acp::tools::ToolCallSnapshot {
-                            id: id119,
-                            title: title119,
-                            kind: kind119,
-                            status: status119,
-                            content: content119,
-                            locations: locations119,
-                            raw_input: raw_input119,
-                            raw_output: raw_output119,
-                        } = e;
-                        let vec120 = (id119.into_bytes()).into_boxed_slice();
-                        let ptr120 = vec120.as_ptr().cast::<u8>();
-                        let len120 = vec120.len();
-                        ::core::mem::forget(vec120);
-                        *ptr
-                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>() = len120;
-                        *ptr.add(8).cast::<*mut u8>() = ptr120.cast_mut();
-                        let vec121 = (title119.into_bytes()).into_boxed_slice();
-                        let ptr121 = vec121.as_ptr().cast::<u8>();
-                        let len121 = vec121.len();
-                        ::core::mem::forget(vec121);
-                        *ptr
-                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>() = len121;
-                        *ptr
-                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                            .cast::<*mut u8>() = ptr121.cast_mut();
-                        *ptr
-                            .add(8 + 4 * ::core::mem::size_of::<*const u8>())
-                            .cast::<u8>() = (kind119.clone() as i32) as u8;
-                        *ptr
-                            .add(9 + 4 * ::core::mem::size_of::<*const u8>())
-                            .cast::<u8>() = (status119.clone() as i32) as u8;
-                        let vec154 = content119;
-                        let len154 = vec154.len();
-                        let layout154 = super::super::_rt::alloc::Layout::from_size_align(
-                                vec154.len()
-                                    * (40 + 12 * ::core::mem::size_of::<*const u8>()),
-                                8,
-                            )
-                            .unwrap();
-                        let (result154, _cleanup154) = wit_bindgen::rt::Cleanup::new(
-                            layout154,
-                        );
-                        if let Some(cleanup) = _cleanup154 {
-                            cleanup.forget();
-                        }
-                        for (i, e) in vec154.into_iter().enumerate() {
-                            let base = result154
-                                .add(i * (40 + 12 * ::core::mem::size_of::<*const u8>()));
-                            {
-                                use super::super::yosh::acp::tools::ToolCallContent as V153;
-                                match e {
-                                    V153::Content(e) => {
-                                        *base.add(0).cast::<u8>() = (0i32) as u8;
-                                        use super::super::yosh::acp::content::ContentBlock as V147;
-                                        match e {
-                                            V147::Text(e) => {
-                                                *base.add(8).cast::<u8>() = (0i32) as u8;
-                                                let super::super::yosh::acp::content::TextContent {
-                                                    text: text122,
-                                                } = e;
-                                                let vec123 = (text122.into_bytes()).into_boxed_slice();
-                                                let ptr123 = vec123.as_ptr().cast::<u8>();
-                                                let len123 = vec123.len();
-                                                ::core::mem::forget(vec123);
-                                                *base
-                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len123;
-                                                *base.add(16).cast::<*mut u8>() = ptr123.cast_mut();
-                                            }
-                                            V147::Image(e) => {
-                                                *base.add(8).cast::<u8>() = (1i32) as u8;
-                                                let super::super::yosh::acp::content::ImageContent {
-                                                    data: data124,
-                                                    mime_type: mime_type124,
-                                                    uri: uri124,
-                                                } = e;
-                                                let vec125 = (data124.into_bytes()).into_boxed_slice();
-                                                let ptr125 = vec125.as_ptr().cast::<u8>();
-                                                let len125 = vec125.len();
-                                                ::core::mem::forget(vec125);
-                                                *base
-                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len125;
-                                                *base.add(16).cast::<*mut u8>() = ptr125.cast_mut();
-                                                let vec126 = (mime_type124.into_bytes()).into_boxed_slice();
-                                                let ptr126 = vec126.as_ptr().cast::<u8>();
-                                                let len126 = vec126.len();
-                                                ::core::mem::forget(vec126);
-                                                *base
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len126;
-                                                *base
-                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>() = ptr126.cast_mut();
-                                                match uri124 {
-                                                    Some(e) => {
-                                                        *base
-                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (1i32) as u8;
-                                                        let vec127 = (e.into_bytes()).into_boxed_slice();
-                                                        let ptr127 = vec127.as_ptr().cast::<u8>();
-                                                        let len127 = vec127.len();
-                                                        ::core::mem::forget(vec127);
-                                                        *base
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>() = len127;
-                                                        *base
-                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>() = ptr127.cast_mut();
-                                                    }
-                                                    None => {
-                                                        *base
-                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (0i32) as u8;
-                                                    }
-                                                };
-                                            }
-                                            V147::Audio(e) => {
-                                                *base.add(8).cast::<u8>() = (2i32) as u8;
-                                                let super::super::yosh::acp::content::AudioContent {
-                                                    data: data128,
-                                                    mime_type: mime_type128,
-                                                } = e;
-                                                let vec129 = (data128.into_bytes()).into_boxed_slice();
-                                                let ptr129 = vec129.as_ptr().cast::<u8>();
-                                                let len129 = vec129.len();
-                                                ::core::mem::forget(vec129);
-                                                *base
-                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len129;
-                                                *base.add(16).cast::<*mut u8>() = ptr129.cast_mut();
-                                                let vec130 = (mime_type128.into_bytes()).into_boxed_slice();
-                                                let ptr130 = vec130.as_ptr().cast::<u8>();
-                                                let len130 = vec130.len();
-                                                ::core::mem::forget(vec130);
-                                                *base
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len130;
-                                                *base
-                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>() = ptr130.cast_mut();
-                                            }
-                                            V147::ResourceLink(e) => {
-                                                *base.add(8).cast::<u8>() = (3i32) as u8;
-                                                let super::super::yosh::acp::content::ResourceLink {
-                                                    uri: uri131,
-                                                    name: name131,
-                                                    mime_type: mime_type131,
-                                                    title: title131,
-                                                    description: description131,
-                                                    size: size131,
-                                                } = e;
-                                                let vec132 = (uri131.into_bytes()).into_boxed_slice();
-                                                let ptr132 = vec132.as_ptr().cast::<u8>();
-                                                let len132 = vec132.len();
-                                                ::core::mem::forget(vec132);
-                                                *base
-                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len132;
-                                                *base.add(16).cast::<*mut u8>() = ptr132.cast_mut();
-                                                let vec133 = (name131.into_bytes()).into_boxed_slice();
-                                                let ptr133 = vec133.as_ptr().cast::<u8>();
-                                                let len133 = vec133.len();
-                                                ::core::mem::forget(vec133);
-                                                *base
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len133;
-                                                *base
-                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>() = ptr133.cast_mut();
-                                                match mime_type131 {
-                                                    Some(e) => {
-                                                        *base
-                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (1i32) as u8;
-                                                        let vec134 = (e.into_bytes()).into_boxed_slice();
-                                                        let ptr134 = vec134.as_ptr().cast::<u8>();
-                                                        let len134 = vec134.len();
-                                                        ::core::mem::forget(vec134);
-                                                        *base
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>() = len134;
-                                                        *base
-                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>() = ptr134.cast_mut();
-                                                    }
-                                                    None => {
-                                                        *base
-                                                            .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (0i32) as u8;
-                                                    }
-                                                };
-                                                match title131 {
-                                                    Some(e) => {
-                                                        *base
-                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (1i32) as u8;
-                                                        let vec135 = (e.into_bytes()).into_boxed_slice();
-                                                        let ptr135 = vec135.as_ptr().cast::<u8>();
-                                                        let len135 = vec135.len();
-                                                        ::core::mem::forget(vec135);
-                                                        *base
-                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>() = len135;
-                                                        *base
-                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>() = ptr135.cast_mut();
-                                                    }
-                                                    None => {
-                                                        *base
-                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (0i32) as u8;
-                                                    }
-                                                };
-                                                match description131 {
-                                                    Some(e) => {
-                                                        *base
-                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (1i32) as u8;
-                                                        let vec136 = (e.into_bytes()).into_boxed_slice();
-                                                        let ptr136 = vec136.as_ptr().cast::<u8>();
-                                                        let len136 = vec136.len();
-                                                        ::core::mem::forget(vec136);
-                                                        *base
-                                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>() = len136;
-                                                        *base
-                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>() = ptr136.cast_mut();
-                                                    }
-                                                    None => {
-                                                        *base
-                                                            .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (0i32) as u8;
-                                                    }
-                                                };
-                                                match size131 {
-                                                    Some(e) => {
-                                                        *base
-                                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (1i32) as u8;
-                                                        *base
-                                                            .add(32 + 12 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<i64>() = super::super::_rt::as_i64(e);
-                                                    }
-                                                    None => {
-                                                        *base
-                                                            .add(24 + 12 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<u8>() = (0i32) as u8;
-                                                    }
-                                                };
-                                            }
-                                            V147::Resource(e) => {
-                                                *base.add(8).cast::<u8>() = (4i32) as u8;
-                                                let super::super::yosh::acp::content::EmbeddedResource {
-                                                    resource: resource137,
-                                                } = e;
-                                                use super::super::yosh::acp::content::ResourceContents as V146;
-                                                match resource137 {
-                                                    V146::Text(e) => {
-                                                        *base.add(16).cast::<u8>() = (0i32) as u8;
-                                                        let super::super::yosh::acp::content::TextResourceContents {
-                                                            uri: uri138,
-                                                            mime_type: mime_type138,
-                                                            text: text138,
-                                                        } = e;
-                                                        let vec139 = (uri138.into_bytes()).into_boxed_slice();
-                                                        let ptr139 = vec139.as_ptr().cast::<u8>();
-                                                        let len139 = vec139.len();
-                                                        ::core::mem::forget(vec139);
-                                                        *base
-                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>() = len139;
-                                                        *base
-                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>() = ptr139.cast_mut();
-                                                        match mime_type138 {
-                                                            Some(e) => {
-                                                                *base
-                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>() = (1i32) as u8;
-                                                                let vec140 = (e.into_bytes()).into_boxed_slice();
-                                                                let ptr140 = vec140.as_ptr().cast::<u8>();
-                                                                let len140 = vec140.len();
-                                                                ::core::mem::forget(vec140);
-                                                                *base
-                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<usize>() = len140;
-                                                                *base
-                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<*mut u8>() = ptr140.cast_mut();
-                                                            }
-                                                            None => {
-                                                                *base
-                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>() = (0i32) as u8;
-                                                            }
-                                                        };
-                                                        let vec141 = (text138.into_bytes()).into_boxed_slice();
-                                                        let ptr141 = vec141.as_ptr().cast::<u8>();
-                                                        let len141 = vec141.len();
-                                                        ::core::mem::forget(vec141);
-                                                        *base
-                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>() = len141;
-                                                        *base
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>() = ptr141.cast_mut();
-                                                    }
-                                                    V146::Blob(e) => {
-                                                        *base.add(16).cast::<u8>() = (1i32) as u8;
-                                                        let super::super::yosh::acp::content::BlobResourceContents {
-                                                            uri: uri142,
-                                                            mime_type: mime_type142,
-                                                            blob: blob142,
-                                                        } = e;
-                                                        let vec143 = (uri142.into_bytes()).into_boxed_slice();
-                                                        let ptr143 = vec143.as_ptr().cast::<u8>();
-                                                        let len143 = vec143.len();
-                                                        ::core::mem::forget(vec143);
-                                                        *base
-                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>() = len143;
-                                                        *base
-                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>() = ptr143.cast_mut();
-                                                        match mime_type142 {
-                                                            Some(e) => {
-                                                                *base
-                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>() = (1i32) as u8;
-                                                                let vec144 = (e.into_bytes()).into_boxed_slice();
-                                                                let ptr144 = vec144.as_ptr().cast::<u8>();
-                                                                let len144 = vec144.len();
-                                                                ::core::mem::forget(vec144);
-                                                                *base
-                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<usize>() = len144;
-                                                                *base
-                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<*mut u8>() = ptr144.cast_mut();
-                                                            }
-                                                            None => {
-                                                                *base
-                                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<u8>() = (0i32) as u8;
-                                                            }
-                                                        };
-                                                        let vec145 = (blob142.into_bytes()).into_boxed_slice();
-                                                        let ptr145 = vec145.as_ptr().cast::<u8>();
-                                                        let len145 = vec145.len();
-                                                        ::core::mem::forget(vec145);
-                                                        *base
-                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>() = len145;
-                                                        *base
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>() = ptr145.cast_mut();
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    V153::Diff(e) => {
-                                        *base.add(0).cast::<u8>() = (1i32) as u8;
-                                        let super::super::yosh::acp::tools::Diff {
-                                            path: path148,
-                                            old_text: old_text148,
-                                            new_text: new_text148,
-                                        } = e;
-                                        let vec149 = (path148.into_bytes()).into_boxed_slice();
-                                        let ptr149 = vec149.as_ptr().cast::<u8>();
-                                        let len149 = vec149.len();
-                                        ::core::mem::forget(vec149);
-                                        *base
-                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len149;
-                                        *base.add(8).cast::<*mut u8>() = ptr149.cast_mut();
-                                        match old_text148 {
-                                            Some(e) => {
-                                                *base
-                                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<u8>() = (1i32) as u8;
-                                                let vec150 = (e.into_bytes()).into_boxed_slice();
-                                                let ptr150 = vec150.as_ptr().cast::<u8>();
-                                                let len150 = vec150.len();
-                                                ::core::mem::forget(vec150);
-                                                *base
-                                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>() = len150;
-                                                *base
-                                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>() = ptr150.cast_mut();
-                                            }
-                                            None => {
-                                                *base
-                                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<u8>() = (0i32) as u8;
-                                            }
-                                        };
-                                        let vec151 = (new_text148.into_bytes()).into_boxed_slice();
-                                        let ptr151 = vec151.as_ptr().cast::<u8>();
-                                        let len151 = vec151.len();
-                                        ::core::mem::forget(vec151);
-                                        *base
-                                            .add(8 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len151;
-                                        *base
-                                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr151.cast_mut();
-                                    }
-                                    V153::Terminal(e) => {
-                                        *base.add(0).cast::<u8>() = (2i32) as u8;
-                                        let vec152 = (e.into_bytes()).into_boxed_slice();
-                                        let ptr152 = vec152.as_ptr().cast::<u8>();
-                                        let len152 = vec152.len();
-                                        ::core::mem::forget(vec152);
-                                        *base
-                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len152;
-                                        *base.add(8).cast::<*mut u8>() = ptr152.cast_mut();
-                                    }
-                                }
-                            }
-                        }
-                        *ptr
-                            .add(8 + 6 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>() = len154;
-                        *ptr
-                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
-                            .cast::<*mut u8>() = result154;
-                        let vec157 = locations119;
-                        let len157 = vec157.len();
-                        let layout157 = super::super::_rt::alloc::Layout::from_size_align(
-                                vec157.len()
-                                    * (8 + 2 * ::core::mem::size_of::<*const u8>()),
-                                ::core::mem::size_of::<*const u8>(),
-                            )
-                            .unwrap();
-                        let (result157, _cleanup157) = wit_bindgen::rt::Cleanup::new(
-                            layout157,
-                        );
-                        if let Some(cleanup) = _cleanup157 {
-                            cleanup.forget();
-                        }
-                        for (i, e) in vec157.into_iter().enumerate() {
-                            let base = result157
-                                .add(i * (8 + 2 * ::core::mem::size_of::<*const u8>()));
-                            {
-                                let super::super::yosh::acp::tools::ToolCallLocation {
-                                    path: path155,
-                                    line: line155,
-                                } = e;
-                                let vec156 = (path155.into_bytes()).into_boxed_slice();
-                                let ptr156 = vec156.as_ptr().cast::<u8>();
-                                let len156 = vec156.len();
-                                ::core::mem::forget(vec156);
-                                *base
-                                    .add(::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len156;
-                                *base.add(0).cast::<*mut u8>() = ptr156.cast_mut();
-                                match line155 {
-                                    Some(e) => {
-                                        *base
-                                            .add(2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        *base
-                                            .add(4 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<i32>() = super::super::_rt::as_i32(e);
-                                    }
-                                    None => {
-                                        *base
-                                            .add(2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                            }
-                        }
-                        *ptr
-                            .add(8 + 8 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>() = len157;
-                        *ptr
-                            .add(8 + 7 * ::core::mem::size_of::<*const u8>())
-                            .cast::<*mut u8>() = result157;
-                        match raw_input119 {
-                            Some(e) => {
-                                *ptr
-                                    .add(8 + 9 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>() = (1i32) as u8;
-                                let vec158 = (e.into_bytes()).into_boxed_slice();
-                                let ptr158 = vec158.as_ptr().cast::<u8>();
-                                let len158 = vec158.len();
-                                ::core::mem::forget(vec158);
-                                *ptr
-                                    .add(8 + 11 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len158;
-                                *ptr
-                                    .add(8 + 10 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr158.cast_mut();
-                            }
-                            None => {
-                                *ptr
-                                    .add(8 + 9 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>() = (0i32) as u8;
-                            }
-                        };
-                        match raw_output119 {
-                            Some(e) => {
-                                *ptr
-                                    .add(8 + 12 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>() = (1i32) as u8;
-                                let vec159 = (e.into_bytes()).into_boxed_slice();
-                                let ptr159 = vec159.as_ptr().cast::<u8>();
-                                let len159 = vec159.len();
-                                ::core::mem::forget(vec159);
-                                *ptr
-                                    .add(8 + 14 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len159;
-                                *ptr
-                                    .add(8 + 13 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr159.cast_mut();
-                            }
-                            None => {
-                                *ptr
-                                    .add(8 + 12 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>() = (0i32) as u8;
-                            }
-                        };
-                    }
-                    V177::Plan(e) => {
-                        *ptr.add(0).cast::<u8>() = (5i32) as u8;
-                        let super::super::yosh::acp::tools::Plan {
-                            entries: entries160,
-                        } = e;
-                        let vec163 = entries160;
-                        let len163 = vec163.len();
-                        let layout163 = super::super::_rt::alloc::Layout::from_size_align(
-                                vec163.len() * (3 * ::core::mem::size_of::<*const u8>()),
-                                ::core::mem::size_of::<*const u8>(),
-                            )
-                            .unwrap();
-                        let (result163, _cleanup163) = wit_bindgen::rt::Cleanup::new(
-                            layout163,
-                        );
-                        if let Some(cleanup) = _cleanup163 {
-                            cleanup.forget();
-                        }
-                        for (i, e) in vec163.into_iter().enumerate() {
-                            let base = result163
-                                .add(i * (3 * ::core::mem::size_of::<*const u8>()));
-                            {
-                                let super::super::yosh::acp::tools::PlanEntry {
-                                    content: content161,
-                                    priority: priority161,
-                                    status: status161,
-                                } = e;
-                                let vec162 = (content161.into_bytes()).into_boxed_slice();
-                                let ptr162 = vec162.as_ptr().cast::<u8>();
-                                let len162 = vec162.len();
-                                ::core::mem::forget(vec162);
-                                *base
-                                    .add(::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len162;
-                                *base.add(0).cast::<*mut u8>() = ptr162.cast_mut();
-                                *base
-                                    .add(2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>() = (priority161.clone() as i32) as u8;
-                                *base
-                                    .add(1 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>() = (status161.clone() as i32) as u8;
-                            }
-                        }
-                        *ptr
-                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>() = len163;
-                        *ptr.add(8).cast::<*mut u8>() = result163;
-                    }
-                    V177::CurrentModeUpdate(e) => {
-                        *ptr.add(0).cast::<u8>() = (6i32) as u8;
-                        let vec164 = (e.into_bytes()).into_boxed_slice();
-                        let ptr164 = vec164.as_ptr().cast::<u8>();
-                        let len164 = vec164.len();
-                        ::core::mem::forget(vec164);
-                        *ptr
-                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>() = len164;
-                        *ptr.add(8).cast::<*mut u8>() = ptr164.cast_mut();
-                    }
-                    V177::SessionInfoUpdate(e) => {
-                        *ptr.add(0).cast::<u8>() = (7i32) as u8;
-                        let super::super::yosh::acp::sessions::SessionInfoUpdate {
-                            title: title165,
-                            updated_at: updated_at165,
-                        } = e;
-                        match title165 {
-                            Some(e) => {
-                                *ptr.add(8).cast::<u8>() = (1i32) as u8;
-                                let vec166 = (e.into_bytes()).into_boxed_slice();
-                                let ptr166 = vec166.as_ptr().cast::<u8>();
-                                let len166 = vec166.len();
-                                ::core::mem::forget(vec166);
-                                *ptr
-                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len166;
-                                *ptr
-                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr166.cast_mut();
-                            }
-                            None => {
-                                *ptr.add(8).cast::<u8>() = (0i32) as u8;
-                            }
-                        };
-                        match updated_at165 {
-                            Some(e) => {
-                                *ptr
-                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>() = (1i32) as u8;
-                                let vec167 = (e.into_bytes()).into_boxed_slice();
-                                let ptr167 = vec167.as_ptr().cast::<u8>();
-                                let len167 = vec167.len();
-                                ::core::mem::forget(vec167);
-                                *ptr
-                                    .add(8 + 5 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len167;
-                                *ptr
-                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr167.cast_mut();
-                            }
-                            None => {
-                                *ptr
-                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<u8>() = (0i32) as u8;
-                            }
-                        };
-                    }
-                    V177::AvailableCommandsUpdate(e) => {
-                        *ptr.add(0).cast::<u8>() = (8i32) as u8;
-                        let vec173 = e;
-                        let len173 = vec173.len();
-                        let layout173 = super::super::_rt::alloc::Layout::from_size_align(
-                                vec173.len() * (7 * ::core::mem::size_of::<*const u8>()),
-                                ::core::mem::size_of::<*const u8>(),
-                            )
-                            .unwrap();
-                        let (result173, _cleanup173) = wit_bindgen::rt::Cleanup::new(
-                            layout173,
-                        );
-                        if let Some(cleanup) = _cleanup173 {
-                            cleanup.forget();
-                        }
-                        for (i, e) in vec173.into_iter().enumerate() {
-                            let base = result173
-                                .add(i * (7 * ::core::mem::size_of::<*const u8>()));
-                            {
-                                let super::super::yosh::acp::prompts::AvailableCommand {
-                                    name: name168,
-                                    description: description168,
-                                    input: input168,
-                                } = e;
-                                let vec169 = (name168.into_bytes()).into_boxed_slice();
-                                let ptr169 = vec169.as_ptr().cast::<u8>();
-                                let len169 = vec169.len();
-                                ::core::mem::forget(vec169);
-                                *base
-                                    .add(::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len169;
-                                *base.add(0).cast::<*mut u8>() = ptr169.cast_mut();
-                                let vec170 = (description168.into_bytes())
-                                    .into_boxed_slice();
-                                let ptr170 = vec170.as_ptr().cast::<u8>();
-                                let len170 = vec170.len();
-                                ::core::mem::forget(vec170);
-                                *base
-                                    .add(3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len170;
-                                *base
-                                    .add(2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>() = ptr170.cast_mut();
-                                match input168 {
-                                    Some(e) => {
-                                        *base
-                                            .add(4 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (1i32) as u8;
-                                        let super::super::yosh::acp::prompts::AvailableCommandInput {
-                                            hint: hint171,
-                                        } = e;
-                                        let vec172 = (hint171.into_bytes()).into_boxed_slice();
-                                        let ptr172 = vec172.as_ptr().cast::<u8>();
-                                        let len172 = vec172.len();
-                                        ::core::mem::forget(vec172);
-                                        *base
-                                            .add(6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>() = len172;
-                                        *base
-                                            .add(5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>() = ptr172.cast_mut();
-                                    }
-                                    None => {
-                                        *base
-                                            .add(4 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<u8>() = (0i32) as u8;
-                                    }
-                                };
-                            }
-                        }
-                        *ptr
-                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>() = len173;
-                        *ptr.add(8).cast::<*mut u8>() = result173;
-                    }
-                    V177::UsageUpdate(e) => {
-                        *ptr.add(0).cast::<u8>() = (9i32) as u8;
-                        let super::super::yosh::acp::prompts::UsageUpdate {
-                            used: used174,
-                            size: size174,
-                            cost: cost174,
-                        } = e;
-                        *ptr.add(8).cast::<i64>() = super::super::_rt::as_i64(used174);
-                        *ptr.add(16).cast::<i64>() = super::super::_rt::as_i64(size174);
-                        match cost174 {
-                            Some(e) => {
-                                *ptr.add(24).cast::<u8>() = (1i32) as u8;
-                                let super::super::yosh::acp::prompts::UsageCost {
-                                    amount: amount175,
-                                    currency: currency175,
-                                } = e;
-                                *ptr.add(32).cast::<f64>() = super::super::_rt::as_f64(
-                                    amount175,
-                                );
-                                let vec176 = (currency175.into_bytes()).into_boxed_slice();
-                                let ptr176 = vec176.as_ptr().cast::<u8>();
-                                let len176 = vec176.len();
-                                ::core::mem::forget(vec176);
-                                *ptr
-                                    .add(40 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>() = len176;
-                                *ptr.add(40).cast::<*mut u8>() = ptr176.cast_mut();
-                            }
-                            None => {
-                                *ptr.add(24).cast::<u8>() = (0i32) as u8;
-                            }
-                        };
-                    }
-                }
-            }
-        }
-        unsafe fn dealloc_lists(ptr: *mut u8) {
-            unsafe {
-                let l0 = i32::from(*ptr.add(0).cast::<u8>());
-                match l0 {
-                    0 => {
-                        let l1 = i32::from(*ptr.add(8).cast::<u8>());
-                        match l1 {
-                            0 => {
-                                let l2 = *ptr.add(16).cast::<*mut u8>();
-                                let l3 = *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l2, l3, 1);
-                            }
-                            1 => {
-                                let l4 = *ptr.add(16).cast::<*mut u8>();
-                                let l5 = *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l4, l5, 1);
-                                let l6 = *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>();
-                                let l7 = *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l6, l7, 1);
-                                let l8 = i32::from(
-                                    *ptr
-                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>(),
-                                );
-                                match l8 {
-                                    0 => {}
-                                    _ => {
-                                        let l9 = *ptr
-                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l10 = *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l9, l10, 1);
-                                    }
-                                }
-                            }
-                            2 => {
-                                let l11 = *ptr.add(16).cast::<*mut u8>();
-                                let l12 = *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l11, l12, 1);
-                                let l13 = *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>();
-                                let l14 = *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l13, l14, 1);
-                            }
-                            3 => {
-                                let l15 = *ptr.add(16).cast::<*mut u8>();
-                                let l16 = *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l15, l16, 1);
-                                let l17 = *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>();
-                                let l18 = *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l17, l18, 1);
-                                let l19 = i32::from(
-                                    *ptr
-                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>(),
-                                );
-                                match l19 {
-                                    0 => {}
-                                    _ => {
-                                        let l20 = *ptr
-                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l21 = *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l20, l21, 1);
-                                    }
-                                }
-                                let l22 = i32::from(
-                                    *ptr
-                                        .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>(),
-                                );
-                                match l22 {
-                                    0 => {}
-                                    _ => {
-                                        let l23 = *ptr
-                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l24 = *ptr
-                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l23, l24, 1);
-                                    }
-                                }
-                                let l25 = i32::from(
-                                    *ptr
-                                        .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>(),
-                                );
-                                match l25 {
-                                    0 => {}
-                                    _ => {
-                                        let l26 = *ptr
-                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l27 = *ptr
-                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l26, l27, 1);
-                                    }
-                                }
-                            }
-                            _ => {
-                                let l28 = i32::from(*ptr.add(16).cast::<u8>());
-                                match l28 {
-                                    0 => {
-                                        let l29 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l30 = *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l29, l30, 1);
-                                        let l31 = i32::from(
-                                            *ptr
-                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        match l31 {
-                                            0 => {}
-                                            _ => {
-                                                let l32 = *ptr
-                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>();
-                                                let l33 = *ptr
-                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l32, l33, 1);
-                                            }
-                                        }
-                                        let l34 = *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l35 = *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l34, l35, 1);
-                                    }
-                                    _ => {
-                                        let l36 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l37 = *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l36, l37, 1);
-                                        let l38 = i32::from(
-                                            *ptr
-                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        match l38 {
-                                            0 => {}
-                                            _ => {
-                                                let l39 = *ptr
-                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>();
-                                                let l40 = *ptr
-                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l39, l40, 1);
-                                            }
-                                        }
-                                        let l41 = *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l42 = *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l41, l42, 1);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    1 => {
-                        let l43 = i32::from(*ptr.add(8).cast::<u8>());
-                        match l43 {
-                            0 => {
-                                let l44 = *ptr.add(16).cast::<*mut u8>();
-                                let l45 = *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l44, l45, 1);
-                            }
-                            1 => {
-                                let l46 = *ptr.add(16).cast::<*mut u8>();
-                                let l47 = *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l46, l47, 1);
-                                let l48 = *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>();
-                                let l49 = *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l48, l49, 1);
-                                let l50 = i32::from(
-                                    *ptr
-                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>(),
-                                );
-                                match l50 {
-                                    0 => {}
-                                    _ => {
-                                        let l51 = *ptr
-                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l52 = *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l51, l52, 1);
-                                    }
-                                }
-                            }
-                            2 => {
-                                let l53 = *ptr.add(16).cast::<*mut u8>();
-                                let l54 = *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l53, l54, 1);
-                                let l55 = *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>();
-                                let l56 = *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l55, l56, 1);
-                            }
-                            3 => {
-                                let l57 = *ptr.add(16).cast::<*mut u8>();
-                                let l58 = *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l57, l58, 1);
-                                let l59 = *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>();
-                                let l60 = *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l59, l60, 1);
-                                let l61 = i32::from(
-                                    *ptr
-                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>(),
-                                );
-                                match l61 {
-                                    0 => {}
-                                    _ => {
-                                        let l62 = *ptr
-                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l63 = *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l62, l63, 1);
-                                    }
-                                }
-                                let l64 = i32::from(
-                                    *ptr
-                                        .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>(),
-                                );
-                                match l64 {
-                                    0 => {}
-                                    _ => {
-                                        let l65 = *ptr
-                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l66 = *ptr
-                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l65, l66, 1);
-                                    }
-                                }
-                                let l67 = i32::from(
-                                    *ptr
-                                        .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>(),
-                                );
-                                match l67 {
-                                    0 => {}
-                                    _ => {
-                                        let l68 = *ptr
-                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l69 = *ptr
-                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l68, l69, 1);
-                                    }
-                                }
-                            }
-                            _ => {
-                                let l70 = i32::from(*ptr.add(16).cast::<u8>());
-                                match l70 {
-                                    0 => {
-                                        let l71 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l72 = *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l71, l72, 1);
-                                        let l73 = i32::from(
-                                            *ptr
-                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        match l73 {
-                                            0 => {}
-                                            _ => {
-                                                let l74 = *ptr
-                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>();
-                                                let l75 = *ptr
-                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l74, l75, 1);
-                                            }
-                                        }
-                                        let l76 = *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l77 = *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l76, l77, 1);
-                                    }
-                                    _ => {
-                                        let l78 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l79 = *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l78, l79, 1);
-                                        let l80 = i32::from(
-                                            *ptr
-                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        match l80 {
-                                            0 => {}
-                                            _ => {
-                                                let l81 = *ptr
-                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>();
-                                                let l82 = *ptr
-                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l81, l82, 1);
-                                            }
-                                        }
-                                        let l83 = *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l84 = *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l83, l84, 1);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    2 => {
-                        let l85 = i32::from(*ptr.add(8).cast::<u8>());
-                        match l85 {
-                            0 => {
-                                let l86 = *ptr.add(16).cast::<*mut u8>();
-                                let l87 = *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l86, l87, 1);
-                            }
-                            1 => {
-                                let l88 = *ptr.add(16).cast::<*mut u8>();
-                                let l89 = *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l88, l89, 1);
-                                let l90 = *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>();
-                                let l91 = *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l90, l91, 1);
-                                let l92 = i32::from(
-                                    *ptr
-                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>(),
-                                );
-                                match l92 {
-                                    0 => {}
-                                    _ => {
-                                        let l93 = *ptr
-                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l94 = *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l93, l94, 1);
-                                    }
-                                }
-                            }
-                            2 => {
-                                let l95 = *ptr.add(16).cast::<*mut u8>();
-                                let l96 = *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l95, l96, 1);
-                                let l97 = *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>();
-                                let l98 = *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l97, l98, 1);
-                            }
-                            3 => {
-                                let l99 = *ptr.add(16).cast::<*mut u8>();
-                                let l100 = *ptr
-                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l99, l100, 1);
-                                let l101 = *ptr
-                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>();
-                                let l102 = *ptr
-                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l101, l102, 1);
-                                let l103 = i32::from(
-                                    *ptr
-                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>(),
-                                );
-                                match l103 {
-                                    0 => {}
-                                    _ => {
-                                        let l104 = *ptr
-                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l105 = *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l104, l105, 1);
-                                    }
-                                }
-                                let l106 = i32::from(
-                                    *ptr
-                                        .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>(),
-                                );
-                                match l106 {
-                                    0 => {}
-                                    _ => {
-                                        let l107 = *ptr
-                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l108 = *ptr
-                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l107, l108, 1);
-                                    }
-                                }
-                                let l109 = i32::from(
-                                    *ptr
-                                        .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>(),
-                                );
-                                match l109 {
-                                    0 => {}
-                                    _ => {
-                                        let l110 = *ptr
-                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l111 = *ptr
-                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l110, l111, 1);
-                                    }
-                                }
-                            }
-                            _ => {
-                                let l112 = i32::from(*ptr.add(16).cast::<u8>());
-                                match l112 {
-                                    0 => {
-                                        let l113 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l114 = *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l113, l114, 1);
-                                        let l115 = i32::from(
-                                            *ptr
-                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        match l115 {
-                                            0 => {}
-                                            _ => {
-                                                let l116 = *ptr
-                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>();
-                                                let l117 = *ptr
-                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l116, l117, 1);
-                                            }
-                                        }
-                                        let l118 = *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l119 = *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l118, l119, 1);
-                                    }
-                                    _ => {
-                                        let l120 = *ptr
-                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l121 = *ptr
-                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l120, l121, 1);
-                                        let l122 = i32::from(
-                                            *ptr
-                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        match l122 {
-                                            0 => {}
-                                            _ => {
-                                                let l123 = *ptr
-                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>();
-                                                let l124 = *ptr
-                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l123, l124, 1);
-                                            }
-                                        }
-                                        let l125 = *ptr
-                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l126 = *ptr
-                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l125, l126, 1);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    3 => {
-                        let l127 = *ptr.add(8).cast::<*mut u8>();
-                        let l128 = *ptr
-                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>();
-                        super::super::_rt::cabi_dealloc(l127, l128, 1);
-                        let l129 = *ptr
-                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                            .cast::<*mut u8>();
-                        let l130 = *ptr
-                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>();
-                        super::super::_rt::cabi_dealloc(l129, l130, 1);
-                        let l131 = *ptr
-                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
-                            .cast::<*mut u8>();
-                        let l132 = *ptr
-                            .add(8 + 6 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>();
-                        let base185 = l131;
-                        let len185 = l132;
-                        for i in 0..len185 {
-                            let base = base185
-                                .add(i * (40 + 12 * ::core::mem::size_of::<*const u8>()));
-                            {
-                                let l133 = i32::from(*base.add(0).cast::<u8>());
-                                match l133 {
-                                    0 => {
-                                        let l134 = i32::from(*base.add(8).cast::<u8>());
-                                        match l134 {
-                                            0 => {
-                                                let l135 = *base.add(16).cast::<*mut u8>();
-                                                let l136 = *base
-                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l135, l136, 1);
-                                            }
-                                            1 => {
-                                                let l137 = *base.add(16).cast::<*mut u8>();
-                                                let l138 = *base
-                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l137, l138, 1);
-                                                let l139 = *base
-                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>();
-                                                let l140 = *base
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l139, l140, 1);
-                                                let l141 = i32::from(
-                                                    *base
-                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<u8>(),
-                                                );
-                                                match l141 {
-                                                    0 => {}
-                                                    _ => {
-                                                        let l142 = *base
-                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l143 = *base
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        super::super::_rt::cabi_dealloc(l142, l143, 1);
-                                                    }
-                                                }
-                                            }
-                                            2 => {
-                                                let l144 = *base.add(16).cast::<*mut u8>();
-                                                let l145 = *base
-                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l144, l145, 1);
-                                                let l146 = *base
-                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>();
-                                                let l147 = *base
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l146, l147, 1);
-                                            }
-                                            3 => {
-                                                let l148 = *base.add(16).cast::<*mut u8>();
-                                                let l149 = *base
-                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l148, l149, 1);
-                                                let l150 = *base
-                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>();
-                                                let l151 = *base
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l150, l151, 1);
-                                                let l152 = i32::from(
-                                                    *base
-                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<u8>(),
-                                                );
-                                                match l152 {
-                                                    0 => {}
-                                                    _ => {
-                                                        let l153 = *base
-                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l154 = *base
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        super::super::_rt::cabi_dealloc(l153, l154, 1);
-                                                    }
-                                                }
-                                                let l155 = i32::from(
-                                                    *base
-                                                        .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<u8>(),
-                                                );
-                                                match l155 {
-                                                    0 => {}
-                                                    _ => {
-                                                        let l156 = *base
-                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l157 = *base
-                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        super::super::_rt::cabi_dealloc(l156, l157, 1);
-                                                    }
-                                                }
-                                                let l158 = i32::from(
-                                                    *base
-                                                        .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<u8>(),
-                                                );
-                                                match l158 {
-                                                    0 => {}
-                                                    _ => {
-                                                        let l159 = *base
-                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l160 = *base
-                                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        super::super::_rt::cabi_dealloc(l159, l160, 1);
-                                                    }
-                                                }
-                                            }
-                                            _ => {
-                                                let l161 = i32::from(*base.add(16).cast::<u8>());
-                                                match l161 {
-                                                    0 => {
-                                                        let l162 = *base
-                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l163 = *base
-                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        super::super::_rt::cabi_dealloc(l162, l163, 1);
-                                                        let l164 = i32::from(
-                                                            *base
-                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<u8>(),
-                                                        );
-                                                        match l164 {
-                                                            0 => {}
-                                                            _ => {
-                                                                let l165 = *base
-                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<*mut u8>();
-                                                                let l166 = *base
-                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<usize>();
-                                                                super::super::_rt::cabi_dealloc(l165, l166, 1);
-                                                            }
-                                                        }
-                                                        let l167 = *base
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l168 = *base
-                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        super::super::_rt::cabi_dealloc(l167, l168, 1);
-                                                    }
-                                                    _ => {
-                                                        let l169 = *base
-                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l170 = *base
-                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        super::super::_rt::cabi_dealloc(l169, l170, 1);
-                                                        let l171 = i32::from(
-                                                            *base
-                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<u8>(),
-                                                        );
-                                                        match l171 {
-                                                            0 => {}
-                                                            _ => {
-                                                                let l172 = *base
-                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<*mut u8>();
-                                                                let l173 = *base
-                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<usize>();
-                                                                super::super::_rt::cabi_dealloc(l172, l173, 1);
-                                                            }
-                                                        }
-                                                        let l174 = *base
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l175 = *base
-                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        super::super::_rt::cabi_dealloc(l174, l175, 1);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    1 => {
-                                        let l176 = *base.add(8).cast::<*mut u8>();
-                                        let l177 = *base
-                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l176, l177, 1);
-                                        let l178 = i32::from(
-                                            *base
-                                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        match l178 {
-                                            0 => {}
-                                            _ => {
-                                                let l179 = *base
-                                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>();
-                                                let l180 = *base
-                                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l179, l180, 1);
-                                            }
-                                        }
-                                        let l181 = *base
-                                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l182 = *base
-                                            .add(8 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l181, l182, 1);
-                                    }
-                                    _ => {
-                                        let l183 = *base.add(8).cast::<*mut u8>();
-                                        let l184 = *base
-                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l183, l184, 1);
-                                    }
-                                }
-                            }
-                        }
-                        super::super::_rt::cabi_dealloc(
-                            base185,
-                            len185 * (40 + 12 * ::core::mem::size_of::<*const u8>()),
-                            8,
-                        );
-                        let l186 = *ptr
-                            .add(8 + 7 * ::core::mem::size_of::<*const u8>())
-                            .cast::<*mut u8>();
-                        let l187 = *ptr
-                            .add(8 + 8 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>();
-                        let base190 = l186;
-                        let len190 = l187;
-                        for i in 0..len190 {
-                            let base = base190
-                                .add(i * (8 + 2 * ::core::mem::size_of::<*const u8>()));
-                            {
-                                let l188 = *base.add(0).cast::<*mut u8>();
-                                let l189 = *base
-                                    .add(::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l188, l189, 1);
-                            }
-                        }
-                        super::super::_rt::cabi_dealloc(
-                            base190,
-                            len190 * (8 + 2 * ::core::mem::size_of::<*const u8>()),
-                            ::core::mem::size_of::<*const u8>(),
-                        );
-                        let l191 = i32::from(
-                            *ptr
-                                .add(8 + 9 * ::core::mem::size_of::<*const u8>())
-                                .cast::<u8>(),
-                        );
-                        match l191 {
-                            0 => {}
-                            _ => {
-                                let l192 = *ptr
-                                    .add(8 + 10 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>();
-                                let l193 = *ptr
-                                    .add(8 + 11 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l192, l193, 1);
-                            }
-                        }
-                        let l194 = i32::from(
-                            *ptr
-                                .add(8 + 12 * ::core::mem::size_of::<*const u8>())
-                                .cast::<u8>(),
-                        );
-                        match l194 {
-                            0 => {}
-                            _ => {
-                                let l195 = *ptr
-                                    .add(8 + 13 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>();
-                                let l196 = *ptr
-                                    .add(8 + 14 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l195, l196, 1);
-                            }
-                        }
-                    }
-                    4 => {
-                        let l197 = *ptr.add(8).cast::<*mut u8>();
-                        let l198 = *ptr
-                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>();
-                        super::super::_rt::cabi_dealloc(l197, l198, 1);
-                        let l199 = *ptr
-                            .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                            .cast::<*mut u8>();
-                        let l200 = *ptr
-                            .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>();
-                        super::super::_rt::cabi_dealloc(l199, l200, 1);
-                        let l201 = *ptr
-                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
-                            .cast::<*mut u8>();
-                        let l202 = *ptr
-                            .add(8 + 6 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>();
-                        let base255 = l201;
-                        let len255 = l202;
-                        for i in 0..len255 {
-                            let base = base255
-                                .add(i * (40 + 12 * ::core::mem::size_of::<*const u8>()));
-                            {
-                                let l203 = i32::from(*base.add(0).cast::<u8>());
-                                match l203 {
-                                    0 => {
-                                        let l204 = i32::from(*base.add(8).cast::<u8>());
-                                        match l204 {
-                                            0 => {
-                                                let l205 = *base.add(16).cast::<*mut u8>();
-                                                let l206 = *base
-                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l205, l206, 1);
-                                            }
-                                            1 => {
-                                                let l207 = *base.add(16).cast::<*mut u8>();
-                                                let l208 = *base
-                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l207, l208, 1);
-                                                let l209 = *base
-                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>();
-                                                let l210 = *base
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l209, l210, 1);
-                                                let l211 = i32::from(
-                                                    *base
-                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<u8>(),
-                                                );
-                                                match l211 {
-                                                    0 => {}
-                                                    _ => {
-                                                        let l212 = *base
-                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l213 = *base
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        super::super::_rt::cabi_dealloc(l212, l213, 1);
-                                                    }
-                                                }
-                                            }
-                                            2 => {
-                                                let l214 = *base.add(16).cast::<*mut u8>();
-                                                let l215 = *base
-                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l214, l215, 1);
-                                                let l216 = *base
-                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>();
-                                                let l217 = *base
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l216, l217, 1);
-                                            }
-                                            3 => {
-                                                let l218 = *base.add(16).cast::<*mut u8>();
-                                                let l219 = *base
-                                                    .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l218, l219, 1);
-                                                let l220 = *base
-                                                    .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>();
-                                                let l221 = *base
-                                                    .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l220, l221, 1);
-                                                let l222 = i32::from(
-                                                    *base
-                                                        .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<u8>(),
-                                                );
-                                                match l222 {
-                                                    0 => {}
-                                                    _ => {
-                                                        let l223 = *base
-                                                            .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l224 = *base
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        super::super::_rt::cabi_dealloc(l223, l224, 1);
-                                                    }
-                                                }
-                                                let l225 = i32::from(
-                                                    *base
-                                                        .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<u8>(),
-                                                );
-                                                match l225 {
-                                                    0 => {}
-                                                    _ => {
-                                                        let l226 = *base
-                                                            .add(16 + 8 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l227 = *base
-                                                            .add(16 + 9 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        super::super::_rt::cabi_dealloc(l226, l227, 1);
-                                                    }
-                                                }
-                                                let l228 = i32::from(
-                                                    *base
-                                                        .add(16 + 10 * ::core::mem::size_of::<*const u8>())
-                                                        .cast::<u8>(),
-                                                );
-                                                match l228 {
-                                                    0 => {}
-                                                    _ => {
-                                                        let l229 = *base
-                                                            .add(16 + 11 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l230 = *base
-                                                            .add(16 + 12 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        super::super::_rt::cabi_dealloc(l229, l230, 1);
-                                                    }
-                                                }
-                                            }
-                                            _ => {
-                                                let l231 = i32::from(*base.add(16).cast::<u8>());
-                                                match l231 {
-                                                    0 => {
-                                                        let l232 = *base
-                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l233 = *base
-                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        super::super::_rt::cabi_dealloc(l232, l233, 1);
-                                                        let l234 = i32::from(
-                                                            *base
-                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<u8>(),
-                                                        );
-                                                        match l234 {
-                                                            0 => {}
-                                                            _ => {
-                                                                let l235 = *base
-                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<*mut u8>();
-                                                                let l236 = *base
-                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<usize>();
-                                                                super::super::_rt::cabi_dealloc(l235, l236, 1);
-                                                            }
-                                                        }
-                                                        let l237 = *base
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l238 = *base
-                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        super::super::_rt::cabi_dealloc(l237, l238, 1);
-                                                    }
-                                                    _ => {
-                                                        let l239 = *base
-                                                            .add(16 + 1 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l240 = *base
-                                                            .add(16 + 2 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        super::super::_rt::cabi_dealloc(l239, l240, 1);
-                                                        let l241 = i32::from(
-                                                            *base
-                                                                .add(16 + 3 * ::core::mem::size_of::<*const u8>())
-                                                                .cast::<u8>(),
-                                                        );
-                                                        match l241 {
-                                                            0 => {}
-                                                            _ => {
-                                                                let l242 = *base
-                                                                    .add(16 + 4 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<*mut u8>();
-                                                                let l243 = *base
-                                                                    .add(16 + 5 * ::core::mem::size_of::<*const u8>())
-                                                                    .cast::<usize>();
-                                                                super::super::_rt::cabi_dealloc(l242, l243, 1);
-                                                            }
-                                                        }
-                                                        let l244 = *base
-                                                            .add(16 + 6 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<*mut u8>();
-                                                        let l245 = *base
-                                                            .add(16 + 7 * ::core::mem::size_of::<*const u8>())
-                                                            .cast::<usize>();
-                                                        super::super::_rt::cabi_dealloc(l244, l245, 1);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    1 => {
-                                        let l246 = *base.add(8).cast::<*mut u8>();
-                                        let l247 = *base
-                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l246, l247, 1);
-                                        let l248 = i32::from(
-                                            *base
-                                                .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                                .cast::<u8>(),
-                                        );
-                                        match l248 {
-                                            0 => {}
-                                            _ => {
-                                                let l249 = *base
-                                                    .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<*mut u8>();
-                                                let l250 = *base
-                                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
-                                                    .cast::<usize>();
-                                                super::super::_rt::cabi_dealloc(l249, l250, 1);
-                                            }
-                                        }
-                                        let l251 = *base
-                                            .add(8 + 5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l252 = *base
-                                            .add(8 + 6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l251, l252, 1);
-                                    }
-                                    _ => {
-                                        let l253 = *base.add(8).cast::<*mut u8>();
-                                        let l254 = *base
-                                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l253, l254, 1);
-                                    }
-                                }
-                            }
-                        }
-                        super::super::_rt::cabi_dealloc(
-                            base255,
-                            len255 * (40 + 12 * ::core::mem::size_of::<*const u8>()),
-                            8,
-                        );
-                        let l256 = *ptr
-                            .add(8 + 7 * ::core::mem::size_of::<*const u8>())
-                            .cast::<*mut u8>();
-                        let l257 = *ptr
-                            .add(8 + 8 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>();
-                        let base260 = l256;
-                        let len260 = l257;
-                        for i in 0..len260 {
-                            let base = base260
-                                .add(i * (8 + 2 * ::core::mem::size_of::<*const u8>()));
-                            {
-                                let l258 = *base.add(0).cast::<*mut u8>();
-                                let l259 = *base
-                                    .add(::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l258, l259, 1);
-                            }
-                        }
-                        super::super::_rt::cabi_dealloc(
-                            base260,
-                            len260 * (8 + 2 * ::core::mem::size_of::<*const u8>()),
-                            ::core::mem::size_of::<*const u8>(),
-                        );
-                        let l261 = i32::from(
-                            *ptr
-                                .add(8 + 9 * ::core::mem::size_of::<*const u8>())
-                                .cast::<u8>(),
-                        );
-                        match l261 {
-                            0 => {}
-                            _ => {
-                                let l262 = *ptr
-                                    .add(8 + 10 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>();
-                                let l263 = *ptr
-                                    .add(8 + 11 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l262, l263, 1);
-                            }
-                        }
-                        let l264 = i32::from(
-                            *ptr
-                                .add(8 + 12 * ::core::mem::size_of::<*const u8>())
-                                .cast::<u8>(),
-                        );
-                        match l264 {
-                            0 => {}
-                            _ => {
-                                let l265 = *ptr
-                                    .add(8 + 13 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>();
-                                let l266 = *ptr
-                                    .add(8 + 14 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l265, l266, 1);
-                            }
-                        }
-                    }
-                    5 => {
-                        let l267 = *ptr.add(8).cast::<*mut u8>();
-                        let l268 = *ptr
-                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>();
-                        let base271 = l267;
-                        let len271 = l268;
-                        for i in 0..len271 {
-                            let base = base271
-                                .add(i * (3 * ::core::mem::size_of::<*const u8>()));
-                            {
-                                let l269 = *base.add(0).cast::<*mut u8>();
-                                let l270 = *base
-                                    .add(::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l269, l270, 1);
-                            }
-                        }
-                        super::super::_rt::cabi_dealloc(
-                            base271,
-                            len271 * (3 * ::core::mem::size_of::<*const u8>()),
-                            ::core::mem::size_of::<*const u8>(),
-                        );
-                    }
-                    6 => {
-                        let l272 = *ptr.add(8).cast::<*mut u8>();
-                        let l273 = *ptr
-                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>();
-                        super::super::_rt::cabi_dealloc(l272, l273, 1);
-                    }
-                    7 => {
-                        let l274 = i32::from(*ptr.add(8).cast::<u8>());
-                        match l274 {
-                            0 => {}
-                            _ => {
-                                let l275 = *ptr
-                                    .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>();
-                                let l276 = *ptr
-                                    .add(8 + 2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l275, l276, 1);
-                            }
-                        }
-                        let l277 = i32::from(
-                            *ptr
-                                .add(8 + 3 * ::core::mem::size_of::<*const u8>())
-                                .cast::<u8>(),
-                        );
-                        match l277 {
-                            0 => {}
-                            _ => {
-                                let l278 = *ptr
-                                    .add(8 + 4 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>();
-                                let l279 = *ptr
-                                    .add(8 + 5 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l278, l279, 1);
-                            }
-                        }
-                    }
-                    8 => {
-                        let l280 = *ptr.add(8).cast::<*mut u8>();
-                        let l281 = *ptr
-                            .add(8 + 1 * ::core::mem::size_of::<*const u8>())
-                            .cast::<usize>();
-                        let base289 = l280;
-                        let len289 = l281;
-                        for i in 0..len289 {
-                            let base = base289
-                                .add(i * (7 * ::core::mem::size_of::<*const u8>()));
-                            {
-                                let l282 = *base.add(0).cast::<*mut u8>();
-                                let l283 = *base
-                                    .add(::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l282, l283, 1);
-                                let l284 = *base
-                                    .add(2 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<*mut u8>();
-                                let l285 = *base
-                                    .add(3 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l284, l285, 1);
-                                let l286 = i32::from(
-                                    *base
-                                        .add(4 * ::core::mem::size_of::<*const u8>())
-                                        .cast::<u8>(),
-                                );
-                                match l286 {
-                                    0 => {}
-                                    _ => {
-                                        let l287 = *base
-                                            .add(5 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<*mut u8>();
-                                        let l288 = *base
-                                            .add(6 * ::core::mem::size_of::<*const u8>())
-                                            .cast::<usize>();
-                                        super::super::_rt::cabi_dealloc(l287, l288, 1);
-                                    }
-                                }
-                            }
-                        }
-                        super::super::_rt::cabi_dealloc(
-                            base289,
-                            len289 * (7 * ::core::mem::size_of::<*const u8>()),
-                            ::core::mem::size_of::<*const u8>(),
-                        );
-                    }
-                    _ => {
-                        let l290 = i32::from(*ptr.add(24).cast::<u8>());
-                        match l290 {
-                            0 => {}
-                            _ => {
-                                let l291 = *ptr.add(40).cast::<*mut u8>();
-                                let l292 = *ptr
-                                    .add(40 + 1 * ::core::mem::size_of::<*const u8>())
-                                    .cast::<usize>();
-                                super::super::_rt::cabi_dealloc(l291, l292, 1);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        pub static VTABLE: wit_bindgen::rt::async_support::StreamVtable<
-            super::super::yosh::acp::prompts::SessionUpdate,
-        > = wit_bindgen::rt::async_support::StreamVtable::<
-            super::super::yosh::acp::prompts::SessionUpdate,
-        > {
-            cancel_write,
-            cancel_read,
-            drop_writable,
-            drop_readable,
-            dealloc_lists: Some(dealloc_lists),
-            layout: unsafe { ::std::alloc::Layout::from_size_align_unchecked(88, 8) },
-            lift: Some(lift),
-            lower: Some(lower),
-            new,
-            start_read,
-            start_write,
-        };
-        impl super::StreamPayload for super::super::yosh::acp::prompts::SessionUpdate {
-            const VTABLE: &'static wit_bindgen::rt::async_support::StreamVtable<Self> = &VTABLE;
-        }
-    }
-    #[doc(hidden)]
-    #[allow(unused_unsafe)]
-    pub mod vtable1 {
         #[cfg(not(target_arch = "wasm32"))]
         unsafe extern "C" fn cancel_write(_: u32) -> u32 {
             unreachable!()
@@ -25616,9 +24293,9 @@ macro_rules! __export_provider_impl {
         #[rustfmt::skip] #[cfg(target_arch = "wasm32")] #[unsafe (link_section =
         "component-type:wit-bindgen:0.54.0:yosh:acp@7.0.0:provider:imports and exports")]
         #[doc(hidden)] #[allow(clippy::octal_escapes)] pub static
-        __WIT_BINDGEN_COMPONENT_TYPE : [u8; 9635] = *
+        __WIT_BINDGEN_COMPONENT_TYPE : [u8; 9418] = *
         b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xa4J\x01A\x02\x01A=\x01\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xcbH\x01A\x02\x01A=\x01\
 B\x04\x01q\x08\x0bparse-error\0\0\x0finvalid-request\0\0\x10method-not-found\0\0\
 \x0einvalid-params\0\0\x0einternal-error\0\0\x0dauth-required\0\0\x12resource-no\
 t-found\0\0\x05other\x01z\0\x04\0\x0aerror-code\x03\0\0\x01r\x02\x04code\x01\x07\
@@ -25736,8 +24413,63 @@ fig-value-id\x02\x03\0\x02\x15session-config-option\x02\x03\0\x02\x13new-session
 -request\x02\x03\0\x02\x14new-session-response\x02\x03\0\x02\x14load-session-req\
 uest\x02\x03\0\x02\x15load-session-response\x02\x03\0\x02\x15list-sessions-reque\
 st\x02\x03\0\x02\x16list-sessions-response\x02\x03\0\x02\x16resume-session-reque\
-st\x02\x03\0\x02\x17resume-session-response\x02\x03\0\x06\x0esession-update\x02\x03\
-\0\x06\x0fprompt-response\x01BT\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\
+st\x02\x03\0\x02\x17resume-session-response\x02\x03\0\x06\x0fprompt-response\x01\
+BJ\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x10\x04\0\x12initi\
+alize-request\x03\0\x02\x02\x03\x02\x01\x11\x04\0\x13initialize-response\x03\0\x04\
+\x02\x03\x02\x01\x12\x04\0\x14authenticate-request\x03\0\x06\x02\x03\x02\x01\x0a\
+\x04\0\x0fsession-mode-id\x03\0\x08\x02\x03\x02\x01\x13\x04\0\x10session-model-i\
+d\x03\0\x0a\x02\x03\x02\x01\x14\x04\0\x11session-config-id\x03\0\x0c\x02\x03\x02\
+\x01\x15\x04\0\x17session-config-value-id\x03\0\x0e\x02\x03\x02\x01\x16\x04\0\x15\
+session-config-option\x03\0\x10\x02\x03\x02\x01\x17\x04\0\x13new-session-request\
+\x03\0\x12\x02\x03\x02\x01\x18\x04\0\x14new-session-response\x03\0\x14\x02\x03\x02\
+\x01\x19\x04\0\x14load-session-request\x03\0\x16\x02\x03\x02\x01\x1a\x04\0\x15lo\
+ad-session-response\x03\0\x18\x02\x03\x02\x01\x1b\x04\0\x15list-sessions-request\
+\x03\0\x1a\x02\x03\x02\x01\x1c\x04\0\x16list-sessions-response\x03\0\x1c\x02\x03\
+\x02\x01\x1d\x04\0\x16resume-session-request\x03\0\x1e\x02\x03\x02\x01\x1e\x04\0\
+\x17resume-session-response\x03\0\x20\x02\x03\x02\x01\x07\x04\0\x0dcontent-block\
+\x03\0\"\x02\x03\x02\x01\x1f\x04\0\x0fprompt-response\x03\0$\x04\0\x07session\x03\
+\x01\x01h&\x01p#\x01j\x01%\x01\x01\x01C\x02\x04self'\x06prompt(\0)\x04\0\x16[met\
+hod]session.prompt\x01*\x01j\0\x01\x01\x01C\x02\x04self'\x07mode-id\x09\0+\x04\0\
+\x18[method]session.set-mode\x01,\x01C\x02\x04self'\x08model-id\x0b\0+\x04\0\x1c\
+[method]session.select-model\x01-\x01p\x11\x01j\x01.\x01\x01\x01C\x03\x04self'\x09\
+config-id\x0d\x05value\x0f\0/\x04\0![method]session.set-config-option\x010\x01j\x01\
+\x05\x01\x01\x01C\x01\x03req\x03\01\x04\0\x0ainitialize\x012\x01C\x01\x03req\x07\
+\0+\x04\0\x0cauthenticate\x013\x01i&\x01o\x024\x15\x01j\x015\x01\x01\x01C\x01\x03\
+req\x13\06\x04\0\x0bnew-session\x017\x01o\x024\x19\x01j\x018\x01\x01\x01C\x01\x03\
+req\x17\09\x04\0\x0cload-session\x01:\x01j\x01\x1d\x01\x01\x01C\x01\x03req\x1b\0\
+;\x04\0\x0dlist-sessions\x01<\x01o\x024!\x01j\x01=\x01\x01\x01C\x01\x03req\x1f\0\
+>\x04\0\x0eresume-session\x01?\x03\0\x14yosh:acp/agent@7.0.0\x05\x20\x01B\x09\x02\
+\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x01ky\x01r\x04\x0asession-id\x01\x04\
+paths\x04line\x02\x05limit\x02\x04\0\x16read-text-file-request\x03\0\x03\x01r\x01\
+\x07contents\x04\0\x17read-text-file-response\x03\0\x05\x01r\x03\x0asession-id\x01\
+\x04paths\x07contents\x04\0\x17write-text-file-request\x03\0\x07\x03\0\x19yosh:a\
+cp/filesystem@7.0.0\x05!\x02\x03\0\x06\x0esession-update\x02\x03\0\x05\x1areques\
+t-permission-request\x02\x03\0\x05\x1brequest-permission-response\x02\x03\0\x08\x16\
+read-text-file-request\x02\x03\0\x08\x17read-text-file-response\x02\x03\0\x08\x17\
+write-text-file-request\x02\x03\0\x04\x17create-terminal-request\x02\x03\0\x04\x14\
+terminal-exit-status\x01B*\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\x02\
+\x01\x04\x04\0\x0asession-id\x03\0\x02\x02\x03\x02\x01\"\x04\0\x0esession-update\
+\x03\0\x04\x02\x03\x02\x01#\x04\0\x1arequest-permission-request\x03\0\x06\x02\x03\
+\x02\x01$\x04\0\x1brequest-permission-response\x03\0\x08\x02\x03\x02\x01%\x04\0\x16\
+read-text-file-request\x03\0\x0a\x02\x03\x02\x01&\x04\0\x17read-text-file-respon\
+se\x03\0\x0c\x02\x03\x02\x01'\x04\0\x17write-text-file-request\x03\0\x0e\x02\x03\
+\x02\x01(\x04\0\x17create-terminal-request\x03\0\x10\x02\x03\x02\x01)\x04\0\x14t\
+erminal-exit-status\x03\0\x12\x04\0\x08terminal\x03\x01\x01i\x14\x01@\x01\x03req\
+\x11\0\x15\x04\0\x15[constructor]terminal\x01\x16\x01h\x14\x01f\x01}\x01C\x01\x04\
+self\x17\0\x18\x04\0\x17[method]terminal.output\x01\x19\x01j\x01\x13\x01\x01\x01\
+C\x01\x04self\x17\0\x1a\x04\0\x1e[method]terminal.wait-for-exit\x01\x1b\x01C\x02\
+\x0asession-id\x03\x06update\x05\x01\0\x04\0\x0enotify-session\x01\x1c\x01j\x01\x09\
+\x01\x01\x01C\x01\x03req\x07\0\x1d\x04\0\x12request-permission\x01\x1e\x01j\x01\x0d\
+\x01\x01\x01C\x01\x03req\x0b\0\x1f\x04\0\x0eread-text-file\x01\x20\x01j\0\x01\x01\
+\x01C\x01\x03req\x0f\0!\x04\0\x0fwrite-text-file\x01\"\x03\0\x15yosh:acp/client@\
+7.0.0\x05*\x01B\x0a\x01q\x03\x08upstream\x01s\0\x02io\x01s\0\x09not-found\0\0\x04\
+\0\x0dsecrets-error\x03\0\0\x01p}\x01q\x02\x06string\x01s\0\x05bytes\x01\x02\0\x04\
+\0\x0csecret-value\x03\0\x03\x04\0\x06secret\x03\x01\x01i\x05\x01j\x01\x06\x01\x01\
+\x01@\x01\x03keys\0\x07\x04\0\x03get\x01\x08\x03\0#wasmcloud:secrets/store@0.1.0\
+-draft\x05+\x02\x03\0\x0a\x06secret\x02\x03\0\x0a\x0csecret-value\x01B\x07\x02\x03\
+\x02\x01,\x04\0\x06secret\x03\0\0\x02\x03\x02\x01-\x04\0\x0csecret-value\x03\0\x02\
+\x01h\x01\x01@\x01\x01s\x04\0\x03\x04\0\x06reveal\x01\x05\x03\0$wasmcloud:secret\
+s/reveal@0.1.0-draft\x05.\x01BJ\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\
 \x02\x01\x10\x04\0\x12initialize-request\x03\0\x02\x02\x03\x02\x01\x11\x04\0\x13\
 initialize-response\x03\0\x04\x02\x03\x02\x01\x12\x04\0\x14authenticate-request\x03\
 \0\x06\x02\x03\x02\x01\x0a\x04\0\x0fsession-mode-id\x03\0\x08\x02\x03\x02\x01\x13\
@@ -25750,80 +24482,21 @@ ponse\x03\0\x14\x02\x03\x02\x01\x19\x04\0\x14load-session-request\x03\0\x16\x02\
 list-sessions-request\x03\0\x1a\x02\x03\x02\x01\x1c\x04\0\x16list-sessions-respo\
 nse\x03\0\x1c\x02\x03\x02\x01\x1d\x04\0\x16resume-session-request\x03\0\x1e\x02\x03\
 \x02\x01\x1e\x04\0\x17resume-session-response\x03\0\x20\x02\x03\x02\x01\x07\x04\0\
-\x0dcontent-block\x03\0\"\x02\x03\x02\x01\x1f\x04\0\x0esession-update\x03\0$\x02\
-\x03\x02\x01\x20\x04\0\x0fprompt-response\x03\0&\x04\0\x07session\x03\x01\x04\0\x0b\
-prompt-turn\x03\x01\x01h(\x01p#\x01i)\x01C\x02\x04self*\x06prompt+\0,\x04\0\x16[\
-method]session.prompt\x01-\x01j\0\x01\x01\x01C\x02\x04self*\x07mode-id\x09\0.\x04\
-\0\x18[method]session.set-mode\x01/\x01C\x02\x04self*\x08model-id\x0b\0.\x04\0\x1c\
-[method]session.select-model\x010\x01p\x11\x01j\x011\x01\x01\x01C\x03\x04self*\x09\
-config-id\x0d\x05value\x0f\02\x04\0![method]session.set-config-option\x013\x01h)\
-\x01f\x01%\x01C\x01\x04self4\05\x04\0\x1b[method]prompt-turn.updates\x016\x01j\x01\
-'\x01\x01\x01C\x01\x04self4\07\x04\0\x1c[method]prompt-turn.response\x018\x01j\x01\
-\x05\x01\x01\x01C\x01\x03req\x03\09\x04\0\x0ainitialize\x01:\x01C\x01\x03req\x07\
-\0.\x04\0\x0cauthenticate\x01;\x01i(\x01o\x02<\x15\x01j\x01=\x01\x01\x01C\x01\x03\
-req\x13\0>\x04\0\x0bnew-session\x01?\x01o\x02<\x19\x01j\x01\xc0\0\x01\x01\x01C\x01\
-\x03req\x17\0\xc1\0\x04\0\x0cload-session\x01B\x01j\x01\x1d\x01\x01\x01C\x01\x03\
-req\x1b\0\xc3\0\x04\0\x0dlist-sessions\x01D\x01o\x02<!\x01j\x01\xc5\0\x01\x01\x01\
-C\x01\x03req\x1f\0\xc6\0\x04\0\x0eresume-session\x01G\x03\0\x14yosh:acp/agent@7.\
-0.0\x05!\x01B\x09\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x01ky\x01r\x04\
-\x0asession-id\x01\x04paths\x04line\x02\x05limit\x02\x04\0\x16read-text-file-req\
-uest\x03\0\x03\x01r\x01\x07contents\x04\0\x17read-text-file-response\x03\0\x05\x01\
-r\x03\x0asession-id\x01\x04paths\x07contents\x04\0\x17write-text-file-request\x03\
-\0\x07\x03\0\x19yosh:acp/filesystem@7.0.0\x05\"\x02\x03\0\x05\x1arequest-permiss\
-ion-request\x02\x03\0\x05\x1brequest-permission-response\x02\x03\0\x08\x16read-t\
-ext-file-request\x02\x03\0\x08\x17read-text-file-response\x02\x03\0\x08\x17write\
--text-file-request\x02\x03\0\x04\x17create-terminal-request\x02\x03\0\x04\x14ter\
-minal-exit-status\x01B&\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\x02\x01\
-\x04\x04\0\x0asession-id\x03\0\x02\x02\x03\x02\x01#\x04\0\x1arequest-permission-\
-request\x03\0\x04\x02\x03\x02\x01$\x04\0\x1brequest-permission-response\x03\0\x06\
-\x02\x03\x02\x01%\x04\0\x16read-text-file-request\x03\0\x08\x02\x03\x02\x01&\x04\
-\0\x17read-text-file-response\x03\0\x0a\x02\x03\x02\x01'\x04\0\x17write-text-fil\
-e-request\x03\0\x0c\x02\x03\x02\x01(\x04\0\x17create-terminal-request\x03\0\x0e\x02\
-\x03\x02\x01)\x04\0\x14terminal-exit-status\x03\0\x10\x04\0\x08terminal\x03\x01\x01\
-i\x12\x01@\x01\x03req\x0f\0\x13\x04\0\x15[constructor]terminal\x01\x14\x01h\x12\x01\
-f\x01}\x01C\x01\x04self\x15\0\x16\x04\0\x17[method]terminal.output\x01\x17\x01j\x01\
-\x11\x01\x01\x01C\x01\x04self\x15\0\x18\x04\0\x1e[method]terminal.wait-for-exit\x01\
-\x19\x01j\x01\x07\x01\x01\x01C\x01\x03req\x05\0\x1a\x04\0\x12request-permission\x01\
-\x1b\x01j\x01\x0b\x01\x01\x01C\x01\x03req\x09\0\x1c\x04\0\x0eread-text-file\x01\x1d\
-\x01j\0\x01\x01\x01C\x01\x03req\x0d\0\x1e\x04\0\x0fwrite-text-file\x01\x1f\x03\0\
-\x15yosh:acp/client@7.0.0\x05*\x01B\x0a\x01q\x03\x08upstream\x01s\0\x02io\x01s\0\
-\x09not-found\0\0\x04\0\x0dsecrets-error\x03\0\0\x01p}\x01q\x02\x06string\x01s\0\
-\x05bytes\x01\x02\0\x04\0\x0csecret-value\x03\0\x03\x04\0\x06secret\x03\x01\x01i\
-\x05\x01j\x01\x06\x01\x01\x01@\x01\x03keys\0\x07\x04\0\x03get\x01\x08\x03\0#wasm\
-cloud:secrets/store@0.1.0-draft\x05+\x02\x03\0\x0a\x06secret\x02\x03\0\x0a\x0cse\
-cret-value\x01B\x07\x02\x03\x02\x01,\x04\0\x06secret\x03\0\0\x02\x03\x02\x01-\x04\
-\0\x0csecret-value\x03\0\x02\x01h\x01\x01@\x01\x01s\x04\0\x03\x04\0\x06reveal\x01\
-\x05\x03\0$wasmcloud:secrets/reveal@0.1.0-draft\x05.\x01BT\x02\x03\x02\x01\x0f\x04\
-\0\x05error\x03\0\0\x02\x03\x02\x01\x10\x04\0\x12initialize-request\x03\0\x02\x02\
-\x03\x02\x01\x11\x04\0\x13initialize-response\x03\0\x04\x02\x03\x02\x01\x12\x04\0\
-\x14authenticate-request\x03\0\x06\x02\x03\x02\x01\x0a\x04\0\x0fsession-mode-id\x03\
-\0\x08\x02\x03\x02\x01\x13\x04\0\x10session-model-id\x03\0\x0a\x02\x03\x02\x01\x14\
-\x04\0\x11session-config-id\x03\0\x0c\x02\x03\x02\x01\x15\x04\0\x17session-confi\
-g-value-id\x03\0\x0e\x02\x03\x02\x01\x16\x04\0\x15session-config-option\x03\0\x10\
-\x02\x03\x02\x01\x17\x04\0\x13new-session-request\x03\0\x12\x02\x03\x02\x01\x18\x04\
-\0\x14new-session-response\x03\0\x14\x02\x03\x02\x01\x19\x04\0\x14load-session-r\
-equest\x03\0\x16\x02\x03\x02\x01\x1a\x04\0\x15load-session-response\x03\0\x18\x02\
-\x03\x02\x01\x1b\x04\0\x15list-sessions-request\x03\0\x1a\x02\x03\x02\x01\x1c\x04\
-\0\x16list-sessions-response\x03\0\x1c\x02\x03\x02\x01\x1d\x04\0\x16resume-sessi\
-on-request\x03\0\x1e\x02\x03\x02\x01\x1e\x04\0\x17resume-session-response\x03\0\x20\
-\x02\x03\x02\x01\x07\x04\0\x0dcontent-block\x03\0\"\x02\x03\x02\x01\x1f\x04\0\x0e\
-session-update\x03\0$\x02\x03\x02\x01\x20\x04\0\x0fprompt-response\x03\0&\x04\0\x07\
-session\x03\x01\x04\0\x0bprompt-turn\x03\x01\x01h(\x01p#\x01i)\x01C\x02\x04self*\
-\x06prompt+\0,\x04\0\x16[method]session.prompt\x01-\x01j\0\x01\x01\x01C\x02\x04s\
-elf*\x07mode-id\x09\0.\x04\0\x18[method]session.set-mode\x01/\x01C\x02\x04self*\x08\
-model-id\x0b\0.\x04\0\x1c[method]session.select-model\x010\x01p\x11\x01j\x011\x01\
-\x01\x01C\x03\x04self*\x09config-id\x0d\x05value\x0f\02\x04\0![method]session.se\
-t-config-option\x013\x01h)\x01f\x01%\x01C\x01\x04self4\05\x04\0\x1b[method]promp\
-t-turn.updates\x016\x01j\x01'\x01\x01\x01C\x01\x04self4\07\x04\0\x1c[method]prom\
-pt-turn.response\x018\x01j\x01\x05\x01\x01\x01C\x01\x03req\x03\09\x04\0\x0ainiti\
-alize\x01:\x01C\x01\x03req\x07\0.\x04\0\x0cauthenticate\x01;\x01i(\x01o\x02<\x15\
-\x01j\x01=\x01\x01\x01C\x01\x03req\x13\0>\x04\0\x0bnew-session\x01?\x01o\x02<\x19\
-\x01j\x01\xc0\0\x01\x01\x01C\x01\x03req\x17\0\xc1\0\x04\0\x0cload-session\x01B\x01\
-j\x01\x1d\x01\x01\x01C\x01\x03req\x1b\0\xc3\0\x04\0\x0dlist-sessions\x01D\x01o\x02\
-<!\x01j\x01\xc5\0\x01\x01\x01C\x01\x03req\x1f\0\xc6\0\x04\0\x0eresume-session\x01\
-G\x04\0\x14yosh:acp/agent@7.0.0\x05/\x04\0\x17yosh:acp/provider@7.0.0\x04\0\x0b\x0e\
-\x01\0\x08provider\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-compon\
-ent\x070.245.1\x10wit-bindgen-rust\x060.54.0";
+\x0dcontent-block\x03\0\"\x02\x03\x02\x01\x1f\x04\0\x0fprompt-response\x03\0$\x04\
+\0\x07session\x03\x01\x01h&\x01p#\x01j\x01%\x01\x01\x01C\x02\x04self'\x06prompt(\
+\0)\x04\0\x16[method]session.prompt\x01*\x01j\0\x01\x01\x01C\x02\x04self'\x07mod\
+e-id\x09\0+\x04\0\x18[method]session.set-mode\x01,\x01C\x02\x04self'\x08model-id\
+\x0b\0+\x04\0\x1c[method]session.select-model\x01-\x01p\x11\x01j\x01.\x01\x01\x01\
+C\x03\x04self'\x09config-id\x0d\x05value\x0f\0/\x04\0![method]session.set-config\
+-option\x010\x01j\x01\x05\x01\x01\x01C\x01\x03req\x03\01\x04\0\x0ainitialize\x01\
+2\x01C\x01\x03req\x07\0+\x04\0\x0cauthenticate\x013\x01i&\x01o\x024\x15\x01j\x01\
+5\x01\x01\x01C\x01\x03req\x13\06\x04\0\x0bnew-session\x017\x01o\x024\x19\x01j\x01\
+8\x01\x01\x01C\x01\x03req\x17\09\x04\0\x0cload-session\x01:\x01j\x01\x1d\x01\x01\
+\x01C\x01\x03req\x1b\0;\x04\0\x0dlist-sessions\x01<\x01o\x024!\x01j\x01=\x01\x01\
+\x01C\x01\x03req\x1f\0>\x04\0\x0eresume-session\x01?\x04\0\x14yosh:acp/agent@7.0\
+.0\x05/\x04\0\x17yosh:acp/provider@7.0.0\x04\0\x0b\x0e\x01\0\x08provider\x03\0\0\
+\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.245.1\x10wit-bind\
+gen-rust\x060.54.0";
         };
     };
 }
@@ -25836,8 +24509,8 @@ pub use __export_provider_impl as export;
 )]
 #[doc(hidden)]
 #[allow(clippy::octal_escapes)]
-pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 8505] = *b"\
-\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\x9aA\x01A\x02\x01A;\x01\
+pub static __WIT_BINDGEN_COMPONENT_TYPE: [u8; 8431] = *b"\
+\0asm\x0d\0\x01\0\0\x19\x16wit-component-encoding\x04\0\x07\xd0@\x01A\x02\x01A;\x01\
 B\x04\x01q\x08\x0bparse-error\0\0\x0finvalid-request\0\0\x10method-not-found\0\0\
 \x0einvalid-params\0\0\x0einternal-error\0\0\x0dauth-required\0\0\x12resource-no\
 t-found\0\0\x05other\x01z\0\x04\0\x0aerror-code\x03\0\0\x01r\x02\x04code\x01\x07\
@@ -25955,67 +24628,66 @@ fig-value-id\x02\x03\0\x02\x15session-config-option\x02\x03\0\x02\x13new-session
 -request\x02\x03\0\x02\x14new-session-response\x02\x03\0\x02\x14load-session-req\
 uest\x02\x03\0\x02\x15load-session-response\x02\x03\0\x02\x15list-sessions-reque\
 st\x02\x03\0\x02\x16list-sessions-response\x02\x03\0\x02\x16resume-session-reque\
-st\x02\x03\0\x02\x17resume-session-response\x02\x03\0\x06\x0esession-update\x02\x03\
-\0\x06\x0fprompt-response\x01BT\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\
-\x02\x01\x10\x04\0\x12initialize-request\x03\0\x02\x02\x03\x02\x01\x11\x04\0\x13\
-initialize-response\x03\0\x04\x02\x03\x02\x01\x12\x04\0\x14authenticate-request\x03\
-\0\x06\x02\x03\x02\x01\x0a\x04\0\x0fsession-mode-id\x03\0\x08\x02\x03\x02\x01\x13\
-\x04\0\x10session-model-id\x03\0\x0a\x02\x03\x02\x01\x14\x04\0\x11session-config\
--id\x03\0\x0c\x02\x03\x02\x01\x15\x04\0\x17session-config-value-id\x03\0\x0e\x02\
-\x03\x02\x01\x16\x04\0\x15session-config-option\x03\0\x10\x02\x03\x02\x01\x17\x04\
-\0\x13new-session-request\x03\0\x12\x02\x03\x02\x01\x18\x04\0\x14new-session-res\
-ponse\x03\0\x14\x02\x03\x02\x01\x19\x04\0\x14load-session-request\x03\0\x16\x02\x03\
-\x02\x01\x1a\x04\0\x15load-session-response\x03\0\x18\x02\x03\x02\x01\x1b\x04\0\x15\
-list-sessions-request\x03\0\x1a\x02\x03\x02\x01\x1c\x04\0\x16list-sessions-respo\
-nse\x03\0\x1c\x02\x03\x02\x01\x1d\x04\0\x16resume-session-request\x03\0\x1e\x02\x03\
-\x02\x01\x1e\x04\0\x17resume-session-response\x03\0\x20\x02\x03\x02\x01\x07\x04\0\
-\x0dcontent-block\x03\0\"\x02\x03\x02\x01\x1f\x04\0\x0esession-update\x03\0$\x02\
-\x03\x02\x01\x20\x04\0\x0fprompt-response\x03\0&\x04\0\x07session\x03\x01\x04\0\x0b\
-prompt-turn\x03\x01\x01h(\x01p#\x01i)\x01C\x02\x04self*\x06prompt+\0,\x04\0\x16[\
-method]session.prompt\x01-\x01j\0\x01\x01\x01C\x02\x04self*\x07mode-id\x09\0.\x04\
-\0\x18[method]session.set-mode\x01/\x01C\x02\x04self*\x08model-id\x0b\0.\x04\0\x1c\
-[method]session.select-model\x010\x01p\x11\x01j\x011\x01\x01\x01C\x03\x04self*\x09\
-config-id\x0d\x05value\x0f\02\x04\0![method]session.set-config-option\x013\x01h)\
-\x01f\x01%\x01C\x01\x04self4\05\x04\0\x1b[method]prompt-turn.updates\x016\x01j\x01\
-'\x01\x01\x01C\x01\x04self4\07\x04\0\x1c[method]prompt-turn.response\x018\x01j\x01\
-\x05\x01\x01\x01C\x01\x03req\x03\09\x04\0\x0ainitialize\x01:\x01C\x01\x03req\x07\
-\0.\x04\0\x0cauthenticate\x01;\x01i(\x01o\x02<\x15\x01j\x01=\x01\x01\x01C\x01\x03\
-req\x13\0>\x04\0\x0bnew-session\x01?\x01o\x02<\x19\x01j\x01\xc0\0\x01\x01\x01C\x01\
-\x03req\x17\0\xc1\0\x04\0\x0cload-session\x01B\x01j\x01\x1d\x01\x01\x01C\x01\x03\
-req\x1b\0\xc3\0\x04\0\x0dlist-sessions\x01D\x01o\x02<!\x01j\x01\xc5\0\x01\x01\x01\
-C\x01\x03req\x1f\0\xc6\0\x04\0\x0eresume-session\x01G\x03\0\x14yosh:acp/agent@7.\
-0.0\x05!\x01B\x09\x02\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x01ky\x01r\x04\
-\x0asession-id\x01\x04paths\x04line\x02\x05limit\x02\x04\0\x16read-text-file-req\
-uest\x03\0\x03\x01r\x01\x07contents\x04\0\x17read-text-file-response\x03\0\x05\x01\
-r\x03\x0asession-id\x01\x04paths\x07contents\x04\0\x17write-text-file-request\x03\
-\0\x07\x03\0\x19yosh:acp/filesystem@7.0.0\x05\"\x02\x03\0\x05\x1arequest-permiss\
-ion-request\x02\x03\0\x05\x1brequest-permission-response\x02\x03\0\x08\x16read-t\
-ext-file-request\x02\x03\0\x08\x17read-text-file-response\x02\x03\0\x08\x17write\
--text-file-request\x02\x03\0\x04\x17create-terminal-request\x02\x03\0\x04\x14ter\
-minal-exit-status\x01B&\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\x02\x01\
-\x04\x04\0\x0asession-id\x03\0\x02\x02\x03\x02\x01#\x04\0\x1arequest-permission-\
-request\x03\0\x04\x02\x03\x02\x01$\x04\0\x1brequest-permission-response\x03\0\x06\
-\x02\x03\x02\x01%\x04\0\x16read-text-file-request\x03\0\x08\x02\x03\x02\x01&\x04\
-\0\x17read-text-file-response\x03\0\x0a\x02\x03\x02\x01'\x04\0\x17write-text-fil\
-e-request\x03\0\x0c\x02\x03\x02\x01(\x04\0\x17create-terminal-request\x03\0\x0e\x02\
-\x03\x02\x01)\x04\0\x14terminal-exit-status\x03\0\x10\x04\0\x08terminal\x03\x01\x01\
-i\x12\x01@\x01\x03req\x0f\0\x13\x04\0\x15[constructor]terminal\x01\x14\x01h\x12\x01\
-f\x01}\x01C\x01\x04self\x15\0\x16\x04\0\x17[method]terminal.output\x01\x17\x01j\x01\
-\x11\x01\x01\x01C\x01\x04self\x15\0\x18\x04\0\x1e[method]terminal.wait-for-exit\x01\
-\x19\x01j\x01\x07\x01\x01\x01C\x01\x03req\x05\0\x1a\x04\0\x12request-permission\x01\
-\x1b\x01j\x01\x0b\x01\x01\x01C\x01\x03req\x09\0\x1c\x04\0\x0eread-text-file\x01\x1d\
-\x01j\0\x01\x01\x01C\x01\x03req\x0d\0\x1e\x04\0\x0fwrite-text-file\x01\x1f\x03\0\
-\x15yosh:acp/client@7.0.0\x05*\x01B\x0a\x01q\x03\x08upstream\x01s\0\x02io\x01s\0\
-\x09not-found\0\0\x04\0\x0dsecrets-error\x03\0\0\x01p}\x01q\x02\x06string\x01s\0\
-\x05bytes\x01\x02\0\x04\0\x0csecret-value\x03\0\x03\x04\0\x06secret\x03\x01\x01i\
-\x05\x01j\x01\x06\x01\x01\x01@\x01\x03keys\0\x07\x04\0\x03get\x01\x08\x03\0#wasm\
-cloud:secrets/store@0.1.0-draft\x05+\x02\x03\0\x0a\x06secret\x02\x03\0\x0a\x0cse\
-cret-value\x01B\x07\x02\x03\x02\x01,\x04\0\x06secret\x03\0\0\x02\x03\x02\x01-\x04\
-\0\x0csecret-value\x03\0\x02\x01h\x01\x01@\x01\x01s\x04\0\x03\x04\0\x06reveal\x01\
-\x05\x03\0$wasmcloud:secrets/reveal@0.1.0-draft\x05.\x04\07yosh:acp/provider-wit\
-h-all-of-its-exports-removed@7.0.0\x04\0\x0b.\x01\0(provider-with-all-of-its-exp\
-orts-removed\x03\0\0\0G\x09producers\x01\x0cprocessed-by\x02\x0dwit-component\x07\
-0.245.1\x10wit-bindgen-rust\x060.54.0";
+st\x02\x03\0\x02\x17resume-session-response\x02\x03\0\x06\x0fprompt-response\x01\
+BJ\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\x02\x01\x10\x04\0\x12initi\
+alize-request\x03\0\x02\x02\x03\x02\x01\x11\x04\0\x13initialize-response\x03\0\x04\
+\x02\x03\x02\x01\x12\x04\0\x14authenticate-request\x03\0\x06\x02\x03\x02\x01\x0a\
+\x04\0\x0fsession-mode-id\x03\0\x08\x02\x03\x02\x01\x13\x04\0\x10session-model-i\
+d\x03\0\x0a\x02\x03\x02\x01\x14\x04\0\x11session-config-id\x03\0\x0c\x02\x03\x02\
+\x01\x15\x04\0\x17session-config-value-id\x03\0\x0e\x02\x03\x02\x01\x16\x04\0\x15\
+session-config-option\x03\0\x10\x02\x03\x02\x01\x17\x04\0\x13new-session-request\
+\x03\0\x12\x02\x03\x02\x01\x18\x04\0\x14new-session-response\x03\0\x14\x02\x03\x02\
+\x01\x19\x04\0\x14load-session-request\x03\0\x16\x02\x03\x02\x01\x1a\x04\0\x15lo\
+ad-session-response\x03\0\x18\x02\x03\x02\x01\x1b\x04\0\x15list-sessions-request\
+\x03\0\x1a\x02\x03\x02\x01\x1c\x04\0\x16list-sessions-response\x03\0\x1c\x02\x03\
+\x02\x01\x1d\x04\0\x16resume-session-request\x03\0\x1e\x02\x03\x02\x01\x1e\x04\0\
+\x17resume-session-response\x03\0\x20\x02\x03\x02\x01\x07\x04\0\x0dcontent-block\
+\x03\0\"\x02\x03\x02\x01\x1f\x04\0\x0fprompt-response\x03\0$\x04\0\x07session\x03\
+\x01\x01h&\x01p#\x01j\x01%\x01\x01\x01C\x02\x04self'\x06prompt(\0)\x04\0\x16[met\
+hod]session.prompt\x01*\x01j\0\x01\x01\x01C\x02\x04self'\x07mode-id\x09\0+\x04\0\
+\x18[method]session.set-mode\x01,\x01C\x02\x04self'\x08model-id\x0b\0+\x04\0\x1c\
+[method]session.select-model\x01-\x01p\x11\x01j\x01.\x01\x01\x01C\x03\x04self'\x09\
+config-id\x0d\x05value\x0f\0/\x04\0![method]session.set-config-option\x010\x01j\x01\
+\x05\x01\x01\x01C\x01\x03req\x03\01\x04\0\x0ainitialize\x012\x01C\x01\x03req\x07\
+\0+\x04\0\x0cauthenticate\x013\x01i&\x01o\x024\x15\x01j\x015\x01\x01\x01C\x01\x03\
+req\x13\06\x04\0\x0bnew-session\x017\x01o\x024\x19\x01j\x018\x01\x01\x01C\x01\x03\
+req\x17\09\x04\0\x0cload-session\x01:\x01j\x01\x1d\x01\x01\x01C\x01\x03req\x1b\0\
+;\x04\0\x0dlist-sessions\x01<\x01o\x024!\x01j\x01=\x01\x01\x01C\x01\x03req\x1f\0\
+>\x04\0\x0eresume-session\x01?\x03\0\x14yosh:acp/agent@7.0.0\x05\x20\x01B\x09\x02\
+\x03\x02\x01\x04\x04\0\x0asession-id\x03\0\0\x01ky\x01r\x04\x0asession-id\x01\x04\
+paths\x04line\x02\x05limit\x02\x04\0\x16read-text-file-request\x03\0\x03\x01r\x01\
+\x07contents\x04\0\x17read-text-file-response\x03\0\x05\x01r\x03\x0asession-id\x01\
+\x04paths\x07contents\x04\0\x17write-text-file-request\x03\0\x07\x03\0\x19yosh:a\
+cp/filesystem@7.0.0\x05!\x02\x03\0\x06\x0esession-update\x02\x03\0\x05\x1areques\
+t-permission-request\x02\x03\0\x05\x1brequest-permission-response\x02\x03\0\x08\x16\
+read-text-file-request\x02\x03\0\x08\x17read-text-file-response\x02\x03\0\x08\x17\
+write-text-file-request\x02\x03\0\x04\x17create-terminal-request\x02\x03\0\x04\x14\
+terminal-exit-status\x01B*\x02\x03\x02\x01\x0f\x04\0\x05error\x03\0\0\x02\x03\x02\
+\x01\x04\x04\0\x0asession-id\x03\0\x02\x02\x03\x02\x01\"\x04\0\x0esession-update\
+\x03\0\x04\x02\x03\x02\x01#\x04\0\x1arequest-permission-request\x03\0\x06\x02\x03\
+\x02\x01$\x04\0\x1brequest-permission-response\x03\0\x08\x02\x03\x02\x01%\x04\0\x16\
+read-text-file-request\x03\0\x0a\x02\x03\x02\x01&\x04\0\x17read-text-file-respon\
+se\x03\0\x0c\x02\x03\x02\x01'\x04\0\x17write-text-file-request\x03\0\x0e\x02\x03\
+\x02\x01(\x04\0\x17create-terminal-request\x03\0\x10\x02\x03\x02\x01)\x04\0\x14t\
+erminal-exit-status\x03\0\x12\x04\0\x08terminal\x03\x01\x01i\x14\x01@\x01\x03req\
+\x11\0\x15\x04\0\x15[constructor]terminal\x01\x16\x01h\x14\x01f\x01}\x01C\x01\x04\
+self\x17\0\x18\x04\0\x17[method]terminal.output\x01\x19\x01j\x01\x13\x01\x01\x01\
+C\x01\x04self\x17\0\x1a\x04\0\x1e[method]terminal.wait-for-exit\x01\x1b\x01C\x02\
+\x0asession-id\x03\x06update\x05\x01\0\x04\0\x0enotify-session\x01\x1c\x01j\x01\x09\
+\x01\x01\x01C\x01\x03req\x07\0\x1d\x04\0\x12request-permission\x01\x1e\x01j\x01\x0d\
+\x01\x01\x01C\x01\x03req\x0b\0\x1f\x04\0\x0eread-text-file\x01\x20\x01j\0\x01\x01\
+\x01C\x01\x03req\x0f\0!\x04\0\x0fwrite-text-file\x01\"\x03\0\x15yosh:acp/client@\
+7.0.0\x05*\x01B\x0a\x01q\x03\x08upstream\x01s\0\x02io\x01s\0\x09not-found\0\0\x04\
+\0\x0dsecrets-error\x03\0\0\x01p}\x01q\x02\x06string\x01s\0\x05bytes\x01\x02\0\x04\
+\0\x0csecret-value\x03\0\x03\x04\0\x06secret\x03\x01\x01i\x05\x01j\x01\x06\x01\x01\
+\x01@\x01\x03keys\0\x07\x04\0\x03get\x01\x08\x03\0#wasmcloud:secrets/store@0.1.0\
+-draft\x05+\x02\x03\0\x0a\x06secret\x02\x03\0\x0a\x0csecret-value\x01B\x07\x02\x03\
+\x02\x01,\x04\0\x06secret\x03\0\0\x02\x03\x02\x01-\x04\0\x0csecret-value\x03\0\x02\
+\x01h\x01\x01@\x01\x01s\x04\0\x03\x04\0\x06reveal\x01\x05\x03\0$wasmcloud:secret\
+s/reveal@0.1.0-draft\x05.\x04\07yosh:acp/provider-with-all-of-its-exports-remove\
+d@7.0.0\x04\0\x0b.\x01\0(provider-with-all-of-its-exports-removed\x03\0\0\0G\x09\
+producers\x01\x0cprocessed-by\x02\x0dwit-component\x070.245.1\x10wit-bindgen-rus\
+t\x060.54.0";
 #[inline(never)]
 #[doc(hidden)]
 pub fn __link_custom_section_describing_imports() {

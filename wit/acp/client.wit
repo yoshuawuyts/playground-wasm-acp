@@ -7,20 +7,29 @@ package yosh:acp@7.0.0;
 /// Maps to the JSON-RPC methods listed under "Client" in the protocol
 /// overview: <https://agentclientprotocol.com/protocol/overview#client>
 ///
-/// Unlike earlier versions, this interface does NOT carry the
-/// `update-session` notification — `session-update`s now flow on the
-/// streaming body of a [`agent.prompt-turn`]. The client interface
-/// has shrunk to its genuine outbound calls: permission prompts and
-/// filesystem/terminal capabilities.
+/// Per-turn `session-update`s flow on the streaming body of a
+/// [`agent.prompt-turn`]. Out-of-turn session events (slash-command
+/// advertisements, mode/model state changes from the agent, session
+/// info updates) still need a channel and arrive here via
+/// [`notify-session`].
 interface client {
     use errors.{error};
     use sessions.{session-id};
+    use prompts.{session-update};
     use tools.{request-permission-request, request-permission-response};
     use filesystem.{
         read-text-file-request, read-text-file-response,
         write-text-file-request,
     };
     use terminals.{create-terminal-request, terminal-exit-status};
+
+    /// One-way out-of-turn session notification. Mirrors the legacy
+    /// `session/update` JSON-RPC method for events that don't belong
+    /// to any in-flight prompt-turn (e.g. an agent-emitted
+    /// `available-commands-update` advertised during session startup,
+    /// or a `current-mode-update` reflecting a mode flip the user
+    /// triggered out-of-band).
+    notify-session: async func(session-id: session-id, update: session-update);
 
     /// Ask the user to authorize a tool call. Returns the user's
     /// decision.

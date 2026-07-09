@@ -25,9 +25,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use acp_wasm_sys::layer::exports::yosh::acp::agent::{
-    Guest as AgentGuest, GuestPromptTurn, GuestSession, PromptTurn, Session,
-};
+use acp_wasm_sys::layer::exports::yosh::acp::agent::{Guest as AgentGuest, GuestSession, Session};
 use acp_wasm_sys::layer::exports::yosh::acp::client::{Guest as ClientGuest, GuestTerminal};
 use acp_wasm_sys::layer::yosh::acp::errors::{Error, ErrorCode};
 use acp_wasm_sys::layer::yosh::acp::filesystem::{
@@ -47,6 +45,7 @@ use acp_wasm_sys::layer::yosh::acp::tools::{
     PermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ToolKind,
 };
 use acp_wasm_sys::layer::yosh::acp::{agent, client};
+#[allow(unused_imports)]
 use wit_bindgen::rt::async_support::StreamReader;
 
 struct Layer;
@@ -73,28 +72,32 @@ impl GuestSession for PlanSession {
     async fn prompt(
         &self,
         prompt: Vec<acp_wasm_sys::layer::yosh::acp::content::ContentBlock>,
-    ) -> PromptTurn {
-        PromptTurn::new(PlanPromptTurn {
-            downstream: self.downstream.prompt(prompt).await,
-            _session_id: self.session_id.clone(),
-        })
+    ) -> Result<PromptResponse, Error> {
+        self.downstream.prompt(prompt).await
     }
 
     async fn set_mode(&self, mode_id: SessionModeId) -> Result<(), Error> {
-        // `plan` is ours: toggle plan-mode state. The host-injected
-        // `default` is the canonical "disengage plan" id. Anything
-        // else: turn plan off and forward downstream.
-        //
-        // Phase 1: the `SessionUpdate::CurrentModeUpdate` notifications
-        // that previously announced the switch are stubbed out. Phase 3
-        // will re-route them onto the next prompt-turn's stream OR via a
-        // dedicated session-mode channel.
+        // `plan` is ours: toggle plan-mode state and announce the
+        // switch via the out-of-turn `client.notify-session`
+        // channel. The host-injected `default` is the canonical
+        // "disengage plan" id. Anything else: turn plan off and
+        // forward downstream.
         if mode_id == PLAN_MODE_ID {
             set_plan(&self.session_id, true);
+            client::notify_session(
+                self.session_id.clone(),
+                SessionUpdate::CurrentModeUpdate(PLAN_MODE_ID.to_string()),
+            )
+            .await;
             return Ok(());
         }
         if mode_id == HOST_DEFAULT_MODE_ID {
             set_plan(&self.session_id, false);
+            client::notify_session(
+                self.session_id.clone(),
+                SessionUpdate::CurrentModeUpdate(HOST_DEFAULT_MODE_ID.to_string()),
+            )
+            .await;
             return Ok(());
         }
         set_plan(&self.session_id, false);
@@ -113,23 +116,6 @@ impl GuestSession for PlanSession {
     ) -> Result<Vec<SessionConfigOption>, Error> {
         // Config-option selectors are the provider's concern; forward verbatim.
         self.downstream.set_config_option(config_id, value).await
-    }
-}
-
-/// Phase-1 prompt-turn forwarder. Phase 3 may wrap the downstream
-/// stream to enforce additional plan-mode constraints.
-pub struct PlanPromptTurn {
-    downstream: agent::PromptTurn,
-    _session_id: String,
-}
-
-impl GuestPromptTurn for PlanPromptTurn {
-    async fn updates(&self) -> StreamReader<SessionUpdate> {
-        self.downstream.updates().await
-    }
-
-    async fn response(&self) -> Result<PromptResponse, Error> {
-        self.downstream.response().await
     }
 }
 
@@ -235,7 +221,6 @@ fn synth_reject(req: &RequestPermissionRequest) -> RequestPermissionResponse {
 
 impl AgentGuest for Layer {
     type Session = PlanSession;
-    type PromptTurn = PlanPromptTurn;
 
     async fn initialize(req: InitializeRequest) -> Result<InitializeResponse, Error> {
         agent::initialize(req).await
@@ -346,6 +331,12 @@ impl GuestTerminal for PlanTerminal {
 
 impl ClientGuest for Layer {
     type Terminal = PlanTerminal;
+
+    async fn notify_session(session_id: SessionId, update: SessionUpdate) {
+        // Plan-layer: pass-through (any plan-mode interception happens
+        // at the agent direction on set-mode).
+        client::notify_session(session_id, update).await;
+    }
 
     async fn request_permission(
         req: RequestPermissionRequest,

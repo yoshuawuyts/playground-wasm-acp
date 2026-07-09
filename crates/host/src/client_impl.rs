@@ -145,6 +145,31 @@ where
 // becomes the prompt-turn body stream (phase 3); terminal funcs
 // collapse into a `client.terminal` resource (phase 2).
 
+struct NotifySessionTask<T> {
+    bindings: Arc<Bindings>,
+    session_id: SessionId,
+    update: SessionUpdate,
+    reply: oneshot::Sender<wasmtime::Result<()>>,
+    _t: PhantomData<fn() -> T>,
+}
+
+impl<T: Send + 'static> AccessorTask<T, HasSelf<HostState>> for NotifySessionTask<T> {
+    async fn run(self, accessor: &Accessor<T, HasSelf<HostState>>) -> wasmtime::Result<()> {
+        let res = match &*self.bindings {
+            Bindings::Layer(b) => {
+                b.yosh_acp_client()
+                    .call_notify_session(accessor, self.session_id, self.update)
+                    .await
+            }
+            Bindings::Provider(_) => Err(wasmtime::Error::msg(
+                "host bug: provider stage routed as upstream client.notify-session",
+            )),
+        };
+        let _ = self.reply.send(res);
+        Ok(())
+    }
+}
+
 struct RequestPermissionTask<T> {
     bindings: Arc<Bindings>,
     req: RequestPermissionRequest,
@@ -220,6 +245,48 @@ impl<T: Send + 'static> AccessorTask<T, HasSelf<HostState>> for WriteTextFileTas
 impl client::Host for HostState {}
 
 impl client::HostWithStore for HasSelf<HostState> {
+    fn notify_session<T: Send>(
+        accessor: &Accessor<T, Self>,
+        session_id: SessionId,
+        update: SessionUpdate,
+    ) -> impl ::core::future::Future<Output = ()> + Send {
+        let route = routing(accessor);
+        async move {
+            match route {
+                Routing::Outbound(outbound) => {
+                    let Some(notif) = translate::session_update_wit_to_schema(session_id, update)
+                    else {
+                        return;
+                    };
+                    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+                    if outbound
+                        .send(OutboundEvent::SessionUpdate(notif, ack_tx))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let _ = ack_rx.await;
+                }
+                Routing::Upstream { idx, bindings } => {
+                    let res = spawn_upstream(accessor, idx, "notify-session", |reply| {
+                        NotifySessionTask {
+                            bindings,
+                            session_id,
+                            update,
+                            reply,
+                            _t: PhantomData,
+                        }
+                    })
+                    .await;
+                    if let Err(trap) = res {
+                        tracing::warn!(error = %trap, "upstream `client.notify-session` trapped");
+                    }
+                }
+            }
+        }
+    }
+
     fn request_permission<T: Send>(
         accessor: &Accessor<T, Self>,
         req: RequestPermissionRequest,

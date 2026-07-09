@@ -13,9 +13,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use acp_wasm_sys::layer::exports::yosh::acp::agent::{
-    Guest as AgentGuest, GuestPromptTurn, GuestSession, PromptTurn, Session,
-};
+use acp_wasm_sys::layer::exports::yosh::acp::agent::{Guest as AgentGuest, GuestSession, Session};
 use acp_wasm_sys::layer::exports::yosh::acp::client::{
     Guest as ClientGuest, GuestTerminal,
 };
@@ -30,6 +28,8 @@ use acp_wasm_sys::layer::yosh::acp::init::{
 use acp_wasm_sys::layer::yosh::acp::prompts::{
     AvailableCommand, PromptResponse, SessionUpdate, StopReason,
 };
+#[allow(unused_imports)]
+use wit_bindgen::rt::async_support::StreamReader;
 use acp_wasm_sys::layer::yosh::acp::sessions::{
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
     NewSessionRequest, NewSessionResponse, ResumeSessionRequest, ResumeSessionResponse,
@@ -38,8 +38,6 @@ use acp_wasm_sys::layer::yosh::acp::sessions::{
 };
 use acp_wasm_sys::layer::yosh::acp::tools::{RequestPermissionRequest, RequestPermissionResponse};
 use acp_wasm_sys::layer::yosh::acp::{agent, client};
-use wit_bindgen::rt::async_support::StreamReader;
-
 struct Layer;
 
 /// Layer-side session resource. Wraps the downstream stage's owned
@@ -55,24 +53,23 @@ pub struct LayerSession {
 }
 
 impl GuestSession for LayerSession {
-    async fn prompt(&self, prompt: Vec<ContentBlock>) -> PromptTurn {
-        // Phase 1: a `/shout` interception still ends the turn locally with
-        // no streamed updates; everything else delegates to the downstream
-        // session's prompt-turn. Phase 3 wires the layer-side stream `map`
-        // for uppercasing agent-direction text on real turns.
+    async fn prompt(&self, prompt: Vec<ContentBlock>) -> Result<PromptResponse, Error> {
+        // `/shout` intercept ends the turn locally. The ack is
+        // emitted via `notify-session`; the response is just an
+        // immediate `EndTurn`.
         if is_shout_command(&prompt) {
             let now_on = !SHOUT_ENABLED.fetch_xor(true, Ordering::Relaxed);
             let msg = if now_on { "CAPS LOCK ENGAGED!" } else { "no more capsie lock :)" };
-            return PromptTurn::new(LayerPromptTurn::ShoutAck {
-                _session_id: self.session_id.clone(),
-                msg: std::cell::RefCell::new(Some(msg.to_string())),
-            });
+            client::notify_session(
+                self.session_id.clone(),
+                SessionUpdate::AgentMessageChunk(ContentBlock::Text(TextContent {
+                    text: msg.to_string(),
+                })),
+            )
+            .await;
+            return Ok(PromptResponse { stop_reason: StopReason::EndTurn });
         }
-        let ds_turn = self.downstream.prompt(prompt).await;
-        PromptTurn::new(LayerPromptTurn::Forward {
-            _session_id: self.session_id.clone(),
-            downstream: ds_turn,
-        })
+        self.downstream.prompt(prompt).await
     }
 
     async fn set_mode(&self, mode_id: SessionModeId) -> Result<(), Error> {
@@ -92,76 +89,27 @@ impl GuestSession for LayerSession {
     }
 }
 
-/// Phase-1 prompt-turn stub. Either delegates to a downstream
-/// prompt-turn (the common case) or, for the `/shout` intercept,
-/// short-circuits with an empty stream + an immediate `EndTurn`
-/// response. Phase 3 introduces a `Map` variant that wraps the
-/// downstream stream and uppercases agent-direction text.
-pub enum LayerPromptTurn {
-    Forward {
-        _session_id: String,
-        downstream: agent::PromptTurn,
-    },
-    ShoutAck {
-        _session_id: String,
-        // Held so `response()` can be called once; subsequent calls
-        // return an internal error rather than panicking.
-        msg: std::cell::RefCell<Option<String>>,
-    },
-}
-
-impl GuestPromptTurn for LayerPromptTurn {
-    async fn updates(&self) -> StreamReader<SessionUpdate> {
-        match self {
-            LayerPromptTurn::Forward { downstream, .. } => {
-                // Phase 1: forward verbatim. Phase 3: map over this
-                // stream to uppercase agent-direction text in flight.
-                downstream.updates().await
-            }
-            LayerPromptTurn::ShoutAck { .. } => {
-                // Empty stream — nothing to deliver before the
-                // response resolves. Phase 3 may switch this to a
-                // one-shot stream containing the ack chunk.
-                let (_w, r) = acp_wasm_sys::layer::wit_stream::new::<SessionUpdate>();
-                r
-            }
-        }
-    }
-
-    async fn response(&self) -> Result<PromptResponse, Error> {
-        match self {
-            LayerPromptTurn::Forward { downstream, .. } => downstream.response().await,
-            LayerPromptTurn::ShoutAck { msg, .. } => {
-                // Consume the message so a duplicate call surfaces a
-                // clear error rather than re-running the side effect.
-                let _ = msg.borrow_mut().take();
-                Ok(PromptResponse { stop_reason: StopReason::EndTurn })
-            }
-        }
-    }
-}
-
 /// Whether agent-emitted text should be shouted (uppercased). Toggled
 /// in-process via the `/shout` slash command; not persisted across
 /// component restarts.
 static SHOUT_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Push the layer's `available-commands-update` upstream so the editor
-/// learns about `/shout`. Sent after each session lifecycle method.
-///
-/// Phase 1: stubbed out (no `client::update_session` anymore). Phase 3
-/// will push this onto the active prompt-turn's stream OR via a
-/// dedicated commands channel — design TBD.
-#[allow(dead_code)]
-async fn advertise_commands(_session_id: &SessionId) {
-    let _cmds = vec![AvailableCommand {
+/// Push the layer's `available-commands-update` upstream as a
+/// non-turn session notification. Phase 3: this uses
+/// `client.notify-session` (a new one-way method that replaces the
+/// dropped legacy `update-session`); per-turn updates flow on the
+/// prompt-turn stream body instead.
+async fn advertise_commands(session_id: &SessionId) {
+    let cmds = vec![AvailableCommand {
         name: "shout".to_string(),
         description: "Toggle uppercase rewriting of agent output for this session.".to_string(),
         input: None,
     }];
-    // TODO(streams phase 3): emit this as a `SessionUpdate::AvailableCommandsUpdate`
-    // on the next prompt-turn's stream, or carve out a separate
-    // commands-advertisement channel on the session resource.
+    client::notify_session(
+        session_id.clone(),
+        SessionUpdate::AvailableCommandsUpdate(cmds),
+    )
+    .await;
 }
 
 /// Uppercase the `text` field of any `ContentBlock::Text`. Other content
@@ -207,7 +155,6 @@ fn is_shout_command(blocks: &[ContentBlock]) -> bool {
 
 impl AgentGuest for Layer {
     type Session = LayerSession;
-    type PromptTurn = LayerPromptTurn;
 
     async fn initialize(req: InitializeRequest) -> Result<InitializeResponse, Error> {
         agent::initialize(req).await
@@ -287,6 +234,15 @@ impl GuestTerminal for LayerTerminal {
 
 impl ClientGuest for Layer {
     type Terminal = LayerTerminal;
+
+    async fn notify_session(session_id: SessionId, update: SessionUpdate) {
+        let rewritten = if SHOUT_ENABLED.load(Ordering::Relaxed) {
+            uppercase_update(update)
+        } else {
+            update
+        };
+        client::notify_session(session_id, rewritten).await;
+    }
 
     async fn request_permission(
         req: RequestPermissionRequest,
