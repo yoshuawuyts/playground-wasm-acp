@@ -278,7 +278,7 @@ pub struct HostProcess {
 }
 
 pub struct HostBuilder {
-    provider: PathBuf,
+    providers: Vec<PathBuf>,
     layers: Vec<PathBuf>,
     env: Vec<(String, String)>,
     keyring_store: Option<String>,
@@ -287,7 +287,7 @@ pub struct HostBuilder {
 impl HostBuilder {
     pub fn new() -> Self {
         Self {
-            provider: provider_wasm(),
+            providers: vec![provider_wasm()],
             layers: Vec::new(),
             env: Vec::new(),
             keyring_store: None,
@@ -300,9 +300,17 @@ impl HostBuilder {
     }
 
     /// Use a specific provider wasm component instead of the default
-    /// (ollama-provider).
+    /// (ollama-provider). Replaces any previously configured providers.
     pub fn provider(mut self, p: PathBuf) -> Self {
-        self.provider = p;
+        self.providers = vec![p];
+        self
+    }
+
+    /// Load an additional provider alongside the existing ones. The host
+    /// instantiates every provider per session and merges their model
+    /// selectors into one cross-provider dropdown.
+    pub fn with_provider(mut self, p: PathBuf) -> Self {
+        self.providers.push(p);
         self
     }
 
@@ -322,7 +330,9 @@ impl HostBuilder {
         let state_dir = tempfile::tempdir().context("tempdir for XDG_STATE_HOME")?;
 
         let mut cmd = Command::new(host_bin());
-        cmd.arg("--provider").arg(&self.provider);
+        for p in &self.providers {
+            cmd.arg("--provider").arg(p);
+        }
         for l in &self.layers {
             cmd.arg("--layer").arg(l);
         }

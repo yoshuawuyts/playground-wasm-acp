@@ -115,6 +115,12 @@ pub struct HostState {
     pub downstream_sessions: std::collections::HashMap<u32, wasmtime::component::ResourceAny>,
     /// Monotonic counter for keys in [`Self::downstream_sessions`].
     pub next_downstream_rep: u32,
+    /// Editor-facing session id to stamp on **outbound** `notify-session`
+    /// updates, overriding the guest-supplied id. Set by the multi-provider
+    /// grouping layer so every provider chain's updates reach the editor
+    /// under the single group session id (see [`crate::group`]). `None`
+    /// leaves the guest id untouched — the single-provider passthrough.
+    pub editor_session_id: Option<String>,
 }
 
 impl HostState {

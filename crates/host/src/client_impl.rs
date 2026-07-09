@@ -254,6 +254,12 @@ impl client::HostWithStore for HasSelf<HostState> {
         async move {
             match route {
                 Routing::Outbound(outbound) => {
+                    // Multi-provider groups stamp a single editor-facing id on
+                    // every chain's updates; fall back to the guest id (the
+                    // single-provider passthrough) when unset.
+                    let session_id = accessor
+                        .with(|mut a| a.get().editor_session_id.clone())
+                        .unwrap_or(session_id);
                     let Some(notif) = translate::session_update_wit_to_schema(session_id, update)
                     else {
                         return;

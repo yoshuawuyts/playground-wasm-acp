@@ -12,9 +12,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use acp_wasm_sys::provider::exports::yosh::acp::agent::{
-    Guest, GuestPromptTurn, GuestSession, PromptTurn, Session,
-};
+use acp_wasm_sys::provider::exports::yosh::acp::agent::{Guest, GuestSession, Session};
 use acp_wasm_sys::provider::yosh::acp::content::{ContentBlock, TextContent};
 use acp_wasm_sys::provider::yosh::acp::errors::{Error, ErrorCode};
 use acp_wasm_sys::provider::yosh::acp::init::{
@@ -28,7 +26,8 @@ use acp_wasm_sys::provider::yosh::acp::sessions::{
     ComponentSource, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
     LoadSessionResponse, NewSessionRequest, NewSessionResponse, ResumeSessionRequest,
     ResumeSessionResponse, SessionConfigId, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SessionConfigValueId, SessionModeId, SessionModelId,
+    SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionModeId,
+    SessionModelId,
 };
 
 use acp_wasm_sys::provider::yosh::acp::client;
@@ -59,18 +58,8 @@ impl Drop for ProviderSession {
 }
 
 impl GuestSession for ProviderSession {
-    async fn prompt(&self, prompt: Vec<ContentBlock>) -> PromptTurn {
-        // Allocate the body stream up front. Both halves go into the returned
-        // prompt-turn resource; `response()` parks the writer in
-        // `ACTIVE_WRITER` while running the prompt loop so `emit_update` finds
-        // it, then drops it to EOF the stream.
-        let (writer, reader) = acp_wasm_sys::provider::wit_stream::new::<SessionUpdate>();
-        PromptTurn::new(ProviderPromptTurn {
-            session_id: self.id.clone(),
-            inputs: RefCell::new(Some(prompt)),
-            writer: RefCell::new(Some(writer)),
-            reader: RefCell::new(Some(reader)),
-        })
+    async fn prompt(&self, prompt: Vec<ContentBlock>) -> Result<PromptResponse, Error> {
+        prompt_impl(self.id.clone(), prompt).await
     }
 
     async fn set_mode(&self, _mode_id: SessionModeId) -> Result<(), Error> {
@@ -198,72 +187,13 @@ impl GuestSession for ProviderSession {
     }
 }
 
-/// Owned state for a `prompt-turn` resource. Constructed by
-/// [`GuestSession::prompt`]; consumed by either [`updates()`] (which hands out
-/// the reader) or [`response()`] (which runs the prompt loop while writing
-/// updates into the writer).
-pub struct ProviderPromptTurn {
-    session_id: String,
-    inputs: RefCell<Option<Vec<ContentBlock>>>,
-    writer: RefCell<Option<wit_bindgen::rt::async_support::StreamWriter<SessionUpdate>>>,
-    reader: RefCell<Option<wit_bindgen::rt::async_support::StreamReader<SessionUpdate>>>,
-}
-
-// Single-threaded wasm guest: a thread-local cell is enough.
-thread_local! {
-    static ACTIVE_WRITER: RefCell<
-        Option<wit_bindgen::rt::async_support::StreamWriter<SessionUpdate>>,
-    > = const { RefCell::new(None) };
-}
-
-impl GuestPromptTurn for ProviderPromptTurn {
-    async fn updates(&self) -> wit_bindgen::rt::async_support::StreamReader<SessionUpdate> {
-        // First call wins. Subsequent calls get an immediately-EOF empty
-        // stream.
-        match self.reader.borrow_mut().take() {
-            Some(r) => r,
-            None => {
-                let (_w, r) = acp_wasm_sys::provider::wit_stream::new::<SessionUpdate>();
-                r
-            }
-        }
-    }
-
-    async fn response(&self) -> Result<PromptResponse, Error> {
-        let inputs = match self.inputs.borrow_mut().take() {
-            Some(v) => v,
-            None => {
-                return Err(err(
-                    ErrorCode::InternalError,
-                    "prompt-turn.response called twice",
-                ));
-            }
-        };
-        let writer = self.writer.borrow_mut().take();
-        ACTIVE_WRITER.with(|cell| *cell.borrow_mut() = writer);
-        let r = prompt_impl(self.session_id.clone(), inputs).await;
-        // Drop the writer so the host-side reader sees end-of-stream.
-        ACTIVE_WRITER.with(|cell| *cell.borrow_mut() = None);
-        r
-    }
-}
-
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Push a `SessionUpdate` onto the currently-active prompt-turn's body stream.
-/// No-op if nothing is active.
-async fn emit_update(_session_id: String, update: SessionUpdate) {
-    let Some(mut writer) = ACTIVE_WRITER.with(|cell| cell.borrow_mut().take()) else {
-        return;
-    };
-    let (result, _buf) = writer.write(vec![update]).await;
-    // If the host closed the reader, drop the writer instead of writing again
-    // (which would trap). Skip re-parking so future emits no-op.
-    use wit_bindgen::rt::async_support::StreamResult;
-    if matches!(result, StreamResult::Dropped | StreamResult::Cancelled) {
-        return;
-    }
-    ACTIVE_WRITER.with(|cell| *cell.borrow_mut() = Some(writer));
+/// Push a `SessionUpdate` upstream via `client.notify-session`. All session
+/// updates flow through this side channel; the agent direction only carries
+/// the eventual `prompt-response`.
+async fn emit_update(session_id: String, update: SessionUpdate) {
+    acp_wasm_sys::provider::yosh::acp::client::notify_session(session_id, update).await;
 }
 
 // Wasm components are single-threaded; thread-local + RefCell avoids any
@@ -414,7 +344,7 @@ fn build_config_options(
         ),
         category: Some(SessionConfigOptionCategory::Mode),
         current_value: resolve_mode(current_mode),
-        options: vec![
+        options: SessionConfigSelectOptions::Ungrouped(vec![
             SessionConfigSelectOption {
                 value: MODE_AGENT.to_string(),
                 name: "Agent".to_string(),
@@ -438,7 +368,7 @@ fn build_config_options(
                         .to_string(),
                 ),
             },
-        ],
+        ]),
         provided_by: component_source(),
     }];
 
@@ -456,7 +386,7 @@ fn build_config_options(
         description: Some("Which Copilot model backs this session.".to_string()),
         category: Some(SessionConfigOptionCategory::Model),
         current_value: current_model.to_string(),
-        options: model_options,
+        options: SessionConfigSelectOptions::Ungrouped(model_options),
         provided_by: component_source(),
     });
 
@@ -483,7 +413,7 @@ fn build_config_options(
                 ),
                 category: Some(SessionConfigOptionCategory::ThoughtLevel),
                 current_value: current_reasoning.to_string(),
-                options: reasoning_options,
+                options: SessionConfigSelectOptions::Ungrouped(reasoning_options),
                 provided_by: component_source(),
             });
         }
@@ -502,7 +432,7 @@ fn build_config_options(
         ),
         category: Some(SessionConfigOptionCategory::Other("permissions".to_string())),
         current_value: if effective_allow_all { "on" } else { "off" }.to_string(),
-        options: vec![
+        options: SessionConfigSelectOptions::Ungrouped(vec![
             SessionConfigSelectOption {
                 value: "on".to_string(),
                 name: "On".to_string(),
@@ -513,7 +443,7 @@ fn build_config_options(
                 name: "Off".to_string(),
                 description: Some("Require approval for tool requests.".to_string()),
             },
-        ],
+        ]),
         provided_by: component_source(),
     });
 
@@ -609,7 +539,6 @@ fn extract_user_text(prompt: &[ContentBlock]) -> String {
 
 impl Guest for Agent {
     type Session = ProviderSession;
-    type PromptTurn = ProviderPromptTurn;
 
     async fn initialize(_req: InitializeRequest) -> Result<InitializeResponse, Error> {
         Ok(InitializeResponse {

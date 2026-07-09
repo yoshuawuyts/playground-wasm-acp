@@ -21,6 +21,7 @@ use wasmtime::{Config, Engine};
 
 mod bridge;
 mod client_impl;
+mod group;
 mod install;
 mod secrets;
 mod secrets_impl;
@@ -102,19 +103,28 @@ struct Args {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Path or WIT name of the terminal ACP **provider** wasm component
-    /// (the bottom of the chain). Required.
+    /// Path or WIT name of a terminal ACP **provider** wasm component
+    /// (the bottom of a chain). At least one is required.
+    ///
+    /// May be passed multiple times to load several providers at once.
+    /// Every provider is instantiated for each session and its models
+    /// are merged into a single **model** selector, labelled by
+    /// provider, so the user can pick which model from which provider
+    /// backs the session (the rest of the selectors — mode, thinking,
+    /// … — follow the provider owning the active model). The same set
+    /// of `--layer`s wraps every provider.
     ///
     /// Accepts either a filesystem path (`./my-agent.wasm`) or a
     /// WIT-style package name (`namespace:package[@version]`) — the
     /// latter is resolved against the local component cache, installing
     /// from the registry on first use. `--provider` takes precedence
     /// over the legacy positional argument.
-    #[arg(long, value_name = "PATH|WIT_NAME")]
-    provider: Option<String>,
+    #[arg(long = "provider", value_name = "PATH|WIT_NAME")]
+    providers: Vec<String>,
 
     /// Legacy positional alias for `--provider`. Retained so existing
-    /// invocations keep working unchanged.
+    /// single-provider invocations keep working unchanged; used only
+    /// when no `--provider` flag is given.
     wasm_path: Option<String>,
 
     /// Path or WIT name of a **layer** wasm component to wrap the
@@ -268,17 +278,20 @@ fn main() -> Result<()> {
     config.wasm_features(wasmtime::WasmFeatures::CM_ASYNC_STACKFUL, true);
     let engine = Engine::new(&config)?;
 
-    // Resolve provider arg: `--provider` takes precedence, fall back to
-    // the legacy positional argument.
-    let provider_arg = args
-        .provider
-        .clone()
-        .or_else(|| args.wasm_path.clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "missing provider wasm component: pass `--provider <path|wit-name>` or as positional arg"
-            )
-        })?;
+    // Resolve provider args: every `--provider` flag, falling back to
+    // the legacy positional argument when none were given. At least one
+    // provider is required.
+    let provider_args: Vec<String> = if !args.providers.is_empty() {
+        args.providers.clone()
+    } else {
+        args.wasm_path.clone().into_iter().collect()
+    };
+    if provider_args.is_empty() {
+        anyhow::bail!(
+            "missing provider wasm component: pass `--provider <path|wit-name>` \
+             (repeatable) or as a positional arg"
+        );
+    }
 
     let data_root = init_data_root()?;
 
@@ -301,14 +314,19 @@ fn main() -> Result<()> {
         // WIT names install-on-miss against the component cache). The
         // component identity (`namespace:component-name`) that keys its
         // secret store and `/data` comes from the same arg.
-        let provider_path = install::resolve(&provider_arg)
-            .await
-            .with_context(|| format!("resolving provider `{provider_arg}`"))?;
-        let provider_id = install::component_id_for_arg(&provider_arg)
-            .with_context(|| format!("deriving component id for `{provider_arg}`"))?;
-        let provider = load_stage(&engine, &provider_path, StageKind::Provider, provider_id)?;
+        let mut providers: Vec<Stage> = Vec::with_capacity(provider_args.len());
+        for arg in &provider_args {
+            let provider_path = install::resolve(arg)
+                .await
+                .with_context(|| format!("resolving provider `{arg}`"))?;
+            let provider_id = install::component_id_for_arg(arg)
+                .with_context(|| format!("deriving component id for `{arg}`"))?;
+            let stage = load_stage(&engine, &provider_path, StageKind::Provider, provider_id)?;
+            info!(path = %provider_path.display(), provider = %stage.component_id, "loaded provider component");
+            providers.push(stage);
+        }
         info!(
-            provider = %provider.component_id,
+            provider_count = providers.len(),
             layer_count = args.layers.len(),
             "chain configuration",
         );
@@ -329,7 +347,7 @@ fn main() -> Result<()> {
         let (outbound_tx, outbound_rx) = mpsc::channel(64);
         let factory = Arc::new(SessionFactory::new(
             engine,
-            provider,
+            providers,
             layers,
             outbound_tx,
             data_root,
@@ -337,7 +355,6 @@ fn main() -> Result<()> {
         ));
         let registry = Arc::new(SessionRegistry::new());
 
-        info!(path = %provider_path.display(), "loaded provider component");
         info!("listening for ACP JSON-RPC on stdio");
 
         bridge::run(factory, registry, outbound_rx).await
