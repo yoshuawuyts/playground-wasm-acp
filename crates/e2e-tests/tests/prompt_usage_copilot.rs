@@ -1,5 +1,5 @@
 //! End-to-end test: a Copilot prompt turn emits a stable ACP `usage_update`
-//! carrying both context usage and premium-request cost, all sourced from
+//! carrying both context usage and usage-based (AIU) cost, all sourced from
 //! upstream Copilot data.
 //!
 //! Flow exercised:
@@ -8,14 +8,15 @@
 //!      which the mock 404s (as happens for PATs), so it falls back to the
 //!      direct-token path against `COPILOT_BASE_URL`.
 //!   2. `session/new` lists models via `GET /models`; the mock advertises a
-//!      premium model with `billing` ({is_premium, multiplier}) and a
+//!      reasoning-capable model with a
 //!      `capabilities.limits.max_context_window_tokens`.
 //!   3. `session/prompt` streams `POST /chat/completions`; the final SSE chunk
-//!      carries `usage` (requested via `stream_options.include_usage`).
+//!      carries `usage` and `copilot_usage.total_nano_aiu` (both requested via
+//!      `stream_options.include_usage`).
 //!   4. The provider emits a WIT `usage-update`; the host forwards it as a
 //!      `session/update` with `sessionUpdate: "usage_update"`, `used` =
 //!      `total_tokens`, `size` = the model's context window, and `cost` = the
-//!      per-turn premium-request consumption (multiplier of the premium model).
+//!      turn's AI-Unit consumption (`total_nano_aiu` / 1e9, currency `AIU`).
 
 mod common;
 
@@ -54,19 +55,20 @@ impl CopilotMock {
             .await;
     }
 
-    /// `GET /models` advertising a single premium, reasoning-capable chat
-    /// model with a context-window limit.
-    async fn expect_models(&self, id: &str, context_window: u64, multiplier: f64) {
+    /// `GET /models` advertising a single reasoning-capable chat model with a
+    /// context-window limit. (The real API carries no `billing` field — cost
+    /// comes from the chat stream, not the model entry.)
+    async fn expect_models(&self, id: &str, context_window: u64) {
         let body = json!({
             "data": [{
                 "id": id,
                 "name": id,
+                "model_picker_category": "powerful",
                 "capabilities": {
                     "type": "chat",
                     "supports": { "reasoning_effort": ["low", "medium", "high"] },
                     "limits": { "max_context_window_tokens": context_window }
-                },
-                "billing": { "is_premium": true, "multiplier": multiplier }
+                }
             }]
         });
         Mock::given(method("GET"))
@@ -77,13 +79,14 @@ impl CopilotMock {
     }
 
     /// `POST /chat/completions` streaming a short SSE response whose final
-    /// chunk carries token accounting.
+    /// chunk carries token accounting and usage-based (AIU) billing.
     async fn expect_chat_with_usage(
         &self,
         content: &str,
         prompt_tokens: u64,
         completion_tokens: u64,
         total_tokens: u64,
+        total_nano_aiu: u64,
     ) {
         let body = format!(
             "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
@@ -93,6 +96,8 @@ impl CopilotMock {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens
+            },"copilot_usage":{
+                "total_nano_aiu": total_nano_aiu
             }}),
         );
         Mock::given(method("POST"))
@@ -119,18 +124,23 @@ async fn copilot_prompt_emits_usage_update_with_cost() {
 
     const MODEL: &str = "gpt-5-e2e";
     const CONTEXT_WINDOW: u64 = 128_000;
-    const MULTIPLIER: f64 = 1.0;
     const PROMPT_TOKENS: u64 = 100;
     const COMPLETION_TOKENS: u64 = 20;
     const TOTAL_TOKENS: u64 = 120;
+    const TOTAL_NANO_AIU: u64 = 39_000_000;
+    const EXPECTED_AIU: f64 = 0.039;
 
     let copilot = CopilotMock::start().await;
     copilot.expect_token_exchange_404().await;
+    copilot.expect_models(MODEL, CONTEXT_WINDOW).await;
     copilot
-        .expect_models(MODEL, CONTEXT_WINDOW, MULTIPLIER)
-        .await;
-    copilot
-        .expect_chat_with_usage("Hi there!", PROMPT_TOKENS, COMPLETION_TOKENS, TOTAL_TOKENS)
+        .expect_chat_with_usage(
+            "Hi there!",
+            PROMPT_TOKENS,
+            COMPLETION_TOKENS,
+            TOTAL_TOKENS,
+            TOTAL_NANO_AIU,
+        )
         .await;
 
     let cwd = tempfile::tempdir().unwrap();
@@ -191,12 +201,12 @@ async fn copilot_prompt_emits_usage_update_with_cost() {
     );
     assert_eq!(
         usage.pointer("/cost/amount").and_then(Value::as_f64),
-        Some(MULTIPLIER),
-        "usage_update.cost.amount should be the premium model's multiplier (full update: {usage})"
+        Some(EXPECTED_AIU),
+        "usage_update.cost.amount should be total_nano_aiu / 1e9 (full update: {usage})"
     );
     assert_eq!(
         usage.pointer("/cost/currency").and_then(Value::as_str),
-        Some("premium-requests"),
-        "usage_update.cost.currency should be premium-requests (full update: {usage})"
+        Some("AIU"),
+        "usage_update.cost.currency should be AIU (full update: {usage})"
     );
 }

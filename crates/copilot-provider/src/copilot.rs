@@ -426,6 +426,17 @@ pub struct Usage {
     pub total_tokens: u64,
 }
 
+/// Usage-based billing reported alongside `usage` on the final streamed chunk
+/// (requires `stream_options.include_usage`). GitHub deprecated premium-request
+/// multipliers in favor of usage-based billing measured in AI Units (AIU);
+/// `total_nano_aiu` is this response's cost in nano-AIU (1 AIU = 1e9 nano-AIU).
+/// It is `0` for included models and for accounts on unlimited plans.
+#[derive(Deserialize, Clone, Copy, Default)]
+pub struct CopilotUsage {
+    #[serde(default)]
+    pub total_nano_aiu: u64,
+}
+
 #[derive(Deserialize)]
 struct StreamChunk {
     #[serde(default)]
@@ -434,6 +445,10 @@ struct StreamChunk {
     /// was requested; carries the turn's token accounting.
     #[serde(default)]
     usage: Option<Usage>,
+    /// Present only on the final chunk (same trigger as `usage`); carries the
+    /// turn's usage-based (AIU) billing.
+    #[serde(default)]
+    copilot_usage: Option<CopilotUsage>,
 }
 
 #[derive(Deserialize)]
@@ -519,9 +534,13 @@ fn fold_chunk(
     accum: &mut Vec<ToolCallAccum>,
     finish_reason: &mut Option<String>,
     usage: &mut Option<Usage>,
+    copilot_usage: &mut Option<CopilotUsage>,
 ) -> String {
     if let Some(u) = chunk.usage {
         *usage = Some(u);
+    }
+    if let Some(cu) = chunk.copilot_usage {
+        *copilot_usage = Some(cu);
     }
     let mut text = String::new();
     for choice in chunk.choices {
@@ -571,6 +590,9 @@ pub struct RoundOutcome {
     /// Token usage for this round, if the endpoint reported it on its final
     /// chunk. `None` when the model/endpoint didn't include usage.
     pub usage: Option<Usage>,
+    /// Usage-based (AIU) billing for this round, if the endpoint reported it on
+    /// its final chunk. `None` when the endpoint didn't include it.
+    pub copilot_usage: Option<CopilotUsage>,
 }
 
 /// Run one streamed chat round. `on_chunk` is invoked once per non-empty text
@@ -682,6 +704,7 @@ where
     let mut accum: Vec<ToolCallAccum> = Vec::new();
     let mut finish_reason: Option<String> = None;
     let mut usage: Option<Usage> = None;
+    let mut copilot_usage: Option<CopilotUsage> = None;
     'outer: while let Some(frame) = stream.next().await {
         let bytes = frame.map_err(|e| ChatError::Other(format!("read chat body: {e}")))?;
         buf.extend_from_slice(&bytes);
@@ -692,7 +715,8 @@ where
             };
             match parse_sse_line(line) {
                 SseEvent::Chunk(chunk) => {
-                    let text = fold_chunk(chunk, &mut accum, &mut finish_reason, &mut usage);
+                    let text =
+                        fold_chunk(chunk, &mut accum, &mut finish_reason, &mut usage, &mut copilot_usage);
                     if !text.is_empty() {
                         on_chunk(text.clone()).await;
                         content.push_str(&text);
@@ -706,7 +730,7 @@ where
     // Handle a trailing line with no terminating newline (rare).
     if let Ok(line) = std::str::from_utf8(&buf) {
         if let SseEvent::Chunk(chunk) = parse_sse_line(line) {
-            let text = fold_chunk(chunk, &mut accum, &mut finish_reason, &mut usage);
+            let text = fold_chunk(chunk, &mut accum, &mut finish_reason, &mut usage, &mut copilot_usage);
             if !text.is_empty() {
                 on_chunk(text.clone()).await;
                 content.push_str(&text);
@@ -732,6 +756,7 @@ where
         tool_calls,
         finish_reason,
         usage,
+        copilot_usage,
     })
 }
 
@@ -754,18 +779,11 @@ pub struct CopilotModel {
     /// doesn't advertise a limit for this model. Used as the `size` of the
     /// context-usage indicator.
     pub context_window: Option<u64>,
-    /// Premium-request cost multiplier for this model, from `billing.multiplier`
-    /// (e.g. `1.0`, `0.33`, `0` for included models). `is_premium` marks models
-    /// that draw from the monthly premium-request allowance. Together they let
-    /// us report a per-turn cost in premium-request units.
-    pub multiplier: f64,
-    pub is_premium: bool,
 }
 
 impl CopilotModel {
     /// A minimal fallback model entry used when the `/models` endpoint is
-    /// unreachable: no reasoning levels, unknown context window, and treated
-    /// as non-premium (so no cost is reported until real capabilities load).
+    /// unreachable: no reasoning levels and an unknown context window.
     pub fn fallback(id: impl Into<String>) -> Self {
         let id = id.into();
         Self {
@@ -773,8 +791,6 @@ impl CopilotModel {
             id,
             reasoning_efforts: Vec::new(),
             context_window: None,
-            multiplier: 0.0,
-            is_premium: false,
         }
     }
 }
@@ -792,8 +808,6 @@ struct ModelEntry {
     name: Option<String>,
     #[serde(default)]
     capabilities: Option<ModelCapabilities>,
-    #[serde(default)]
-    billing: Option<ModelBilling>,
 }
 
 #[derive(Deserialize)]
@@ -819,20 +833,10 @@ struct ModelLimits {
     max_context_window_tokens: Option<u64>,
 }
 
-/// Premium-request billing metadata advertised under the top-level `billing`
-/// key of a model entry.
-#[derive(Deserialize)]
-struct ModelBilling {
-    #[serde(default)]
-    is_premium: bool,
-    #[serde(default)]
-    multiplier: f64,
-}
-
 /// Convert one raw `/models` entry into a [`CopilotModel`], sourcing the
-/// reasoning-effort levels, context-window limit, and premium-request billing
-/// straight from the payload. Returns `None` for entries that explicitly
-/// advertise a non-`chat` capability type (e.g. embeddings), which we skip.
+/// reasoning-effort levels and context-window limit straight from the payload.
+/// Returns `None` for entries that explicitly advertise a non-`chat`
+/// capability type (e.g. embeddings), which we skip.
 fn model_from_entry(entry: ModelEntry) -> Option<CopilotModel> {
     let mut reasoning_efforts = Vec::new();
     let mut context_window = None;
@@ -852,17 +856,11 @@ fn model_from_entry(entry: ModelEntry) -> Option<CopilotModel> {
         }
     }
     let name = entry.name.unwrap_or_else(|| entry.id.clone());
-    let (is_premium, multiplier) = entry
-        .billing
-        .map(|b| (b.is_premium, b.multiplier))
-        .unwrap_or((false, 0.0));
     Some(CopilotModel {
         id: entry.id,
         name,
         reasoning_efforts,
         context_window,
-        multiplier,
-        is_premium,
     })
 }
 
@@ -920,11 +918,11 @@ pub async fn list_models() -> Result<Vec<CopilotModel>, String> {
 mod tests {
     use super::*;
 
-    /// A realistic `/models` entry (premium, reasoning-capable, with a
-    /// context-window limit) round-trips into a `CopilotModel` with every
-    /// upstream-sourced field populated.
+    /// A realistic `/models` entry (reasoning-capable, with a context-window
+    /// limit) round-trips into a `CopilotModel` with every upstream-sourced
+    /// field populated.
     #[test]
-    fn model_from_entry_captures_limits_and_billing() {
+    fn model_from_entry_captures_limits() {
         let entry: ModelEntry = serde_json::from_str(
             r#"{
                 "id": "gpt-5",
@@ -934,7 +932,7 @@ mod tests {
                     "supports": { "reasoning_effort": ["low", "medium", "high"] },
                     "limits": { "max_context_window_tokens": 128000 }
                 },
-                "billing": { "is_premium": true, "multiplier": 1.0 }
+                "model_picker_category": "powerful"
             }"#,
         )
         .unwrap();
@@ -943,8 +941,6 @@ mod tests {
         assert_eq!(model.name, "GPT-5");
         assert_eq!(model.reasoning_efforts, vec!["low", "medium", "high"]);
         assert_eq!(model.context_window, Some(128000));
-        assert!(model.is_premium);
-        assert_eq!(model.multiplier, 1.0);
     }
 
     /// Entries that declare a non-`chat` capability type (e.g. embeddings)
@@ -958,41 +954,48 @@ mod tests {
         assert!(model_from_entry(entry).is_none());
     }
 
-    /// A bare entry with no billing or limits is treated as a non-premium
-    /// model with an unknown context window (so no cost is ever reported).
+    /// A bare entry with no limits is treated as a model with an unknown
+    /// context window and no reasoning levels.
     #[test]
-    fn model_from_entry_defaults_to_free_unknown_window() {
+    fn model_from_entry_defaults_to_unknown_window() {
         let entry: ModelEntry = serde_json::from_str(r#"{ "id": "gpt-4o" }"#).unwrap();
         let model = model_from_entry(entry).expect("chat model");
         assert_eq!(model.context_window, None);
-        assert!(!model.is_premium);
-        assert_eq!(model.multiplier, 0.0);
         assert!(model.reasoning_efforts.is_empty());
     }
 
-    /// The final streamed chunk carries `usage` (thanks to
-    /// `stream_options.include_usage`); `fold_chunk` captures it into the
-    /// running accumulator.
+    /// The final streamed chunk carries `usage` and `copilot_usage` (thanks to
+    /// `stream_options.include_usage`); `fold_chunk` captures both into the
+    /// running accumulators.
     #[test]
     fn fold_chunk_captures_usage_from_final_chunk() {
         let SseEvent::Chunk(chunk) = parse_sse_line(
-            r#"data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}"#,
+            r#"data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120},"copilot_usage":{"total_nano_aiu":39000000}}"#,
         ) else {
             panic!("expected a chunk");
         };
         let mut accum = Vec::new();
         let mut finish_reason = None;
         let mut usage = None;
-        let text = fold_chunk(chunk, &mut accum, &mut finish_reason, &mut usage);
+        let mut copilot_usage = None;
+        let text = fold_chunk(
+            chunk,
+            &mut accum,
+            &mut finish_reason,
+            &mut usage,
+            &mut copilot_usage,
+        );
         assert!(text.is_empty());
         let usage = usage.expect("usage captured");
         assert_eq!(usage.prompt_tokens, 100);
         assert_eq!(usage.completion_tokens, 20);
         assert_eq!(usage.total_tokens, 120);
+        let copilot_usage = copilot_usage.expect("copilot_usage captured");
+        assert_eq!(copilot_usage.total_nano_aiu, 39_000_000);
     }
 
-    /// Content-only chunks leave `usage` untouched (it stays `None` until the
-    /// final accounting chunk arrives).
+    /// Content-only chunks leave `usage` and `copilot_usage` untouched (they
+    /// stay `None` until the final accounting chunk arrives).
     #[test]
     fn fold_chunk_leaves_usage_none_for_content_chunks() {
         let SseEvent::Chunk(chunk) =
@@ -1003,8 +1006,16 @@ mod tests {
         let mut accum = Vec::new();
         let mut finish_reason = None;
         let mut usage = None;
-        let text = fold_chunk(chunk, &mut accum, &mut finish_reason, &mut usage);
+        let mut copilot_usage = None;
+        let text = fold_chunk(
+            chunk,
+            &mut accum,
+            &mut finish_reason,
+            &mut usage,
+            &mut copilot_usage,
+        );
         assert_eq!(text, "hi");
         assert!(usage.is_none());
+        assert!(copilot_usage.is_none());
     }
 }

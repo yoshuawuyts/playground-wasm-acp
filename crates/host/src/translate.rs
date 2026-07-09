@@ -1061,7 +1061,7 @@ mod tests {
                 size: 8192,
                 cost: Some(UsageCost {
                     amount: 1.5,
-                    currency: "premium-requests".to_string(),
+                    currency: "AIU".to_string(),
                 }),
             }),
         )
@@ -1082,7 +1082,7 @@ mod tests {
         );
         assert_eq!(
             json.pointer("/update/cost/currency"),
-            Some(&serde_json::json!("premium-requests")),
+            Some(&serde_json::json!("AIU")),
             "cost.currency missing/renamed on the wire: {json}"
         );
     }

@@ -530,7 +530,7 @@ impl Guest for Agent {
                     model: current_model,
                     reasoning,
                     cwd: req.cwd,
-                    premium_requests: 0.0,
+                    cost_aiu: 0.0,
                 },
             )
         });
@@ -567,7 +567,7 @@ impl Guest for Agent {
             .as_ref()
             .map(|s| s.reasoning.clone())
             .unwrap_or_default();
-        let stored_cost = stored.as_ref().map(|s| s.premium_requests).unwrap_or(0.0);
+        let stored_cost = stored.as_ref().map(|s| s.cost_aiu).unwrap_or(0.0);
         let (config_options, current_model, reasoning) =
             build_session_config(preferred.as_deref(), &stored_reasoning).await;
         for msg in &history {
@@ -589,7 +589,7 @@ impl Guest for Agent {
                     model: current_model,
                     reasoning,
                     cwd: req.cwd,
-                    premium_requests: stored_cost,
+                    cost_aiu: stored_cost,
                 },
             );
         });
@@ -628,7 +628,7 @@ impl Guest for Agent {
             .as_ref()
             .map(|s| s.reasoning.clone())
             .unwrap_or_default();
-        let stored_cost = stored.as_ref().map(|s| s.premium_requests).unwrap_or(0.0);
+        let stored_cost = stored.as_ref().map(|s| s.cost_aiu).unwrap_or(0.0);
         let (config_options, current_model, reasoning) =
             build_session_config(preferred.as_deref(), &stored_reasoning).await;
         SESSIONS.with(|s| {
@@ -639,7 +639,7 @@ impl Guest for Agent {
                     model: current_model,
                     reasoning,
                     cwd: req.cwd,
-                    premium_requests: stored_cost,
+                    cost_aiu: stored_cost,
                 },
             );
         });
@@ -678,7 +678,7 @@ async fn prompt_impl(
             model: copilot::default_model(),
             reasoning: String::new(),
             cwd: String::new(),
-            premium_requests: 0.0,
+            cost_aiu: 0.0,
         });
         if entry.history.is_empty() {
             let mut prompt = SYSTEM_PROMPT.to_string();
@@ -725,6 +725,8 @@ async fn prompt_impl(
     const MAX_ROUNDS: usize = 8;
     let mut stop_reason = StopReason::EndTurn;
     let mut last_usage: Option<copilot::Usage> = None;
+    let mut turn_nano_aiu: u64 = 0;
+    let mut saw_copilot_usage = false;
     for round in 0..MAX_ROUNDS {
         let sid = session_id.clone();
         let outcome = copilot::chat_round(
@@ -752,6 +754,15 @@ async fn prompt_impl(
         // tokens now occupying the model's context window.
         if outcome.usage.is_some() {
             last_usage = outcome.usage;
+        }
+
+        // Usage-based (AIU) billing accrues per round; sum it across every
+        // round of the turn. `saw_copilot_usage` records that the endpoint
+        // reported billing at all, so we can distinguish "billed 0 AIU" (e.g.
+        // an included model or an unlimited plan) from "no billing signal".
+        if let Some(cu) = outcome.copilot_usage {
+            turn_nano_aiu += cu.total_nano_aiu;
+            saw_copilot_usage = true;
         }
 
         if outcome.tool_calls.is_empty() {
@@ -789,26 +800,22 @@ async fn prompt_impl(
         }
     }
 
-    // Resolve the model's upstream capabilities for the usage report: the
-    // context-window size and its premium-request billing. GitHub bills one
-    // premium request per user-initiated turn, scaled by the model's
-    // `multiplier`; included (non-premium) models cost nothing.
+    // Resolve the model's context-window size for the usage report. Cost is
+    // sourced from the streamed usage-based (AIU) billing accrued above, not
+    // from the model entry: GitHub deprecated premium-request multipliers in
+    // favor of usage-based billing measured in AI Units (AIU).
     let models = cached_models(&model);
-    let model_info = find_model(&models, &model);
-    let context_window = model_info.and_then(|m| m.context_window);
-    let turn_cost = match model_info {
-        Some(m) if m.is_premium => m.multiplier,
-        _ => 0.0,
-    };
+    let context_window = find_model(&models, &model).and_then(|m| m.context_window);
+    let turn_aiu = turn_nano_aiu as f64 / 1e9;
 
     // Persist the full working history — including tool-call and tool-result
     // messages — so a resumed session keeps the model's tool context. Also
-    // fold this turn's premium-request cost into the running session total.
+    // fold this turn's AIU cost into the running session total.
     let snapshot = SESSIONS.with(|s| {
         let mut sessions = s.borrow_mut();
         sessions.get_mut(&session_id).map(|entry| {
             entry.history = working;
-            entry.premium_requests += turn_cost;
+            entry.cost_aiu += turn_aiu;
             entry.clone()
         })
     });
@@ -816,19 +823,19 @@ async fn prompt_impl(
     // Emit context-window usage so the editor can render a "context %"
     // indicator (context % = used / size) and track spend. `used` is the last
     // round's total tokens (the tokens now occupying the context); `size` is
-    // the model's context window. Cost is the cumulative premium requests this
-    // session has drawn (only for premium models). Skip fields we can't source
-    // from upstream rather than fabricating them.
+    // the model's context window. Cost is the cumulative AI Units (AIU) this
+    // session has drawn. Skip fields we can't source from upstream rather than
+    // fabricating them.
     if let Some(session) = &snapshot {
         let used = last_usage.map(|u| u.total_tokens).unwrap_or(0);
         if used > 0 {
             if let Some(size) = context_window {
-                // Copilot's only cost signal is premium-request consumption, so
-                // we report it in that unit rather than inventing a monetary
-                // amount. `0` for sessions that only used included models.
-                let cost = (session.premium_requests > 0.0).then(|| UsageCost {
-                    amount: session.premium_requests,
-                    currency: "premium-requests".to_string(),
+                // Report cost in AI Units whenever the endpoint reported any
+                // usage-based billing this turn — even `0`, so users on
+                // unlimited/usage-based plans still see the meter work.
+                let cost = saw_copilot_usage.then(|| UsageCost {
+                    amount: session.cost_aiu,
+                    currency: "AIU".to_string(),
                 });
                 emit_update(
                     session_id.clone(),

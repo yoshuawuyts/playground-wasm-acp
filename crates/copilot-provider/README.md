@@ -108,13 +108,16 @@ upstream Copilot data, never fabricated**:
   `capabilities.limits.max_context_window_tokens`), so the editor can render a
   context-% indicator (`used / size`). Requested via
   `stream_options.include_usage`; skipped when the model advertises no window.
-- **Cost** — for **premium** models (`billing.is_premium`) the `usage_update`
-  carries a `cost`. GitHub bills one premium request per user-initiated turn
-  scaled by `billing.multiplier`, and the provider reports the session's running
-  total. The amount is expressed in **premium-request units** (`currency:
-  "premium-requests"`) — Copilot's only real cost signal — rather than a
-  fabricated monetary figure, so it deliberately does **not** use an ISO-4217
-  code. Included (non-premium) models report no cost.
+- **Cost** — the `usage_update` carries a `cost` sourced from the chat
+  stream's `copilot_usage.total_nano_aiu` (requested via
+  `stream_options.include_usage`). GitHub deprecated premium-request
+  multipliers in favor of **usage-based billing** measured in **AI Units
+  (AIU)**; the provider sums each turn's `total_nano_aiu` (nano-AIU / 1e9) into
+  the session's running total and reports it with `currency: "AIU"` — a real
+  usage unit rather than a fabricated monetary figure, so it deliberately does
+  **not** use an ISO-4217 code. It is `0` for included models and for accounts
+  on unlimited/usage-based plans (which still see the `0 AIU` meter, confirming
+  the signal works).
 
 There is intentionally **no chat-mode selector**: the Copilot API exposes no
 "mode" concept, so the provider advertises none rather than inventing one (the
