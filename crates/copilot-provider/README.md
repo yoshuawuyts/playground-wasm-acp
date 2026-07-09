@@ -90,6 +90,36 @@ rest of the session (per tool), so you're only prompted once per tool. If the
 editor doesn't support a tool or denies permission, the model is told and can
 continue without it.
 
+## Model, thinking, usage, and cost
+
+Every session exposes config-option selectors (shown by editors that render
+them), and every prompt turn reports context-window usage — all **sourced from
+upstream Copilot data, never fabricated**:
+
+- **Model** — a `model` selector listing the chat models your account can use
+  (`GET /models`, de-duplicated). Defaults to `COPILOT_MODEL`.
+- **Thinking** — a `reasoning-effort` selector (categorised as a *thought
+  level*) offering the levels the selected model advertises under
+  `capabilities.supports.reasoning_effort` (e.g. *low* / *medium* / *high*).
+  Models without native reasoning control (e.g. `gpt-4o`) show no levels, and
+  the effort is only sent to models that accept it.
+- **Context usage** — after each turn the provider emits a `usage_update` with
+  `used` (the response's `total_tokens`) and `size` (the model's
+  `capabilities.limits.max_context_window_tokens`), so the editor can render a
+  context-% indicator (`used / size`). Requested via
+  `stream_options.include_usage`; skipped when the model advertises no window.
+- **Cost** — for **premium** models (`billing.is_premium`) the `usage_update`
+  carries a `cost`. GitHub bills one premium request per user-initiated turn
+  scaled by `billing.multiplier`, and the provider reports the session's running
+  total. The amount is expressed in **premium-request units** (`currency:
+  "premium-requests"`) — Copilot's only real cost signal — rather than a
+  fabricated monetary figure, so it deliberately does **not** use an ISO-4217
+  code. Included (non-premium) models report no cost.
+
+There is intentionally **no chat-mode selector**: the Copilot API exposes no
+"mode" concept, so the provider advertises none rather than inventing one (the
+host still injects a `default` mode for protocol completeness).
+
 ## Configuration
 
 All optional; read from the (inherited) host environment:
@@ -98,6 +128,7 @@ All optional; read from the (inherited) host environment:
 |--------------------------|----------------------------------------|---------------------------------|
 | `COPILOT_MODEL`          | `gpt-4o`                                | Default model id                |
 | `COPILOT_BASE_URL`       | from token, else `api.githubcopilot.com` | Override the API base URL     |
+| `COPILOT_TOKEN_URL`      | GitHub `copilot_internal/v2/token`      | Override the token-exchange endpoint (chiefly for tests) |
 | `COPILOT_EDITOR_VERSION` | `vscode/1.104.1`                       | `Editor-Version` header         |
 | `COPILOT_INTEGRATION_ID` | `vscode-chat`                          | `Copilot-Integration-Id` header |
 

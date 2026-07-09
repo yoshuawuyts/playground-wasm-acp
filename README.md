@@ -189,6 +189,12 @@ the editor as a tool-call card, and asks the editor for permission before
 touching the filesystem (with per-session *allow always* / *reject always*
 memory).
 
+It also surfaces per-turn **context-window usage** and, for premium models,
+**premium-request cost** as ACP `usage_update`s, plus **model** and
+**thinking-effort** config selectors — all sourced from the Copilot `/models`
+capabilities (there is intentionally no chat-mode selector; the API exposes no
+mode concept).
+
 See **[`crates/copilot-provider/README.md`](crates/copilot-provider/README.md)**
 for GitHub token authentication (token types and how the guest falls back from
 the editor token-exchange to direct-token auth), the file-editing tools,
