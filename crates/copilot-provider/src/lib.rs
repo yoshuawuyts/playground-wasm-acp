@@ -676,6 +676,8 @@ impl Guest for Agent {
                     allow_all: false,
                     cwd: req.cwd,
                     cost_aiu: 0.0,
+                    used_tokens: 0,
+                    report_cost: false,
                 },
             )
         });
@@ -715,6 +717,8 @@ impl Guest for Agent {
         let stored_cost = stored.as_ref().map(|s| s.cost_aiu).unwrap_or(0.0);
         let stored_mode = stored.as_ref().map(|s| s.mode.clone()).unwrap_or_default();
         let stored_allow_all = stored.as_ref().map(|s| s.allow_all).unwrap_or(false);
+        let stored_used = stored.as_ref().map(|s| s.used_tokens).unwrap_or(0);
+        let stored_report_cost = stored.as_ref().map(|s| s.report_cost).unwrap_or(false);
         let (config_options, current_model, reasoning, mode) =
             build_session_config(preferred.as_deref(), &stored_reasoning, &stored_mode, stored_allow_all)
                 .await;
@@ -740,6 +744,8 @@ impl Guest for Agent {
                     allow_all: stored_allow_all,
                     cwd: req.cwd,
                     cost_aiu: stored_cost,
+                    used_tokens: stored_used,
+                    report_cost: stored_report_cost,
                 },
             );
         });
@@ -781,6 +787,8 @@ impl Guest for Agent {
         let stored_cost = stored.as_ref().map(|s| s.cost_aiu).unwrap_or(0.0);
         let stored_mode = stored.as_ref().map(|s| s.mode.clone()).unwrap_or_default();
         let stored_allow_all = stored.as_ref().map(|s| s.allow_all).unwrap_or(false);
+        let stored_used = stored.as_ref().map(|s| s.used_tokens).unwrap_or(0);
+        let stored_report_cost = stored.as_ref().map(|s| s.report_cost).unwrap_or(false);
         let (config_options, current_model, reasoning, mode) =
             build_session_config(preferred.as_deref(), &stored_reasoning, &stored_mode, stored_allow_all)
                 .await;
@@ -795,6 +803,8 @@ impl Guest for Agent {
                     allow_all: stored_allow_all,
                     cwd: req.cwd,
                     cost_aiu: stored_cost,
+                    used_tokens: stored_used,
+                    report_cost: stored_report_cost,
                 },
             );
         });
@@ -826,7 +836,8 @@ async fn prompt_impl(
     // active model and thinking level) to send to Copilot. New sessions can
     // land here without going through `new-session` (e.g. tests); fall back to
     // defaults. A one-time `system` message is prepended on the first prompt.
-    let (mut working, model, reasoning, cwd, mode) = SESSIONS.with(|s| {
+    let (mut working, model, reasoning, cwd, mode, prev_used, prev_cost, prev_report_cost) =
+        SESSIONS.with(|s| {
         let mut sessions = s.borrow_mut();
         let entry = sessions.entry(session_id.clone()).or_insert_with(|| SessionState {
             history: Vec::new(),
@@ -836,6 +847,8 @@ async fn prompt_impl(
             allow_all: false,
             cwd: String::new(),
             cost_aiu: 0.0,
+            used_tokens: 0,
+            report_cost: false,
         });
         if entry.history.is_empty() {
             let mut prompt = SYSTEM_PROMPT.to_string();
@@ -853,8 +866,38 @@ async fn prompt_impl(
             entry.reasoning.clone(),
             entry.cwd.clone(),
             entry.mode.clone(),
+            entry.used_tokens,
+            entry.cost_aiu,
+            entry.report_cost,
         )
     });
+
+    // Resolve the model's context-window size up front so we can render the
+    // context-usage meter from the *start* of the turn — before any tokens
+    // stream — instead of only after the turn completes. Emitting it here keeps
+    // the editor's UI stable: the meter is present the instant prompting
+    // begins (at its last-known value, or `0` for a fresh session) and simply
+    // updates in place when the turn finishes. `size` is the only value we
+    // can't fabricate, so we skip the meter entirely when it's unknown.
+    let context_window = find_model(&cached_models(&model), &model).and_then(|m| m.context_window);
+    if let Some(size) = context_window {
+        // Mirror the end-of-turn cost logic: only attach cost once this session
+        // has ever seen usage-based billing, so the meter's shape stays stable
+        // across the turn (and unlimited/usage-based plans still see `0`).
+        let cost = prev_report_cost.then(|| UsageCost {
+            amount: prev_cost,
+            currency: "AIU".to_string(),
+        });
+        emit_update(
+            session_id.clone(),
+            SessionUpdate::UsageUpdate(UsageUpdate {
+                used: prev_used,
+                size,
+                cost,
+            }),
+        )
+        .await;
+    }
 
     // Plan mode: steer this turn toward proposing a plan. Injected into the
     // per-turn copy only (right after the base system prompt) so it reflects
@@ -966,46 +1009,56 @@ async fn prompt_impl(
         }
     }
 
-    // Resolve the model's context-window size for the usage report. Cost is
-    // sourced from the streamed usage-based (AIU) billing accrued above, not
-    // from the model entry: GitHub deprecated premium-request multipliers in
-    // favor of usage-based billing measured in AI Units (AIU).
-    let models = cached_models(&model);
-    let context_window = find_model(&models, &model).and_then(|m| m.context_window);
+    // Cost is sourced from the streamed usage-based (AIU) billing accrued
+    // above, not from the model entry: GitHub deprecated premium-request
+    // multipliers in favor of usage-based billing measured in AI Units (AIU).
+    // `context_window` was resolved before the loop for the start-of-turn meter.
     let turn_aiu = turn_nano_aiu as f64 / 1e9;
+    let turn_used = last_usage.map(|u| u.total_tokens).unwrap_or(0);
 
     // Persist the full working history — including tool-call and tool-result
     // messages — so a resumed session keeps the model's tool context. Also
-    // fold this turn's AIU cost into the running session total.
+    // fold this turn's AIU cost into the running session total, and record the
+    // tokens now occupying the context plus whether we've seen usage-based
+    // billing, so the *next* turn (and a resumed session) can render the meter
+    // from its first instant instead of flashing `0`.
     let snapshot = SESSIONS.with(|s| {
         let mut sessions = s.borrow_mut();
         sessions.get_mut(&session_id).map(|entry| {
             entry.history = working;
             entry.cost_aiu += turn_aiu;
+            if turn_used > 0 {
+                entry.used_tokens = turn_used;
+            }
+            if saw_copilot_usage {
+                entry.report_cost = true;
+            }
             entry.clone()
         })
     });
 
-    // Emit context-window usage so the editor can render a "context %"
-    // indicator (context % = used / size) and track spend. `used` is the last
-    // round's total tokens (the tokens now occupying the context); `size` is
-    // the model's context window. Cost is the cumulative AI Units (AIU) this
-    // session has drawn. Skip fields we can't source from upstream rather than
-    // fabricating them.
+    // Refresh the context-usage meter with this turn's real values. We already
+    // emitted it at the start of the turn (see above); this updates it in
+    // place. `used` is the last round's total tokens (the tokens now occupying
+    // the context); `size` is the model's context window; cost is the
+    // cumulative AI Units (AIU) drawn. Skip fields we can't source upstream.
     if let Some(session) = &snapshot {
-        let used = last_usage.map(|u| u.total_tokens).unwrap_or(0);
-        if used > 0 {
+        if turn_used > 0 {
             if let Some(size) = context_window {
-                // Report cost in AI Units whenever the endpoint reported any
-                // usage-based billing this turn — even `0`, so users on
-                // unlimited/usage-based plans still see the meter work.
-                let cost = saw_copilot_usage.then(|| UsageCost {
+                // Report cost whenever this session has ever seen usage-based
+                // billing — even `0`, so unlimited/usage-based plans still see
+                // the meter — matching the start-of-turn emit's shape.
+                let cost = session.report_cost.then(|| UsageCost {
                     amount: session.cost_aiu,
                     currency: "AIU".to_string(),
                 });
                 emit_update(
                     session_id.clone(),
-                    SessionUpdate::UsageUpdate(UsageUpdate { used, size, cost }),
+                    SessionUpdate::UsageUpdate(UsageUpdate {
+                        used: turn_used,
+                        size,
+                        cost,
+                    }),
                 )
                 .await;
             }

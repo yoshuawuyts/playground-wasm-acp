@@ -72,6 +72,20 @@ pub struct SessionState {
     /// models or run on an unlimited/usage-based plan.
     #[serde(default)]
     pub cost_aiu: f64,
+    /// Tokens occupying the model's context window as of the last completed
+    /// turn (the `used` half of the context-usage meter). Persisted so a
+    /// resumed session — and the *start* of every new turn — can render the
+    /// meter at its last-known value instead of flashing `0`. `0` before the
+    /// first turn reports usage.
+    #[serde(default)]
+    pub used_tokens: u64,
+    /// Whether this session has ever received usage-based (AIU) billing data
+    /// from the endpoint. Once `true`, the cost meter is emitted from the
+    /// start of every turn (even at `0`) so the UI stays stable; kept separate
+    /// from `cost_aiu` so unlimited/usage-based plans (which report `0` cost)
+    /// still surface the meter.
+    #[serde(default)]
+    pub report_cost: bool,
 }
 
 /// Read a session from disk. Returns `Ok(None)` if the file doesn't exist.

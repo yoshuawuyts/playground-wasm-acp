@@ -176,19 +176,63 @@ async fn copilot_prompt_emits_usage_update_with_cost() {
         .unwrap();
     assert!(resp.is_object(), "prompt response: {resp}");
 
-    // Drain buffered notifications for the usage_update.
-    let mut usage: Option<Value> = None;
+    // The provider emits the context-usage meter twice per turn: once at the
+    // start (so the UI is stable the instant prompting begins) carrying the
+    // last-known `used` — `0` for a fresh session — and no cost yet, then again
+    // at the end with this turn's real token + AIU figures. Collect both, and
+    // track whether any agent text arrived before the first meter — it must
+    // not, or the UI would still shift once the meter appears mid-response.
+    let mut usages: Vec<Value> = Vec::new();
+    let mut agent_text_before_first_meter = false;
     while let Ok(msg) = host.recv_any().await {
         if msg.get("method").and_then(Value::as_str) == Some("session/update") {
             let update = msg.pointer("/params/update").cloned().unwrap_or(Value::Null);
-            if update.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update") {
-                usage = Some(update);
-                break;
+            match update.get("sessionUpdate").and_then(Value::as_str) {
+                Some("agent_message_chunk") if usages.is_empty() => {
+                    agent_text_before_first_meter = true;
+                }
+                Some("usage_update") => {
+                    let is_final =
+                        update.get("used").and_then(Value::as_u64) == Some(TOTAL_TOKENS);
+                    usages.push(update);
+                    if is_final {
+                        break;
+                    }
+                }
+                _ => {}
             }
         }
     }
 
-    let usage = usage.expect("expected a session/update with sessionUpdate=usage_update");
+    assert!(
+        usages.len() >= 2,
+        "expected a start-of-turn and an end-of-turn usage_update, got: {usages:?}"
+    );
+    assert!(
+        !agent_text_before_first_meter,
+        "the usage meter must be emitted before any agent text so the UI doesn't shift mid-turn"
+    );
+
+    // Start-of-turn meter: present from the first instant, at `0` used against
+    // the real context window, with no cost yet for a fresh session.
+    let start = &usages[0];
+    assert_eq!(
+        start.get("used").and_then(Value::as_u64),
+        Some(0),
+        "start-of-turn usage_update.used should be 0 for a fresh session (update: {start})"
+    );
+    assert_eq!(
+        start.get("size").and_then(Value::as_u64),
+        Some(CONTEXT_WINDOW),
+        "start-of-turn usage_update.size should be the model's context window (update: {start})"
+    );
+    assert!(
+        start.get("cost").map(Value::is_null).unwrap_or(true),
+        "start-of-turn usage_update should carry no cost yet (update: {start})"
+    );
+
+    // End-of-turn meter: refreshed in place with this turn's real figures.
+    let usage = usages.last().unwrap();
     assert_eq!(
         usage.get("used").and_then(Value::as_u64),
         Some(TOTAL_TOKENS),
@@ -208,5 +252,42 @@ async fn copilot_prompt_emits_usage_update_with_cost() {
         usage.pointer("/cost/currency").and_then(Value::as_str),
         Some("AIU"),
         "usage_update.cost.currency should be AIU (full update: {usage})"
+    );
+
+    // Continuing session: a second turn's *start* meter must carry the
+    // last-known figures (persisted from turn 1) rather than flashing back to
+    // `0`/no-cost — this is what keeps the UI stable across turns, not just at
+    // the very first prompt.
+    let resp2 = host
+        .request("session/prompt", prompt_text_params(&session_id, "again"))
+        .await
+        .unwrap();
+    assert!(resp2.is_object(), "second prompt response: {resp2}");
+
+    let mut start2: Option<Value> = None;
+    while let Ok(msg) = host.recv_any().await {
+        if msg.get("method").and_then(Value::as_str) == Some("session/update") {
+            let update = msg.pointer("/params/update").cloned().unwrap_or(Value::Null);
+            if update.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update") {
+                start2 = Some(update);
+                break;
+            }
+        }
+    }
+    let start2 = start2.expect("expected a start-of-turn usage_update on the second turn");
+    assert_eq!(
+        start2.get("used").and_then(Value::as_u64),
+        Some(TOTAL_TOKENS),
+        "2nd turn's start meter should carry turn 1's persisted `used` (update: {start2})"
+    );
+    assert_eq!(
+        start2.pointer("/cost/amount").and_then(Value::as_f64),
+        Some(EXPECTED_AIU),
+        "2nd turn's start meter should carry turn 1's persisted cost (update: {start2})"
+    );
+    assert_eq!(
+        start2.pointer("/cost/currency").and_then(Value::as_str),
+        Some("AIU"),
+        "2nd turn's start meter cost currency should be AIU (update: {start2})"
     );
 }

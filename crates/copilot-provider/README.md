@@ -113,11 +113,23 @@ upstream Copilot data or backed by real provider behavior, never fabricated**:
   the effort is only sent to models that accept it. Because the last-used model
   is remembered, this selector is present **from the start of a new session**
   whenever that model supports reasoning — not only after switching models.
-- **Context usage** — after each turn the provider emits a `usage_update` with
-  `used` (the response's `total_tokens`) and `size` (the model's
+- **Context usage** — the provider emits a `usage_update` with `used` (the
+  response's `total_tokens`) and `size` (the model's
   `capabilities.limits.max_context_window_tokens`), so the editor can render a
-  context-% indicator (`used / size`). Requested via
-  `stream_options.include_usage`; skipped when the model advertises no window.
+  context-% indicator (`used / size`). The meter is emitted **at the start of
+  every turn** (before any tokens stream) at its last-known value — `0` for a
+  brand-new session — and again at the end with the turn's real figures. This
+  keeps the editor's UI stable: the meter is present the instant prompting
+  begins and simply updates in place, instead of popping in once the response
+  finishes. The `used`/cost values are persisted per session so a resumed
+  session (and each subsequent turn) renders the meter from its last value
+  rather than flashing back to `0`. Requested via `stream_options.include_usage`;
+  skipped when the model advertises no window.
+
+  > `session-update`s can only flow on a prompt turn's stream (see
+  > `client.wit`), so the earliest the provider can surface the meter is the
+  > start of the first prompt — there is no channel to emit it at `session/new`
+  > time, before the user prompts.
 - **Cost** — the `usage_update` carries a `cost` sourced from the chat
   stream's `copilot_usage.total_nano_aiu` (requested via
   `stream_options.include_usage`). GitHub deprecated premium-request
