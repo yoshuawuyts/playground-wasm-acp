@@ -184,6 +184,7 @@ pub fn new_session_request_schema_to_wit(req: schema::NewSessionRequest) -> NewS
 pub fn new_session_response_wit_to_schema(
     resp: NewSessionResponse,
     component_id: &str,
+    terminal: Option<bool>,
 ) -> Result<schema::NewSessionResponse, AcpError> {
     // schema::NewSessionResponse is `non_exhaustive`. Roundtrip via JSON to
     // construct it without depending on the (unstable) field set.
@@ -192,7 +193,7 @@ pub fn new_session_response_wit_to_schema(
     // `modes` field client-side: when present it fully replaces modes, so skip
     // the host-injected default mode to avoid advertising a phantom selector.
     if let Some(config_options) = resp.config_options {
-        json["configOptions"] = session_config_options_to_json(config_options);
+        json["configOptions"] = config_options_json(config_options, terminal);
     } else if let Some(modes) = ensure_host_default_mode(resp.modes) {
         json["modes"] = session_mode_state_to_json(modes, component_id);
     }
@@ -205,10 +206,11 @@ pub fn new_session_response_wit_to_schema(
 pub fn new_session_response_with_config_options(
     session_id: &str,
     config_options: Vec<SessionConfigOption>,
+    terminal: Option<bool>,
 ) -> Result<schema::NewSessionResponse, AcpError> {
     let json = serde_json::json!({
         "sessionId": session_id,
-        "configOptions": session_config_options_to_json(config_options),
+        "configOptions": config_options_json(config_options, terminal),
     });
     synth("new-session response", json)
 }
@@ -217,9 +219,10 @@ pub fn new_session_response_with_config_options(
 /// (the multi-provider path).
 pub fn load_session_response_with_config_options(
     config_options: Vec<SessionConfigOption>,
+    terminal: Option<bool>,
 ) -> Result<schema::LoadSessionResponse, AcpError> {
     let json = serde_json::json!({
-        "configOptions": session_config_options_to_json(config_options),
+        "configOptions": config_options_json(config_options, terminal),
     });
     synth("load-session response", json)
 }
@@ -242,10 +245,11 @@ pub fn load_session_request_schema_to_wit(req: schema::LoadSessionRequest) -> Lo
 pub fn load_session_response_wit_to_schema(
     resp: LoadSessionResponse,
     component_id: &str,
+    terminal: Option<bool>,
 ) -> Result<schema::LoadSessionResponse, AcpError> {
     let mut json = serde_json::json!({});
     if let Some(config_options) = resp.config_options {
-        json["configOptions"] = session_config_options_to_json(config_options);
+        json["configOptions"] = config_options_json(config_options, terminal);
     } else if let Some(modes) = ensure_host_default_mode(resp.modes) {
         json["modes"] = session_mode_state_to_json(modes, component_id);
     }
@@ -367,18 +371,41 @@ const _: fn(SessionModeId) = |_| {};
 /// Build the `{ configOptions: [...] }` response to `session/set_config_option`.
 pub fn set_config_option_response(
     options: Vec<SessionConfigOption>,
+    terminal: Option<bool>,
 ) -> Result<schema::SetSessionConfigOptionResponse, AcpError> {
-    let json = serde_json::json!({ "configOptions": session_config_options_to_json(options) });
+    let json = serde_json::json!({ "configOptions": config_options_json(options, terminal) });
     synth("set-config-option response", json)
 }
 
-fn session_config_options_to_json(options: Vec<SessionConfigOption>) -> serde_json::Value {
-    serde_json::Value::Array(
-        options
-            .into_iter()
-            .map(session_config_option_to_json)
-            .collect(),
-    )
+fn config_options_json(
+    options: Vec<SessionConfigOption>,
+    terminal: Option<bool>,
+) -> serde_json::Value {
+    let mut arr: Vec<serde_json::Value> = options
+        .into_iter()
+        .map(session_config_option_to_json)
+        .collect();
+    // Append the host-owned `terminal` boolean toggle when the client
+    // opted into boolean config options (`terminal` is `Some`). Per the
+    // boolean-config-option RFD, agents must not emit `type: "boolean"`
+    // options to clients that didn't advertise support.
+    if let Some(current) = terminal {
+        arr.push(terminal_config_option_json(current));
+    }
+    serde_json::Value::Array(arr)
+}
+
+/// The host-owned `terminal` boolean config option, serialized per the
+/// ACP boolean-config-option RFD (`type: "boolean"` with a `currentValue`
+/// bool, no `options` list or `category`).
+fn terminal_config_option_json(current: bool) -> serde_json::Value {
+    serde_json::json!({
+        "id": crate::group::TERMINAL_CONFIG_ID,
+        "name": "Terminal tools",
+        "description": "Allow the agent to run terminal (CLI) commands on this machine.",
+        "type": "boolean",
+        "currentValue": current,
+    })
 }
 
 fn session_config_option_to_json(option: SessionConfigOption) -> serde_json::Value {

@@ -77,6 +77,40 @@ The guest reads two environment variables at runtime; both are optional:
 Host log verbosity is controlled by `RUST_LOG` (e.g. `RUST_LOG=host=debug`),
 defaulting to `host=info`.
 
+### Terminal execution
+
+Whether the guest may run terminal (CLI) commands is controlled by a
+**host-owned boolean session config option** (`id: "terminal"`, `type:
+"boolean"`) that defaults to `false`. It is advertised in the
+`configOptions` of every `session/new` and `session/load` response — but
+only to clients that opted into boolean config options by advertising
+`session.configOptions.boolean` in their `initialize` capabilities (per the
+[boolean-config-option RFD](https://agentclientprotocol.com/rfds/boolean-config-option),
+some clients break on unknown value shapes). Clients that don't opt in
+never see the option and terminal execution stays off.
+
+The toggle is host-owned end to end: no guest provider advertises it, and
+the host intercepts its setter before it reaches any guest — a component
+can't grant itself host CLI access. Enable it with a boolean
+`session/set_config_option`:
+
+```console
+# initialize opting into boolean config options
+'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"session":{"configOptions":{"boolean":{}}}}}}'
+# …after session/new returns a sessionId, turn terminal tools on:
+'{"jsonrpc":"2.0","id":2,"method":"session/set_config_option","params":{"sessionId":"<id>","configId":"terminal","type":"boolean","value":true}}'
+```
+
+While the option is `false` the host refuses to spawn any process and
+surfaces that to the guest. Once toggled on, each `client.terminal` call
+spawns `command args...` with the guest-supplied environment and working
+directory, streams the combined stdout/stderr back to the guest as it
+arrives, and reports the exit code (or terminating signal name on Unix).
+Dropping the terminal resource kills the process. The optional
+`output-byte-limit` is honored as an upper bound (excess output is
+dropped). Because the command runs on the host with the host's privileges,
+only enable this for components you trust to run arbitrary local commands.
+
 ### Secrets
 
 The host implements the `wasmcloud:secrets/store` + `reveal` WIT interfaces
@@ -252,10 +286,19 @@ The MVP intentionally cuts a few corners:
   the host's `await` on the wasm prompt and returns `stopReason: cancelled`,
   but the wasm guest itself doesn't get an interrupt — any in-flight HTTP
   request to Ollama still completes (its result is just discarded).
-- **No terminal methods.** The host returns `method-not-found` for
-  `terminal/*`. `fs/read_text_file`, `fs/write_text_file`, and
-  `session/request_permission` are wired through to the editor — the
-  copilot-provider uses all three to offer permissioned file editing.
+- **Config-gated terminal execution.** The host services the guest's
+  `client.terminal` resource by running the requested command as a *local*
+  child process — combined stdout/stderr is streamed back to the guest and the
+  exit code (or terminating signal) is reported — rather than forwarding ACP
+  `terminal/*` methods to the editor. It is gated by a host-owned `terminal`
+  boolean session config option (default `false`), advertised only to clients
+  that opt into boolean config options: until it is toggled on the host refuses
+  to spawn any process, so an untrusted component can't run local commands. See
+  [Terminal execution](#terminal-execution).
+- **Editor-backed filesystem & permissions.** `fs/read_text_file`,
+  `fs/write_text_file`, and `session/request_permission` are wired through to
+  the editor — the copilot-provider uses all three to offer permissioned file
+  editing.
 - **No MCP servers.** Servers passed in `session/new` are accepted but the
   guest doesn't connect to them.
 

@@ -35,6 +35,13 @@ use crate::yosh::acp::sessions::{
 /// is a no-op and clients keep their model-category keyboard shortcuts.
 const HOST_MODEL_CONFIG_ID: &str = "model";
 
+/// Well-known config-option id for the host-owned terminal (CLI) toggle.
+/// A boolean session config option (default `false`) that gates host-side
+/// terminal execution for every provider chain in the group. Owned and
+/// enforced by the host — no guest provider advertises it, and the setter
+/// is intercepted before reaching any guest.
+pub const TERMINAL_CONFIG_ID: &str = "terminal";
+
 /// Identity used for host-synthesized config entries (the merged model
 /// selector). `translate` drops config-option provenance on the wire, so
 /// this is informational only.
@@ -74,15 +81,27 @@ struct GroupInner {
     /// index, provider-native model value). Rebuilt on every
     /// [`GroupInner::build_options`].
     model_map: Mutex<HashMap<String, (usize, String)>>,
+    /// Current value of the host-owned `terminal` boolean config option.
+    /// Defaults to `false`; toggled via `session/set_config_option` and
+    /// fanned out to every provider chain's [`Session`].
+    terminal_enabled: Mutex<bool>,
+    /// Whether the client advertised support for boolean config options
+    /// (`session.configOptions.boolean`). When `false` the group does not
+    /// advertise the `terminal` toggle at all (per the RFD, agents must
+    /// not send boolean options to clients that didn't opt in).
+    boolean_config_supported: bool,
 }
 
 impl SessionGroup {
     /// Build a group from `(component_id, session, initial_config_options)`
     /// tuples in provider load order and the editor-facing session id.
-    /// The first provider starts active.
+    /// The first provider starts active. `boolean_config_supported`
+    /// records whether the client opted into boolean config options and
+    /// gates whether the host-owned `terminal` toggle is advertised.
     pub fn new(
         session_id: String,
         providers: Vec<(String, Session, Vec<SessionConfigOption>)>,
+        boolean_config_supported: bool,
     ) -> Self {
         assert!(!providers.is_empty(), "SessionGroup needs >= 1 provider");
         let providers = providers
@@ -99,6 +118,8 @@ impl SessionGroup {
                 providers,
                 active: Mutex::new(0),
                 model_map: Mutex::new(HashMap::new()),
+                terminal_enabled: Mutex::new(false),
+                boolean_config_supported,
             }),
         }
     }
@@ -127,6 +148,28 @@ impl SessionGroup {
     /// refreshes the internal model-value decode map.
     pub fn config_options(&self) -> Vec<SessionConfigOption> {
         self.inner.build_options()
+    }
+
+    /// Current state of the host-owned `terminal` boolean config option,
+    /// or `None` when it must not be advertised (client didn't opt into
+    /// boolean config options). `Some(false)` means advertised and off.
+    pub fn terminal_option(&self) -> Option<bool> {
+        if self.inner.boolean_config_supported {
+            Some(*self.inner.terminal_enabled.lock().unwrap())
+        } else {
+            None
+        }
+    }
+
+    /// Toggle the host-owned `terminal` config option. Records the new
+    /// value and fans it out to every provider chain's [`Session`] so the
+    /// `client.terminal` host impl honours it regardless of which provider
+    /// is active (including after a later provider switch).
+    pub async fn set_terminal_enabled(&self, enabled: bool) {
+        *self.inner.terminal_enabled.lock().unwrap() = enabled;
+        for p in &self.inner.providers {
+            p.session.set_terminal_enabled(enabled).await;
+        }
     }
 
     /// Handle `session/set_config_option`. Routes model selections to the
