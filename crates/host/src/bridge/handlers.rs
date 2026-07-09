@@ -23,6 +23,7 @@ use crate::translate;
 use crate::wasm::{
     PromptOutcome, SessionFactory, SessionRegistry, SetConfigOptionOutcome, SetModeOutcome,
 };
+use crate::yosh::acp::sessions::{LoadSessionResponse, NewSessionResponse};
 
 pub(super) async fn handle_initialize(
     factory: &SessionFactory,
@@ -77,33 +78,70 @@ pub(super) async fn handle_new_session(
     responder: Responder<schema::NewSessionResponse>,
     cx: ConnectionTo<Client>,
 ) -> Result<(), AcpError> {
-    // Spin up a fresh instance scoped to the session's project (cwd-derived
-    // data dir under `/data`), run `new-session` on it directly, then
-    // transfer ownership to a [`SessionActor`] spawned on the local set.
-    // The guest mints the session id; we register the actor under that id.
+    // Spin up one fresh instance per loaded provider, scoped to the
+    // session's project (cwd-derived data dir under `/data`), run
+    // `new-session` on each, then group them under a single ACP session id
+    // (the first provider mints it). The group merges each provider's model
+    // selector so the editor can pick which model from which provider backs
+    // the session.
     //
-    // Outbound `update-session` events emitted *during* `new-session` carry
-    // the guest-minted id and route through the shared outbound channel,
-    // so they reach the editor even before the registry has the entry.
+    // Outbound updates: each provider chain mints its own session id, so for
+    // a multi-provider group we bind every chain's `notify-session` updates
+    // to the one group id (see `bind_editor_session_ids` below) — otherwise a
+    // switched provider's updates would reach the editor tagged with an id it
+    // never saw.
     if let Ok(payload) = serde_json::to_string(&req) {
         tracing::info!(payload = %payload, "← wire: session/new");
     }
     resolve_workspace_cwd(&mut req.cwd);
     warn_if_unlikely_workspace(&req.cwd);
-    let session = factory
-        .instantiate_for_project(&req.cwd)
+    let sessions = factory
+        .instantiate_group_for_project(&req.cwd)
         .await
         .map_err(|e| translate::anyhow_to_acp("new-session: instantiate", e))?;
     let wit_req = translate::new_session_request_schema_to_wit(req);
-    let result = session
-        .call_new_session(wit_req)
-        .await
-        .map_err(|e| translate::trap_to_acp("new-session", e))?;
-    let resp = result.map_err(translate::wit_error_to_acp)?;
-    debug!(session = %resp.session_id, "session/new");
-    let session_id = resp.session_id.clone();
-    registry.insert(session_id.clone(), session);
-    let schema_resp = translate::new_session_response_wit_to_schema(resp, factory.component_id())?;
+
+    // Call `new-session` on every provider chain, collecting each
+    // provider's response so we can group and merge them.
+    let mut collected: Vec<(String, crate::wasm::Session, NewSessionResponse)> =
+        Vec::with_capacity(sessions.len());
+    for (component_id, session) in sessions {
+        let result = session
+            .call_new_session(wit_req.clone())
+            .await
+            .map_err(|e| translate::trap_to_acp("new-session", e))?;
+        let resp = result.map_err(translate::wit_error_to_acp)?;
+        collected.push((component_id, session, resp));
+    }
+
+    // The group's editor-facing session id is the first provider's minted
+    // id (subsequent providers' ids are internal-only; each provider tracks
+    // its own session via its head resource, not the string id).
+    let session_id = collected[0].2.session_id.clone();
+    debug!(session = %session_id, providers = collected.len(), "session/new");
+
+    // Keep the first provider's full response for the single-provider
+    // passthrough path (preserves the legacy modes fallback verbatim).
+    let first_resp = collected[0].2.clone();
+
+    let group_entries: Vec<_> = collected
+        .into_iter()
+        .map(|(component_id, session, resp)| {
+            (component_id, session, resp.config_options.unwrap_or_default())
+        })
+        .collect();
+    let group = crate::group::SessionGroup::new(session_id.clone(), group_entries);
+
+    let schema_resp = if group.is_multi_provider() {
+        // Route every provider chain's outbound updates through the group id
+        // so a switched (non-first) provider's notifications still reach the
+        // editor. Single-provider stays a verbatim passthrough (not bound).
+        group.bind_editor_session_ids().await;
+        translate::new_session_response_with_config_options(&session_id, group.config_options())?
+    } else {
+        translate::new_session_response_wit_to_schema(first_resp, factory.component_id())?
+    };
+    registry.insert(session_id.clone(), group);
     if let Ok(payload) = serde_json::to_string(&schema_resp) {
         tracing::info!(payload = %payload, "→ wire: session/new response");
     }
@@ -128,21 +166,40 @@ pub(super) async fn handle_load_session(
     let session_key = req.session_id.0.to_string();
     debug!(session = %session_key, "session/load");
     warn_if_unlikely_workspace(&req.cwd);
-    let session = factory
-        .instantiate_for_project(&req.cwd)
+    let sessions = factory
+        .instantiate_group_for_project(&req.cwd)
         .await
         .map_err(|e| translate::anyhow_to_acp("load-session: instantiate", e))?;
     let wit_req = translate::load_session_request_schema_to_wit(req);
-    let result = session
-        .call_load_session(wit_req)
-        .await
-        .map_err(|e| translate::trap_to_acp("load-session", e))?;
-    let resp = result.map_err(translate::wit_error_to_acp)?;
-    registry.insert(session_key.clone(), session);
-    responder.respond(translate::load_session_response_wit_to_schema(
-        resp,
-        factory.component_id(),
-    )?)?;
+
+    let mut collected: Vec<(String, crate::wasm::Session, LoadSessionResponse)> =
+        Vec::with_capacity(sessions.len());
+    for (component_id, session) in sessions {
+        let result = session
+            .call_load_session(wit_req.clone())
+            .await
+            .map_err(|e| translate::trap_to_acp("load-session", e))?;
+        let resp = result.map_err(translate::wit_error_to_acp)?;
+        collected.push((component_id, session, resp));
+    }
+
+    let first_resp = collected[0].2.clone();
+    let group_entries: Vec<_> = collected
+        .into_iter()
+        .map(|(component_id, session, resp)| {
+            (component_id, session, resp.config_options.unwrap_or_default())
+        })
+        .collect();
+    let group = crate::group::SessionGroup::new(session_key.clone(), group_entries);
+
+    let schema_resp = if group.is_multi_provider() {
+        group.bind_editor_session_ids().await;
+        translate::load_session_response_with_config_options(group.config_options())?
+    } else {
+        translate::load_session_response_wit_to_schema(first_resp, factory.component_id())?
+    };
+    registry.insert(session_key.clone(), group);
+    responder.respond(schema_resp)?;
     flush_held_notifications(gate, &session_key, &cx);
     Ok(())
 }
@@ -312,7 +369,7 @@ pub(super) fn handle_prompt(
         .collect();
 
     cx.spawn(async move {
-        let outcome = handle.prompt(session_key.clone(), wit_prompt).await;
+        let outcome = handle.prompt(wit_prompt).await;
         let resp = match outcome {
             PromptOutcome::Done(r) => match translate::prompt_response_wit_to_schema(r) {
                 Ok(r) => r,

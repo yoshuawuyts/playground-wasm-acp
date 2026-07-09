@@ -67,10 +67,13 @@ pub struct Stage {
 /// from pre-loaded `Component`s is microseconds per stage.
 pub struct SessionFactory {
     engine: Engine,
-    /// Terminal provider stage. Always the bottom of the chain.
-    provider: Stage,
+    /// Terminal provider stages. Every one is the bottom of its own
+    /// chain; each session instantiates one chain per provider. Always
+    /// non-empty (the CLI requires at least one `--provider`).
+    providers: Vec<Stage>,
     /// Layer stages, ordered editor-side → provider-side. Empty means no
-    /// layers (legacy single-component behaviour).
+    /// layers (legacy single-component behaviour). The same layer stack
+    /// wraps every provider.
     layers: Vec<Stage>,
     outbound: mpsc::Sender<OutboundEvent>,
     data_root: PathBuf,
@@ -80,15 +83,16 @@ pub struct SessionFactory {
 impl SessionFactory {
     pub fn new(
         engine: Engine,
-        provider: Stage,
+        providers: Vec<Stage>,
         layers: Vec<Stage>,
         outbound: mpsc::Sender<OutboundEvent>,
         data_root: PathBuf,
         secrets: Arc<SecretsRegistry>,
     ) -> Self {
+        assert!(!providers.is_empty(), "SessionFactory needs >= 1 provider");
         Self {
             engine,
-            provider,
+            providers,
             layers,
             outbound,
             data_root,
@@ -96,14 +100,17 @@ impl SessionFactory {
         }
     }
 
-    /// Build a session with no `/data` preopen. Used for stateless calls.
+    /// Build a session with no `/data` preopen, on the first provider.
+    /// Used for stateless calls (`initialize`, `authenticate`) which are
+    /// provider-agnostic.
     pub async fn instantiate(&self) -> Result<Session> {
-        self.instantiate_chain(None).await
+        self.instantiate_chain(&self.providers[0], None).await
     }
 
-    /// Component id used by the bridge to label session modes.
+    /// Component id of the first provider. Used by the bridge to label
+    /// session modes on the legacy (non-config-option) path.
     pub fn component_id(&self) -> &str {
-        &self.provider.component_id
+        &self.providers[0].component_id
     }
 
     /// Shared wasmtime [`Engine`].
@@ -111,16 +118,29 @@ impl SessionFactory {
         &self.engine
     }
 
-    /// Build a chain with `/data` preopened to a project-scoped subdir
-    /// (provider-scoped only — layers do not get distinct preopens).
-    pub async fn instantiate_for_project(&self, cwd: &std::path::Path) -> Result<Session> {
+    /// Build one chain per loaded provider, each with `/data` preopened
+    /// to a project-scoped subdir, returning them paired with their
+    /// provider component id (load order preserved). The caller groups
+    /// these into a single ACP session (see [`crate::group`]).
+    pub async fn instantiate_group_for_project(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<Vec<(String, Session)>> {
         let project_id = project_id_from_cwd(cwd);
         let project_dir = self.data_root.join(&project_id);
         update_project_meta(&project_dir, cwd);
-        self.instantiate_chain(Some(&project_dir)).await
+        let mut out = Vec::with_capacity(self.providers.len());
+        for provider in &self.providers {
+            let session = self
+                .instantiate_chain(provider, Some(&project_dir))
+                .await
+                .with_context(|| format!("instantiating provider `{}`", provider.component_id))?;
+            out.push((provider.component_id.clone(), session));
+        }
+        Ok(out)
     }
 
-    /// Build the chain into a single shared store.
+    /// Build the chain for one provider into a single shared store.
     ///
     /// Wiring (indices into `HostState::stages`):
     /// - `0` = provider (bottom).
@@ -132,7 +152,11 @@ impl SessionFactory {
     /// `downstream_idx = Some(i - 1)`. Sinks: the outermost stage's
     /// sink is `Outbound`; every other stage's sink is
     /// `Upstream(i + 1)` (one step closer to the editor).
-    async fn instantiate_chain(&self, project_dir: Option<&std::path::Path>) -> Result<Session> {
+    async fn instantiate_chain(
+        &self,
+        provider: &Stage,
+        project_dir: Option<&std::path::Path>,
+    ) -> Result<Session> {
         let stage_count = self.layers.len() + 1;
         let head_idx = stage_count - 1;
 
@@ -141,7 +165,7 @@ impl SessionFactory {
         // Stage 0: provider.
         stages.push(StageData {
             kind: StageKind::Provider,
-            component_id: self.provider.component_id.clone(),
+            component_id: provider.component_id.clone(),
             bindings: None,
             sink: if self.layers.is_empty() {
                 ClientSink::Outbound(self.outbound.clone())
@@ -169,7 +193,7 @@ impl SessionFactory {
 
         // Single WasiCtx for the whole session — layers do not want
         // distinct preopens. The `/data` preopen is provider-scoped.
-        let provider_data = stage_data_dir(project_dir, &self.provider.component_id)?;
+        let provider_data = stage_data_dir(project_dir, &provider.component_id)?;
         let mut wasi = WasiCtxBuilder::new();
         wasi.stderr(crate::wasi_log::TracingStream::new("stderr"))
             .stdout(crate::wasi_log::TracingStream::new("stdout"))
@@ -188,6 +212,7 @@ impl SessionFactory {
             secrets: self.secrets.clone(),
             downstream_sessions: std::collections::HashMap::new(),
             next_downstream_rep: 1,
+            editor_session_id: None,
         };
         let mut store = Store::new(&self.engine, state);
 
@@ -211,7 +236,7 @@ impl SessionFactory {
         for idx in 0..stage_count {
             let kind = store.data().stages[idx].kind;
             let component = if idx == 0 {
-                &self.provider.component
+                &provider.component
             } else {
                 // `stages[1]` is the bottom-most layer (last in
                 // `self.layers`, since we iterated `rev()` above).
@@ -382,6 +407,15 @@ impl Session {
 
     pub fn cancel(&self) {
         let _ = self.inner.cancel.send(true);
+    }
+
+    /// Stamp this chain's outbound `notify-session` updates with `id`
+    /// (the editor-facing group session id), overriding the guest-minted
+    /// id. Used by [`crate::group`] so a switched (non-first) provider's
+    /// updates still reach the editor under the group's id.
+    pub async fn set_editor_session_id(&self, id: String) {
+        let mut store = self.inner.store.lock().await;
+        store.data_mut().editor_session_id = Some(id);
     }
 
     /// Run `body` inside `store.run_concurrent`, pushing/popping the
@@ -662,12 +696,13 @@ pub struct SessionRegistry {
     // from the editor, and we removed our WIT `close-session` in
     // favor of the now-resource-based lifecycle. As a result the map
     // grows monotonically for the lifetime of the host process.
-    // Each entry holds an `Arc<SessionInner>` (one `Store`, a few
-    // `tokio::sync` primitives) which is bounded but not negligible
-    // for hosts churning many sessions. Real fix: either route a
-    // host-side timeout / explicit `/close` command through here, or
-    // wait for ACP to add an editor-driven close signal.
-    sessions: Mutex<HashMap<String, Session>>,
+    // Each entry holds a [`SessionGroup`] (one `Store` per loaded
+    // provider, a few `tokio::sync` primitives) which is bounded but
+    // not negligible for hosts churning many sessions. Real fix:
+    // either route a host-side timeout / explicit `/close` command
+    // through here, or wait for ACP to add an editor-driven close
+    // signal.
+    sessions: Mutex<HashMap<String, crate::group::SessionGroup>>,
 }
 
 impl SessionRegistry {
@@ -677,20 +712,20 @@ impl SessionRegistry {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Session>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, crate::group::SessionGroup>> {
         self.sessions.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub fn insert(&self, id: String, session: Session) {
-        self.lock().insert(id, session);
+    pub fn insert(&self, id: String, group: crate::group::SessionGroup) {
+        self.lock().insert(id, group);
     }
 
-    pub fn get(&self, id: &str) -> Option<Session> {
+    pub fn get(&self, id: &str) -> Option<crate::group::SessionGroup> {
         self.lock().get(id).cloned()
     }
 
     #[allow(dead_code)]
-    pub fn remove(&self, id: &str) -> Option<Session> {
+    pub fn remove(&self, id: &str) -> Option<crate::group::SessionGroup> {
         self.lock().remove(id)
     }
 }

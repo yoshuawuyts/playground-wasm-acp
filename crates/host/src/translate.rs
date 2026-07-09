@@ -198,6 +198,31 @@ pub fn new_session_response_wit_to_schema(
     synth("new-session response", json)
 }
 
+/// Build a `session/new` response from a host-merged config-option set
+/// (the multi-provider path). The merged options already carry the
+/// cross-provider model selector, so no legacy `modes` fallback applies.
+pub fn new_session_response_with_config_options(
+    session_id: &str,
+    config_options: Vec<SessionConfigOption>,
+) -> Result<schema::NewSessionResponse, AcpError> {
+    let json = serde_json::json!({
+        "sessionId": session_id,
+        "configOptions": session_config_options_to_json(config_options),
+    });
+    synth("new-session response", json)
+}
+
+/// Build a `session/load` response from a host-merged config-option set
+/// (the multi-provider path).
+pub fn load_session_response_with_config_options(
+    config_options: Vec<SessionConfigOption>,
+) -> Result<schema::LoadSessionResponse, AcpError> {
+    let json = serde_json::json!({
+        "configOptions": session_config_options_to_json(config_options),
+    });
+    synth("load-session response", json)
+}
+
 // -----------------------------------------------------------------------------
 // Load session
 // -----------------------------------------------------------------------------

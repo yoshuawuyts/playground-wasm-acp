@@ -200,6 +200,32 @@ for GitHub token authentication (token types and how the guest falls back from
 the editor token-exchange to direct-token auth), the file-editing tools,
 configuration, and a full smoke test.
 
+## Loading multiple providers
+
+Pass `--provider` more than once to load several providers into one host. Each
+session then instantiates one wasm chain **per provider** (the same `--layer`
+stack wraps every provider, and each provider keeps its own private secret store
+and project `/data`), and the host **merges every provider's model selector into
+a single cross-provider `Model` dropdown** — each entry labelled by the provider
+that owns it:
+
+```shell
+cargo run -p host -- \
+  --provider target/wasm32-wasip2/release/ollama_provider.wasm \
+  --provider target/wasm32-wasip2/release/copilot_provider.wasm
+```
+
+The user then picks *which model from which provider* backs the session, e.g.
+`llama3.2 (local:ollama_provider)` or `gpt-4o (local:copilot_provider)`. The
+provider owning the **selected** model is the *active* provider: it backs
+prompts, mode switches, and the non-model selectors (thinking-effort,
+allow-all, …). Selecting a model from a different provider switches the active
+provider, and its own selectors take over.
+
+With a single `--provider` the host is a transparent passthrough: config
+options, values, and ids are forwarded verbatim, so single-provider behaviour is
+unchanged.
+
 ## Crates
 
 - [`crates/acp-wasm-sys`](crates/acp-wasm-sys) — auto-generated WIT bindings
@@ -212,9 +238,9 @@ configuration, and a full smoke test.
   token (host secrets store or env), exchanges it for a short-lived Copilot
   API token, and streams OpenAI-compatible chat completions. See
   [GitHub Copilot provider](#github-copilot-provider).
-- [`crates/host`](crates/host) — the wasmtime host: instantiates the
-  ollama-provider component, speaks ACP JSON-RPC over stdio, translates
-  between WIT and ACP schema types.
+- [`crates/host`](crates/host) — the wasmtime host: instantiates one or more
+  provider components (merging their model selectors when several are loaded),
+  speaks ACP JSON-RPC over stdio, translates between WIT and ACP schema types.
 
 ## Limitations
 

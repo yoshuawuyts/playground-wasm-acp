@@ -34,13 +34,16 @@ use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::state::OutboundEvent;
-use crate::wasm::{Session, SessionFactory, SessionRegistry};
+use crate::wasm::{SessionFactory, SessionRegistry};
 
 pub use gate::NotificationGate;
 
-/// Look up a session, or return an ACP `invalid-params` error if the
+/// Look up a session group, or return an ACP `invalid-params` error if the
 /// session id is unknown.
-fn require_session(registry: &SessionRegistry, id: &str) -> Result<Session, AcpError> {
+fn require_session(
+    registry: &SessionRegistry,
+    id: &str,
+) -> Result<crate::group::SessionGroup, AcpError> {
     registry.get(id).ok_or_else(|| {
         let mut e = AcpError::invalid_params();
         e.message = format!("unknown session id: {id}");
