@@ -13,9 +13,14 @@ use crate::copilot::Message;
 
 const ROOT: &str = "/data";
 const SESSIONS_SUBDIR: &str = "sessions";
+const PREFERENCES_FILE: &str = "preferences.json";
 
 fn sessions_dir() -> PathBuf {
     PathBuf::from(format!("{ROOT}/{SESSIONS_SUBDIR}"))
+}
+
+fn preferences_path() -> PathBuf {
+    PathBuf::from(format!("{ROOT}/{PREFERENCES_FILE}"))
 }
 
 /// Sanitize a session id into a filename. Reject anything that isn't a plain
@@ -84,5 +89,78 @@ pub fn save(session_id: &str, session: &SessionState) -> Result<(), String> {
     fs::create_dir_all(sessions_dir())
         .map_err(|e| format!("mkdir {}: {e}", sessions_dir().display()))?;
     let bytes = serde_json::to_vec_pretty(session).map_err(|e| format!("encode session: {e}"))?;
+    fs::write(&path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// Global, cross-session defaults applied to brand-new sessions: the model and
+/// thinking level the user most recently selected (in any session). Persisting
+/// this lets a new session start on the same — often reasoning-capable — model
+/// as the last one, so its Thinking selector is populated from the start rather
+/// than only appearing after the user switches models.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Preferences {
+    pub model: String,
+    /// Last selected thinking level id (e.g. `"low"`/`"medium"`/`"high"`).
+    /// Empty when the last model advertised no reasoning levels.
+    #[serde(default)]
+    pub reasoning: String,
+}
+
+/// Read the global preferences. Falls back to the model + thinking level of
+/// the most recently modified saved session when no preferences file exists
+/// yet (so an install with prior sessions still starts new sessions on the
+/// last-used model). Returns `None` only when there's nothing to go on — a
+/// truly fresh install — so callers use the configured default model.
+pub fn load_preferences() -> Option<Preferences> {
+    if let Ok(bytes) = fs::read(preferences_path()) {
+        if let Ok(prefs) = serde_json::from_slice::<Preferences>(&bytes) {
+            return Some(prefs);
+        }
+    }
+    latest_session_preference()
+}
+
+/// The model + reasoning of the most recently modified saved session, used as
+/// a fallback before any explicit preferences file has been written.
+fn latest_session_preference() -> Option<Preferences> {
+    #[derive(Deserialize)]
+    struct SessionPref {
+        model: String,
+        #[serde(default)]
+        reasoning: String,
+    }
+
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in fs::read_dir(sessions_dir()).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if newest.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
+            newest = Some((mtime, path));
+        }
+    }
+    let (_, path) = newest?;
+    let bytes = fs::read(path).ok()?;
+    let pref = serde_json::from_slice::<SessionPref>(&bytes).ok()?;
+    if pref.model.is_empty() {
+        return None;
+    }
+    Some(Preferences {
+        model: pref.model,
+        reasoning: pref.reasoning,
+    })
+}
+
+/// Persist the global preferences, creating `/data` if missing. Best-effort:
+/// callers ignore the error so a failed save never fails the config change.
+pub fn save_preferences(prefs: &Preferences) -> Result<(), String> {
+    fs::create_dir_all(ROOT).map_err(|e| format!("mkdir {ROOT}: {e}"))?;
+    let bytes =
+        serde_json::to_vec_pretty(prefs).map_err(|e| format!("encode preferences: {e}"))?;
+    let path = preferences_path();
     fs::write(&path, bytes).map_err(|e| format!("write {}: {e}", path.display()))
 }

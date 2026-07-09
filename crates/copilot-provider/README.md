@@ -97,12 +97,17 @@ them), and every prompt turn reports context-window usage — all **sourced from
 upstream Copilot data, never fabricated**:
 
 - **Model** — a `model` selector listing the chat models your account can use
-  (`GET /models`, de-duplicated). Defaults to `COPILOT_MODEL`.
+  (`GET /models`, de-duplicated). A new session defaults to the **last model
+  and thinking level you selected** (persisted to `/data/preferences.json`, and
+  seeded from your most recent saved session on first run); it falls back to
+  `COPILOT_MODEL` only when no prior choice exists.
 - **Thinking** — a `reasoning-effort` selector (categorised as a *thought
   level*) offering the levels the selected model advertises under
   `capabilities.supports.reasoning_effort` (e.g. *low* / *medium* / *high*).
   Models without native reasoning control (e.g. `gpt-4o`) show no levels, and
-  the effort is only sent to models that accept it.
+  the effort is only sent to models that accept it. Because the last-used model
+  is remembered, this selector is present **from the start of a new session**
+  whenever that model supports reasoning — not only after switching models.
 - **Context usage** — after each turn the provider emits a `usage_update` with
   `used` (the response's `total_tokens`) and `size` (the model's
   `capabilities.limits.max_context_window_tokens`), so the editor can render a
@@ -129,7 +134,7 @@ All optional; read from the (inherited) host environment:
 
 | Variable                 | Default                                | Purpose                         |
 |--------------------------|----------------------------------------|---------------------------------|
-| `COPILOT_MODEL`          | `gpt-4o`                                | Default model id                |
+| `COPILOT_MODEL`          | `gpt-4o`                                | Fallback model id (used only when no prior selection is saved) |
 | `COPILOT_BASE_URL`       | from token, else `api.githubcopilot.com` | Override the API base URL     |
 | `COPILOT_TOKEN_URL`      | GitHub `copilot_internal/v2/token`      | Override the token-exchange endpoint (chiefly for tests) |
 | `COPILOT_EDITOR_VERSION` | `vscode/1.104.1`                       | `Editor-Version` header         |

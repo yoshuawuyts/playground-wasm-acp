@@ -159,6 +159,14 @@ impl GuestSession for ProviderSession {
         // Persistence is best-effort; a failed save shouldn't fail the switch.
         let _ = storage::save(&session_id, &snapshot);
 
+        // Remember this choice globally so the next brand-new session starts on
+        // the same model + thinking level (keeping the Thinking selector present
+        // from the start for reasoning-capable models).
+        let _ = storage::save_preferences(&storage::Preferences {
+            model: snapshot.model.clone(),
+            reasoning: snapshot.reasoning.clone(),
+        });
+
         // Rebuild the full option set from the cached model list — no network.
         let models = cached_models(&snapshot.model);
         Ok(build_config_options(
@@ -520,8 +528,20 @@ impl Guest for Agent {
 
     async fn new_session(req: NewSessionRequest) -> Result<(Session, NewSessionResponse), Error> {
         let id = next_session_id();
+        // Default a brand-new session to the model + thinking level the user
+        // last selected (persisted globally), falling back to the configured
+        // default model. This ensures the Thinking selector is populated from
+        // the start whenever the last-used model supports reasoning, instead of
+        // only appearing after the user switches away from a non-reasoning
+        // default (e.g. gpt-4o).
+        let prefs = storage::load_preferences();
+        let preferred = prefs.as_ref().map(|p| p.model.as_str());
+        let stored_reasoning = prefs
+            .as_ref()
+            .map(|p| p.reasoning.as_str())
+            .unwrap_or(PREFERRED_REASONING);
         let (config_options, current_model, reasoning) =
-            build_session_config(None, PREFERRED_REASONING).await;
+            build_session_config(preferred, stored_reasoning).await;
         SESSIONS.with(|s| {
             s.borrow_mut().insert(
                 id.clone(),
