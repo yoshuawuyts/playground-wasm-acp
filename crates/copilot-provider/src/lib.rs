@@ -150,6 +150,25 @@ impl GuestSession for ProviderSession {
                         }
                         session.reasoning = value.clone();
                     }
+                    CONFIG_MODE => {
+                        // Chat mode: agent / plan / autopilot.
+                        match value.as_str() {
+                            MODE_AGENT | MODE_PLAN | MODE_AUTOPILOT => {
+                                session.mode = value.clone();
+                            }
+                            other => return Err(format!("unknown mode: {other}")),
+                        }
+                    }
+                    CONFIG_ALLOW_ALL => {
+                        // Auto tool approval toggle: on / off.
+                        match value.as_str() {
+                            "on" => session.allow_all = true,
+                            "off" => session.allow_all = false,
+                            other => {
+                                return Err(format!("invalid allow-all value: {other} (on|off)"))
+                            }
+                        }
+                    }
                     other => return Err(format!("unknown config option: {other}")),
                 }
                 Ok(session.clone())
@@ -173,6 +192,8 @@ impl GuestSession for ProviderSession {
             &models,
             &snapshot.model,
             &snapshot.reasoning,
+            &snapshot.mode,
+            snapshot.allow_all,
         ))
     }
 }
@@ -254,6 +275,15 @@ const COMPONENT_ID: &str = "local:copilot-provider";
 // `set-config-option`.
 const CONFIG_MODEL: &str = "model";
 const CONFIG_REASONING: &str = "reasoning-effort";
+const CONFIG_MODE: &str = "mode";
+const CONFIG_ALLOW_ALL: &str = "allow-all";
+
+// Chat mode ids, mirroring the GitHub Copilot CLI's mode selector.
+const MODE_AGENT: &str = "agent";
+const MODE_PLAN: &str = "plan";
+const MODE_AUTOPILOT: &str = "autopilot";
+/// Default chat mode for a fresh session (safe, conversational).
+const DEFAULT_MODE: &str = MODE_AGENT;
 
 /// Preferred default thinking level, used when a model supports reasoning
 /// but the session has no (valid) selection yet. Falls back to the model's
@@ -287,6 +317,10 @@ thread_local! {
 
 /// One-time system message inserted at the start of every fresh session.
 const SYSTEM_PROMPT: &str = "You are GitHub Copilot, an AI coding assistant connected to the user's editor. Answer concisely and helpfully. When you include code, use fenced code blocks tagged with the language.";
+
+/// Extra instruction injected (per turn, not persisted) when the session is in
+/// `plan` mode: steer the model toward proposing a plan instead of editing.
+const PLAN_DIRECTIVE: &str = "You are in Plan mode. Focus on understanding the task and proposing a clear, step-by-step plan. Do not modify files or run mutating tools; only read and inspect. Present the plan and wait for the user to switch modes before implementing.";
 
 fn component_source() -> ComponentSource {
     ComponentSource {
@@ -341,16 +375,73 @@ fn resolve_reasoning(model: Option<&copilot::CopilotModel>, stored: &str) -> Str
     efforts[0].clone()
 }
 
+/// Resolve a stored chat-mode id to a known mode, defaulting to
+/// [`DEFAULT_MODE`] for empty (legacy sessions) or unrecognized values.
+fn resolve_mode(stored: &str) -> String {
+    match stored {
+        MODE_AGENT | MODE_PLAN | MODE_AUTOPILOT => stored.to_string(),
+        _ => DEFAULT_MODE.to_string(),
+    }
+}
+
+/// Whether a mode/allow-all combination should approve tool calls without
+/// prompting: an explicit "allow all", or autopilot (which implies it).
+fn auto_approves(mode: &str, allow_all: bool) -> bool {
+    allow_all || mode == MODE_AUTOPILOT
+}
+
 /// Build the config-option selectors advertised on every session lifecycle
-/// response and returned from `set-config-option`. The model selector is
-/// always present; the thinking-level selector is present only when the
-/// current model advertises `reasoning_effort` upstream, and its options are
-/// exactly the levels that model supports.
+/// response and returned from `set-config-option`: a **Mode** selector
+/// (agent / plan / autopilot), the **Model** selector (always present), a
+/// **Thinking** selector (only when the current model advertises
+/// `reasoning_effort` upstream), and an **Allow All** auto-tool-approval
+/// toggle. Mirrors the selectors the GitHub Copilot CLI advertises over ACP.
 fn build_config_options(
     models: &[copilot::CopilotModel],
     current_model: &str,
     current_reasoning: &str,
+    current_mode: &str,
+    allow_all: bool,
 ) -> Vec<SessionConfigOption> {
+    // Mode selector — how Copilot operates for this session.
+    let mut options = vec![SessionConfigOption {
+        id: CONFIG_MODE.to_string(),
+        name: "Mode".to_string(),
+        description: Some(
+            "Controls how Copilot responds: a conversational agent, planning \
+             multi-step work, or autonomous autopilot."
+                .to_string(),
+        ),
+        category: Some(SessionConfigOptionCategory::Mode),
+        current_value: resolve_mode(current_mode),
+        options: vec![
+            SessionConfigSelectOption {
+                value: MODE_AGENT.to_string(),
+                name: "Agent".to_string(),
+                description: Some(
+                    "Default agent mode for conversational interactions.".to_string(),
+                ),
+            },
+            SessionConfigSelectOption {
+                value: MODE_PLAN.to_string(),
+                name: "Plan".to_string(),
+                description: Some(
+                    "Plan mode: propose a step-by-step plan without making changes.".to_string(),
+                ),
+            },
+            SessionConfigSelectOption {
+                value: MODE_AUTOPILOT.to_string(),
+                name: "Autopilot".to_string(),
+                description: Some(
+                    "Autonomous mode that enables allow-all and runs until the task is \
+                     complete without prompting."
+                        .to_string(),
+                ),
+            },
+        ],
+        provided_by: component_source(),
+    }];
+
     let model_options = models
         .iter()
         .map(|m| SessionConfigSelectOption {
@@ -359,7 +450,7 @@ fn build_config_options(
             description: None,
         })
         .collect();
-    let mut options = vec![SessionConfigOption {
+    options.push(SessionConfigOption {
         id: CONFIG_MODEL.to_string(),
         name: "Model".to_string(),
         description: Some("Which Copilot model backs this session.".to_string()),
@@ -367,7 +458,7 @@ fn build_config_options(
         current_value: current_model.to_string(),
         options: model_options,
         provided_by: component_source(),
-    }];
+    });
 
     // Thinking levels come straight from the current model's upstream
     // capabilities; omit the selector entirely for models without reasoning.
@@ -397,6 +488,35 @@ fn build_config_options(
             });
         }
     }
+
+    // Auto tool approval ("allow all"). A plain on/off toggle in the
+    // `permissions` category. Autopilot implies "on".
+    let effective_allow_all = auto_approves(current_mode, allow_all);
+    options.push(SessionConfigOption {
+        id: CONFIG_ALLOW_ALL.to_string(),
+        name: "Allow All".to_string(),
+        description: Some(
+            "Controls whether Copilot prompts for approval before using tools. When on, \
+             tool calls are approved automatically."
+                .to_string(),
+        ),
+        category: Some(SessionConfigOptionCategory::Other("permissions".to_string())),
+        current_value: if effective_allow_all { "on" } else { "off" }.to_string(),
+        options: vec![
+            SessionConfigSelectOption {
+                value: "on".to_string(),
+                name: "On".to_string(),
+                description: Some("Automatically approve all tool requests.".to_string()),
+            },
+            SessionConfigSelectOption {
+                value: "off".to_string(),
+                name: "Off".to_string(),
+                description: Some("Require approval for tool requests.".to_string()),
+            },
+        ],
+        provided_by: component_source(),
+    });
+
     options
 }
 
@@ -425,14 +545,16 @@ fn cached_models(current_model: &str) -> Vec<copilot::CopilotModel> {
 }
 
 /// List chat-capable Copilot models (populating [`MODELS_CACHE`]) and build the
-/// session's config-option selectors, the resolved current model, and the
-/// resolved thinking level for that model. Falls back to a single entry for
-/// [`copilot::default_model`] if the API is unreachable or returns nothing, so
-/// session creation still succeeds.
+/// session's config-option selectors, the resolved current model, the resolved
+/// thinking level for that model, and the resolved chat mode. Falls back to a
+/// single entry for [`copilot::default_model`] if the API is unreachable or
+/// returns nothing, so session creation still succeeds.
 async fn build_session_config(
     preferred_model: Option<&str>,
     stored_reasoning: &str,
-) -> (Vec<SessionConfigOption>, String, String) {
+    stored_mode: &str,
+    allow_all: bool,
+) -> (Vec<SessionConfigOption>, String, String, String) {
     let default = copilot::default_model();
     let listed = match copilot::list_models().await {
         Ok(models) if !models.is_empty() => models,
@@ -448,8 +570,9 @@ async fn build_session_config(
     MODELS_CACHE.with(|c| *c.borrow_mut() = listed.clone());
     let current = pick_current_model(&listed, preferred_model);
     let reasoning = resolve_reasoning(find_model(&listed, &current), stored_reasoning);
-    let options = build_config_options(&listed, &current, &reasoning);
-    (options, current, reasoning)
+    let mode = resolve_mode(stored_mode);
+    let options = build_config_options(&listed, &current, &reasoning, &mode, allow_all);
+    (options, current, reasoning, mode)
 }
 
 fn next_session_id() -> String {
@@ -540,8 +663,8 @@ impl Guest for Agent {
             .as_ref()
             .map(|p| p.reasoning.as_str())
             .unwrap_or(PREFERRED_REASONING);
-        let (config_options, current_model, reasoning) =
-            build_session_config(preferred, stored_reasoning).await;
+        let (config_options, current_model, reasoning, mode) =
+            build_session_config(preferred, stored_reasoning, DEFAULT_MODE, false).await;
         SESSIONS.with(|s| {
             s.borrow_mut().insert(
                 id.clone(),
@@ -549,6 +672,8 @@ impl Guest for Agent {
                     history: Vec::new(),
                     model: current_model,
                     reasoning,
+                    mode,
+                    allow_all: false,
                     cwd: req.cwd,
                     cost_aiu: 0.0,
                 },
@@ -588,8 +713,11 @@ impl Guest for Agent {
             .map(|s| s.reasoning.clone())
             .unwrap_or_default();
         let stored_cost = stored.as_ref().map(|s| s.cost_aiu).unwrap_or(0.0);
-        let (config_options, current_model, reasoning) =
-            build_session_config(preferred.as_deref(), &stored_reasoning).await;
+        let stored_mode = stored.as_ref().map(|s| s.mode.clone()).unwrap_or_default();
+        let stored_allow_all = stored.as_ref().map(|s| s.allow_all).unwrap_or(false);
+        let (config_options, current_model, reasoning, mode) =
+            build_session_config(preferred.as_deref(), &stored_reasoning, &stored_mode, stored_allow_all)
+                .await;
         for msg in &history {
             let block = ContentBlock::Text(TextContent {
                 text: msg.content.clone(),
@@ -608,6 +736,8 @@ impl Guest for Agent {
                     history,
                     model: current_model,
                     reasoning,
+                    mode,
+                    allow_all: stored_allow_all,
                     cwd: req.cwd,
                     cost_aiu: stored_cost,
                 },
@@ -649,8 +779,11 @@ impl Guest for Agent {
             .map(|s| s.reasoning.clone())
             .unwrap_or_default();
         let stored_cost = stored.as_ref().map(|s| s.cost_aiu).unwrap_or(0.0);
-        let (config_options, current_model, reasoning) =
-            build_session_config(preferred.as_deref(), &stored_reasoning).await;
+        let stored_mode = stored.as_ref().map(|s| s.mode.clone()).unwrap_or_default();
+        let stored_allow_all = stored.as_ref().map(|s| s.allow_all).unwrap_or(false);
+        let (config_options, current_model, reasoning, mode) =
+            build_session_config(preferred.as_deref(), &stored_reasoning, &stored_mode, stored_allow_all)
+                .await;
         SESSIONS.with(|s| {
             s.borrow_mut().insert(
                 session_id.clone(),
@@ -658,6 +791,8 @@ impl Guest for Agent {
                     history,
                     model: current_model,
                     reasoning,
+                    mode,
+                    allow_all: stored_allow_all,
                     cwd: req.cwd,
                     cost_aiu: stored_cost,
                 },
@@ -691,12 +826,14 @@ async fn prompt_impl(
     // active model and thinking level) to send to Copilot. New sessions can
     // land here without going through `new-session` (e.g. tests); fall back to
     // defaults. A one-time `system` message is prepended on the first prompt.
-    let (mut working, model, reasoning, cwd) = SESSIONS.with(|s| {
+    let (mut working, model, reasoning, cwd, mode) = SESSIONS.with(|s| {
         let mut sessions = s.borrow_mut();
         let entry = sessions.entry(session_id.clone()).or_insert_with(|| SessionState {
             history: Vec::new(),
             model: copilot::default_model(),
             reasoning: String::new(),
+            mode: DEFAULT_MODE.to_string(),
+            allow_all: false,
             cwd: String::new(),
             cost_aiu: 0.0,
         });
@@ -715,8 +852,17 @@ async fn prompt_impl(
             entry.model.clone(),
             entry.reasoning.clone(),
             entry.cwd.clone(),
+            entry.mode.clone(),
         )
     });
+
+    // Plan mode: steer this turn toward proposing a plan. Injected into the
+    // per-turn copy only (right after the base system prompt) so it reflects
+    // the *current* mode each turn without polluting persisted history.
+    if mode == MODE_PLAN {
+        let at = working.iter().take_while(|m| m.role == "system").count();
+        working.insert(at, Message::system(PLAN_DIRECTIVE.to_string()));
+    }
 
     // Apply the thinking level as the model's native `reasoning_effort`
     // parameter — but only when the selected model actually advertises that
@@ -1039,6 +1185,18 @@ fn remember_permission(session_id: &str, tool_name: &str, allow: bool) {
 /// Ask the client to authorize a tool call, honoring per-session
 /// always-allow / always-reject memory so we don't re-prompt.
 async fn request_tool_permission(session_id: &str, tool_name: &str, ui: &ToolUi) -> Decision {
+    // Auto tool approval: skip the prompt entirely when the session has
+    // "allow all" on, or is in autopilot mode (which implies it).
+    let auto = SESSIONS.with(|s| {
+        s.borrow()
+            .get(session_id)
+            .map(|st| auto_approves(&st.mode, st.allow_all))
+            .unwrap_or(false)
+    });
+    if auto {
+        return Decision::Allow;
+    }
+
     let remembered = PERMS.with(|p| {
         p.borrow().get(session_id).and_then(|st| {
             if st.always_reject.contains(tool_name) {

@@ -90,12 +90,17 @@ rest of the session (per tool), so you're only prompted once per tool. If the
 editor doesn't support a tool or denies permission, the model is told and can
 continue without it.
 
-## Model, thinking, usage, and cost
+## Mode, model, thinking, usage, cost, and approval
 
 Every session exposes config-option selectors (shown by editors that render
 them), and every prompt turn reports context-window usage — all **sourced from
-upstream Copilot data, never fabricated**:
+upstream Copilot data or backed by real provider behavior, never fabricated**:
 
+- **Mode** — a `mode` selector (categorised as a *mode*) mirroring the GitHub
+  Copilot CLI's modes: **Agent** (default conversational), **Plan** (steers the
+  model toward proposing a step-by-step plan and injects a per-turn directive to
+  avoid making changes), and **Autopilot** (autonomous; implies *Allow All* so
+  tool calls run without prompting). Defaults to **Agent** on every new session.
 - **Model** — a `model` selector listing the chat models your account can use
   (`GET /models`, de-duplicated). A new session defaults to the **last model
   and thinking level you selected** (persisted to `/data/preferences.json`, and
@@ -123,10 +128,17 @@ upstream Copilot data, never fabricated**:
   **not** use an ISO-4217 code. It is `0` for included models and for accounts
   on unlimited/usage-based plans (which still see the `0 AIU` meter, confirming
   the signal works).
+- **Allow All** — an `allow-all` toggle (categorised as *permissions*) with
+  **On** / **Off**. When **On**, tool calls are approved automatically instead
+  of prompting the client via `session/request_permission`; **Off** (the safe
+  default on every new session) requires per-call approval. Autopilot mode
+  forces this **On**. This is backed by real behavior — `request_tool_permission`
+  short-circuits to *allow* — not just advertised.
 
-There is intentionally **no chat-mode selector**: the Copilot API exposes no
-"mode" concept, so the provider advertises none rather than inventing one (the
-host still injects a `default` mode for protocol completeness).
+Chat mode is advertised as a config option (category `mode`) rather than via the
+legacy session-mode methods, matching how the provider surfaces every other
+selector; the host still injects a `default` session mode for clients that only
+read the legacy `modes` field.
 
 ## Configuration
 

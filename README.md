@@ -190,10 +190,10 @@ touching the filesystem (with per-session *allow always* / *reject always*
 memory).
 
 It also surfaces per-turn **context-window usage** and **usage-based cost** (in
-GitHub AI Units, AIU) as ACP `usage_update`s, plus **model** and
-**thinking-effort** config selectors — all sourced from the Copilot `/models`
-capabilities and chat-completion stream (there is intentionally no chat-mode
-selector; the API exposes no mode concept).
+GitHub AI Units, AIU) as ACP `usage_update`s, plus **mode** (agent / plan /
+autopilot), **model**, **thinking-effort**, and **allow-all** (auto tool
+approval) config selectors — mirroring the selectors the GitHub Copilot CLI
+exposes over ACP, and each backed by upstream data or real provider behavior.
 
 See **[`crates/copilot-provider/README.md`](crates/copilot-provider/README.md)**
 for GitHub token authentication (token types and how the guest falls back from

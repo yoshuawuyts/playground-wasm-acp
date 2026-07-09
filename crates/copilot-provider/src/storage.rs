@@ -50,6 +50,19 @@ pub struct SessionState {
     /// `reasoning_effort` API parameter on each turn.
     #[serde(default)]
     pub reasoning: String,
+    /// Active chat mode id (`"agent"` / `"plan"` / `"autopilot"`), mirroring
+    /// the Copilot CLI's mode selector. `agent` is the default conversational
+    /// mode; `plan` steers the model toward producing a plan without making
+    /// changes; `autopilot` runs autonomously and implies auto tool approval.
+    /// Empty on legacy session files → treated as `"agent"`.
+    #[serde(default)]
+    pub mode: String,
+    /// Auto tool approval ("allow all"). When `true`, tool calls are approved
+    /// without prompting the client. Defaults to `false` (prompt for each);
+    /// autopilot mode implies this even when the flag is off. Deliberately
+    /// *not* seeded from global preferences, so every new session starts safe.
+    #[serde(default)]
+    pub allow_all: bool,
     #[serde(default)]
     pub cwd: String,
     /// Cumulative usage-based cost billed to this session so far, in AI Units
