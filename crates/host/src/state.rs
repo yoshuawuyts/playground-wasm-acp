@@ -121,6 +121,13 @@ pub struct HostState {
     /// under the single group session id (see [`crate::group`]). `None`
     /// leaves the guest id untouched — the single-provider passthrough.
     pub editor_session_id: Option<String>,
+    /// Whether the host may execute terminal (CLI) commands on behalf of
+    /// the guest via the `client.terminal` resource. Driven by the
+    /// host-owned `terminal` boolean session config option (default
+    /// `false`); toggled per session through `session/set_config_option`
+    /// (see [`crate::group`]). When `false` the host refuses to spawn any
+    /// process and surfaces that to the guest.
+    pub terminal_enabled: bool,
 }
 
 impl HostState {

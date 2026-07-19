@@ -32,6 +32,7 @@ use acp_wasm_sys::provider::yosh::acp::sessions::{
 
 use acp_wasm_sys::provider::yosh::acp::client;
 use acp_wasm_sys::provider::yosh::acp::filesystem::{ReadTextFileRequest, WriteTextFileRequest};
+use acp_wasm_sys::provider::yosh::acp::terminals::CreateTerminalRequest;
 use acp_wasm_sys::provider::yosh::acp::tools::{
     Diff, PermissionOption, PermissionOptionKind, PermissionOutcome, RequestPermissionRequest,
     ToolCallContent, ToolCallLocation, ToolCallSnapshot, ToolCallStatus, ToolKind,
@@ -1017,10 +1018,24 @@ async fn prompt_impl(
 
 const TOOL_READ: &str = "read_text_file";
 const TOOL_WRITE: &str = "write_text_file";
+const TOOL_TERMINAL: &str = "run_terminal_command";
+
+/// Max bytes of terminal output retained. The host truncates from the start
+/// once this is exceeded, keeping the tail — where errors and summaries
+/// usually live.
+const TERMINAL_OUTPUT_LIMIT: u64 = 32 * 1024;
 
 /// Build the OpenAI-compatible tool array advertised to the model: a
 /// `read_text_file` and a `write_text_file` function, both routed through the
-/// ACP client's filesystem. The editor authorizes and fulfils each call.
+/// ACP client's filesystem, plus a `run_terminal_command` function routed
+/// through the ACP client's terminal. The editor authorizes and fulfils each
+/// call.
+///
+/// The `run_terminal_command` tool is advertised unconditionally: whether the
+/// command actually runs is the host's decision, gated by the host-owned
+/// `terminal` session config option (default off). The provider never sees
+/// that flag, so it always offers the tool and surfaces the host's refusal to
+/// the model when the option is disabled.
 fn tool_defs() -> Option<Value> {
     Some(json!([
         {
@@ -1054,6 +1069,25 @@ fn tool_defs() -> Option<Value> {
                         "content": { "type": "string", "description": "The full new contents of the file." }
                     },
                     "required": ["path", "content"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": TOOL_TERMINAL,
+                "description": "Run a shell command in the user's workspace and return \
+                    its combined stdout and stderr plus the exit status. The command runs \
+                    via `sh -c`, so shell features like pipes, globs, quoting, and `&&` \
+                    work. Use this to build, run tests, inspect the environment, or \
+                    otherwise operate on the project from the command line.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "The shell command line to execute, e.g. `cargo test` or `ls -la src`." },
+                        "cwd": { "type": "string", "description": "Optional working directory (absolute, or relative to the project directory). Defaults to the project directory." }
+                    },
+                    "required": ["command"]
                 }
             }
         }
@@ -1250,10 +1284,16 @@ async fn execute_tool_call(session_id: &str, cwd: &str, call: &copilot::ToolCall
     let name = call.function.name.as_str();
     let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
     let path = resolve_path(cwd, args.get("path").and_then(Value::as_str).unwrap_or(""));
+    let command = args
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
 
     let (title, kind) = match name {
         TOOL_READ => (format!("Read {path}"), ToolKind::Read),
         TOOL_WRITE => (format!("Write {path}"), ToolKind::Edit),
+        TOOL_TERMINAL => (format!("Run `{command}`"), ToolKind::Execute),
         other => (format!("Run {other}"), ToolKind::Other),
     };
     let line = args.get("line").and_then(Value::as_u64).map(|n| n as u32);
@@ -1375,6 +1415,75 @@ async fn execute_tool_call(session_id: &str, cwd: &str, call: &copilot::ToolCall
                 }
                 Err(e) => {
                     let msg = format!("Error writing {path}: {}", e.message);
+                    ui.update(ToolCallStatus::Failed, Vec::new(), Some(msg.clone()))
+                        .await;
+                    ToolExec::Result(msg)
+                }
+            }
+        }
+        TOOL_TERMINAL => {
+            if command.is_empty() {
+                ui.update(
+                    ToolCallStatus::Failed,
+                    Vec::new(),
+                    Some("missing 'command'".to_string()),
+                )
+                .await;
+                return ToolExec::Result("Error: the 'command' argument is required.".to_string());
+            }
+            // Optional cwd override; default to the session cwd. The host does
+            // a direct exec, so route the command through `sh -c` to give the
+            // model normal shell semantics (pipes, globs, quoting, `&&`, …).
+            let run_cwd = match args.get("cwd").and_then(Value::as_str) {
+                Some(c) if !c.is_empty() => resolve_path(cwd, c),
+                _ => cwd.to_string(),
+            };
+            let req = CreateTerminalRequest {
+                session_id: session_id.to_string(),
+                command: "sh".to_string(),
+                args: vec!["-c".to_string(), command.clone()],
+                env: Vec::new(),
+                cwd: if run_cwd.is_empty() {
+                    None
+                } else {
+                    Some(run_cwd)
+                },
+                output_byte_limit: Some(TERMINAL_OUTPUT_LIMIT),
+            };
+            let terminal = client::Terminal::new(&req);
+            // Draining `output()` awaits process exit and the final flush;
+            // `wait_for_exit()` then resolves immediately (or reports that the
+            // host-owned `terminal` config option is disabled).
+            let bytes = terminal.output().await.collect().await;
+            let output = String::from_utf8_lossy(&bytes).into_owned();
+            match terminal.wait_for_exit().await {
+                Ok(status) => {
+                    let exit_desc = match (status.exit_code, &status.signal) {
+                        (Some(code), _) => format!("exit code {code}"),
+                        (None, Some(sig)) => format!("terminated by signal {sig}"),
+                        (None, None) => "exited".to_string(),
+                    };
+                    let result = if output.is_empty() {
+                        format!("Command completed ({exit_desc}) with no output.")
+                    } else {
+                        format!("{output}\n[{exit_desc}]")
+                    };
+                    let block = ContentBlock::Text(TextContent {
+                        text: preview(&result),
+                    });
+                    ui.update(
+                        ToolCallStatus::Completed,
+                        vec![ToolCallContent::Content(block)],
+                        Some(exit_desc),
+                    )
+                    .await;
+                    ToolExec::Result(result)
+                }
+                Err(e) => {
+                    // The host refuses to spawn when the `terminal` option is
+                    // off; relay its message so the model knows terminal tools
+                    // must be enabled rather than treating this as a hard error.
+                    let msg = format!("Terminal command failed: {}", e.message);
                     ui.update(ToolCallStatus::Failed, Vec::new(), Some(msg.clone()))
                         .await;
                     ToolExec::Result(msg)

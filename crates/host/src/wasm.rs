@@ -30,13 +30,18 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context as TaskContext, Poll};
 
 use anyhow::{Context, Result};
 use futures_concurrency::future::Race;
 use tokio::sync::{mpsc, watch};
-use wasmtime::component::{Component, HasSelf, Linker, ResourceAny, ResourceTable};
-use wasmtime::{Engine, Store};
+use wasmtime::component::{
+    Component, Destination, HasSelf, Linker, Resource, ResourceAny, ResourceTable, StreamProducer,
+    StreamReader, StreamResult, VecBuffer,
+};
+use wasmtime::{Engine, Store, StoreContextMut};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 use wasmtime_wasi_http::WasiHttpCtx;
 
@@ -78,6 +83,14 @@ pub struct SessionFactory {
     outbound: mpsc::Sender<OutboundEvent>,
     data_root: PathBuf,
     secrets: Arc<SecretsRegistry>,
+    /// Whether the client advertised support for boolean session config
+    /// options (`session.configOptions.boolean` in `initialize`). Read
+    /// when building `session/new` and `session/load` responses to decide
+    /// whether to advertise the host-owned `terminal` toggle (per the ACP
+    /// boolean-config-option RFD, agents MUST NOT send `type: "boolean"`
+    /// options to clients that didn't opt in). Defaults to `false` until
+    /// `initialize` runs.
+    boolean_config_supported: std::sync::atomic::AtomicBool,
 }
 
 impl SessionFactory {
@@ -97,7 +110,24 @@ impl SessionFactory {
             outbound,
             data_root,
             secrets,
+            boolean_config_supported: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Whether the client advertised support for boolean session config
+    /// options during `initialize`. Gates the host-owned `terminal`
+    /// toggle.
+    pub fn boolean_config_supported(&self) -> bool {
+        self.boolean_config_supported
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record whether the client advertised `session.configOptions.boolean`.
+    /// Called once from the `initialize` handler; sessions created
+    /// afterwards read it back via [`Self::boolean_config_supported`].
+    pub fn set_boolean_config_supported(&self, supported: bool) {
+        self.boolean_config_supported
+            .store(supported, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Build a session with no `/data` preopen, on the first provider.
@@ -213,6 +243,7 @@ impl SessionFactory {
             downstream_sessions: std::collections::HashMap::new(),
             next_downstream_rep: 1,
             editor_session_id: None,
+            terminal_enabled: false,
         };
         let mut store = Store::new(&self.engine, state);
 
@@ -416,6 +447,16 @@ impl Session {
     pub async fn set_editor_session_id(&self, id: String) {
         let mut store = self.inner.store.lock().await;
         store.data_mut().editor_session_id = Some(id);
+    }
+
+    /// Enable or disable host-side terminal (CLI) execution for this
+    /// chain. Set from the host-owned `terminal` boolean config option
+    /// (see [`crate::group`]); read by the `client.terminal` host impl
+    /// which refuses to spawn processes while `false`. Defaults to
+    /// `false` at instantiation.
+    pub async fn set_terminal_enabled(&self, enabled: bool) {
+        let mut store = self.inner.store.lock().await;
+        store.data_mut().terminal_enabled = enabled;
     }
 
     /// Run `body` inside `store.run_concurrent`, pushing/popping the
@@ -844,38 +885,296 @@ impl layer_agent::HostSession for HostState {
 
 /// Host-owned payload for a `client.terminal` resource.
 ///
-/// Phase 2: holds the create-terminal-request that constructed it. A
-/// real implementation would also carry editor-side correlation state
-/// (a wire-level `terminal-id` returned from the editor's
-/// `terminal/create` JSON-RPC, plus the process state). For now the
-/// host doesn't actually start a process — `output()` returns an empty
-/// stream and `wait_for_exit()` returns an error.
-pub struct HostTerminalEntry {
-    pub _req: crate::yosh::acp::terminals::CreateTerminalRequest,
+/// When the session's host-owned `terminal` boolean config option is enabled,
+/// the host actually spawns the requested command as a local child process;
+/// the guest reaches it through the `client.terminal` resource (`output()`
+/// streams the combined stdout/stderr, `wait_for_exit()` resolves with the exit
+/// status). When terminal tools are disabled, or the spawn fails, the entry
+/// records that and both methods surface it to the guest.
+pub enum HostTerminalEntry {
+    /// Terminal execution is disabled by host configuration.
+    Disabled,
+    /// The command could not be spawned; carries the OS error text.
+    SpawnFailed(String),
+    /// A live child process.
+    Running(TerminalProcess),
+}
+
+/// Live handle to a spawned terminal command.
+pub struct TerminalProcess {
+    /// Combined stdout+stderr byte stream, chunked. Taken by the first
+    /// `output()` call (the stream is consumed once).
+    output_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
+    /// Resolves to `Some(_)` once the process has exited. `None` until
+    /// then.
+    exit_rx: watch::Receiver<Option<ExitInfo>>,
+    /// Background pump task; aborted on drop so a dropped resource kills
+    /// the process (via `kill_on_drop`) — matching the WIT "drop = kill".
+    pump: tokio::task::AbortHandle,
+}
+
+impl Drop for TerminalProcess {
+    fn drop(&mut self) {
+        // Aborting drops the task's `Child`, whose `kill_on_drop(true)`
+        // terminates the process. A no-op if the process already exited.
+        self.pump.abort();
+    }
+}
+
+/// Owned, clonable snapshot of a process exit status. Kept separate from
+/// the generated `TerminalExitStatus` so it can be stored in a `watch`
+/// channel without depending on the WIT type deriving `Clone`.
+#[derive(Clone)]
+struct ExitInfo {
+    code: Option<i32>,
+    signal: Option<String>,
+}
+
+/// [`StreamProducer`] that forwards chunks pumped from a child process's
+/// combined output channel to the guest's `stream<u8>` read end.
+struct TerminalOutputProducer {
+    rx: mpsc::UnboundedReceiver<Vec<u8>>,
+}
+
+impl<D: 'static> StreamProducer<D> for TerminalOutputProducer {
+    type Item = u8;
+    type Buffer = VecBuffer<u8>;
+
+    fn poll_produce<'a>(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        _store: StoreContextMut<'a, D>,
+        mut destination: Destination<'a, u8, Self::Buffer>,
+        finish: bool,
+    ) -> Poll<wasmtime::Result<StreamResult>> {
+        let this = self.get_mut();
+        match this.rx.poll_recv(cx) {
+            // A chunk of output: hand it to the reader. Anything beyond
+            // the reader's immediate capacity is retained by the runtime
+            // and delivered on the next read.
+            Poll::Ready(Some(chunk)) => {
+                if !chunk.is_empty() {
+                    destination.set_buffer(chunk.into());
+                }
+                Poll::Ready(Ok(StreamResult::Completed))
+            }
+            // Channel closed: the process exited and all output flushed.
+            Poll::Ready(None) => Poll::Ready(Ok(StreamResult::Dropped)),
+            Poll::Pending => {
+                if finish {
+                    Poll::Ready(Ok(StreamResult::Cancelled))
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+    }
+}
+
+/// Spawn `req`'s command as a child process, wiring its combined output
+/// into an mpsc channel and its exit status into a `watch` channel. A
+/// background task pumps both.
+fn spawn_terminal(
+    req: &crate::yosh::acp::terminals::CreateTerminalRequest,
+) -> std::io::Result<TerminalProcess> {
+    use std::process::Stdio;
+
+    let mut cmd = tokio::process::Command::new(&req.command);
+    cmd.args(&req.args);
+    // Editor-supplied env vars are added on top of the inherited
+    // environment, matching ACP terminal semantics.
+    for ev in &req.env {
+        cmd.env(&ev.name, &ev.value);
+    }
+    if let Some(cwd) = &req.cwd {
+        cmd.current_dir(cwd);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let (out_tx, out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (exit_tx, exit_rx) = watch::channel::<Option<ExitInfo>>(None);
+    let limit = req.output_byte_limit;
+
+    let handle = tokio::spawn(pump_terminal(child, stdout, stderr, out_tx, exit_tx, limit));
+
+    Ok(TerminalProcess {
+        output_rx: Some(out_rx),
+        exit_rx,
+        pump: handle.abort_handle(),
+    })
+}
+
+/// Drive a spawned child: drain stdout+stderr concurrently into
+/// `out_tx`, wait for exit, then publish the exit status on `exit_tx`.
+async fn pump_terminal(
+    mut child: tokio::process::Child,
+    stdout: Option<tokio::process::ChildStdout>,
+    stderr: Option<tokio::process::ChildStderr>,
+    out_tx: mpsc::UnboundedSender<Vec<u8>>,
+    exit_tx: watch::Sender<Option<ExitInfo>>,
+    limit: Option<u64>,
+) {
+    use std::sync::atomic::AtomicU64;
+
+    let counter = Arc::new(AtomicU64::new(0));
+    let r1 = spawn_reader(stdout, out_tx.clone(), limit, counter.clone());
+    let r2 = spawn_reader(stderr, out_tx, limit, counter);
+
+    let status = child.wait().await;
+    // Ensure all output is flushed to the channel before we report exit.
+    let _ = r1.await;
+    let _ = r2.await;
+
+    let info = match status {
+        Ok(st) => exit_info_from_status(st),
+        Err(e) => ExitInfo {
+            code: None,
+            signal: Some(format!("wait-error: {e}")),
+        },
+    };
+    let _ = exit_tx.send(Some(info));
+}
+
+/// Spawn a task that reads `reader` to EOF, forwarding chunks to `tx`.
+/// Honors `limit` as an upper bound on total forwarded bytes across both
+/// streams (excess is dropped — an end-truncation simplification of the
+/// WIT's start-truncation semantics).
+fn spawn_reader<R>(
+    reader: Option<R>,
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+    limit: Option<u64>,
+    counter: Arc<std::sync::atomic::AtomicU64>,
+) -> tokio::task::JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    use std::sync::atomic::Ordering;
+    use tokio::io::AsyncReadExt;
+
+    tokio::spawn(async move {
+        let Some(mut reader) = reader else { return };
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let n = match reader.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let mut end = n;
+            if let Some(limit) = limit {
+                let prev = counter.fetch_add(n as u64, Ordering::Relaxed);
+                if prev >= limit {
+                    continue;
+                }
+                let remaining = (limit - prev) as usize;
+                if remaining < n {
+                    end = remaining;
+                }
+            }
+            if tx.send(buf[..end].to_vec()).is_err() {
+                break;
+            }
+        }
+    })
+}
+
+/// Convert a process exit status into an [`ExitInfo`]. On Unix a
+/// signal-terminated process reports the signal name; otherwise the
+/// numeric exit code.
+fn exit_info_from_status(status: std::process::ExitStatus) -> ExitInfo {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return ExitInfo {
+                code: None,
+                signal: Some(signal_name(sig)),
+            };
+        }
+    }
+    ExitInfo {
+        code: status.code(),
+        signal: None,
+    }
+}
+
+/// Map a Unix signal number to its conventional name, falling back to
+/// `SIG<n>` for anything not in the common set.
+#[cfg(unix)]
+fn signal_name(sig: i32) -> String {
+    let name = match sig {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        6 => "SIGABRT",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        _ => return format!("SIG{sig}"),
+    };
+    name.to_string()
 }
 
 impl crate::yosh::acp::client::HostTerminal for HostState {
     async fn new(
         &mut self,
         req: crate::yosh::acp::terminals::CreateTerminalRequest,
-    ) -> wasmtime::component::Resource<crate::yosh::acp::client::Terminal> {
+    ) -> Resource<crate::yosh::acp::client::Terminal> {
+        let entry = if !self.terminal_enabled {
+            tracing::warn!(
+                command = %req.command,
+                "terminal tools are disabled; refusing to spawn (enable the `terminal` session config option)",
+            );
+            HostTerminalEntry::Disabled
+        } else {
+            match spawn_terminal(&req) {
+                Ok(proc) => {
+                    tracing::info!(
+                        command = %req.command,
+                        args = ?req.args,
+                        cwd = ?req.cwd,
+                        "spawned terminal command",
+                    );
+                    HostTerminalEntry::Running(proc)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        command = %req.command,
+                        error = %e,
+                        "failed to spawn terminal command",
+                    );
+                    HostTerminalEntry::SpawnFailed(e.to_string())
+                }
+            }
+        };
         // Allocate a slot in the per-store resource table. The rep we
         // mint here is the table-side rep, retagged under the WIT
         // `Terminal` resource type (same pattern as
         // [`crate::secrets_impl::StoreHost::get`]).
-        let entry = self
+        let handle = self
             .table
-            .push(HostTerminalEntry { _req: req })
+            .push(entry)
             .expect("resource table push for client.terminal");
-        wasmtime::component::Resource::new_own(entry.rep())
+        Resource::new_own(handle.rep())
     }
 
     async fn drop(
         &mut self,
-        rep: wasmtime::component::Resource<crate::yosh::acp::client::Terminal>,
+        rep: Resource<crate::yosh::acp::client::Terminal>,
     ) -> wasmtime::Result<()> {
-        let entry: wasmtime::component::Resource<HostTerminalEntry> =
-            wasmtime::component::Resource::new_own(rep.rep());
+        let entry: Resource<HostTerminalEntry> = Resource::new_own(rep.rep());
+        // Dropping the entry runs `TerminalProcess::drop`, killing any
+        // still-running child.
         let _ = self.table.delete(entry);
         Ok(())
     }
@@ -884,32 +1183,72 @@ impl crate::yosh::acp::client::HostTerminal for HostState {
 impl crate::yosh::acp::client::HostTerminalWithStore for HasSelf<HostState> {
     fn output<T: Send>(
         accessor: &wasmtime::component::Accessor<T, Self>,
-        _self_: wasmtime::component::Resource<crate::yosh::acp::client::Terminal>,
-    ) -> impl ::core::future::Future<Output = wasmtime::component::StreamReader<u8>> + Send {
+        self_: Resource<crate::yosh::acp::client::Terminal>,
+    ) -> impl ::core::future::Future<Output = StreamReader<u8>> + Send {
         async move {
-            // Phase 2 placeholder: an immediately-finished empty stream.
-            // Phase 5 wires this to `terminal/output` polling on the
-            // outbound bridge, with the writer pumping bytes from editor
-            // responses until exit.
+            // Take the output receiver out of the entry (a stream is
+            // consumed once); `None` for disabled/failed terminals or a
+            // second `output()` call.
+            let rx = accessor.with(|mut a| {
+                let key: Resource<HostTerminalEntry> = Resource::new_own(self_.rep());
+                match a.get().table.get_mut(&key) {
+                    Ok(HostTerminalEntry::Running(proc)) => proc.output_rx.take(),
+                    _ => None,
+                }
+            });
             accessor
-                .with(|mut a| {
-                    wasmtime::component::StreamReader::new(&mut a, std::iter::empty::<u8>())
+                .with(|mut a| match rx {
+                    Some(rx) => StreamReader::new(&mut a, TerminalOutputProducer { rx }),
+                    None => StreamReader::new(&mut a, std::iter::empty::<u8>()),
                 })
-                .expect("empty stream construction")
+                .expect("terminal output stream construction")
         }
     }
 
     fn wait_for_exit<T: Send>(
-        _accessor: &wasmtime::component::Accessor<T, Self>,
-        _self_: wasmtime::component::Resource<crate::yosh::acp::client::Terminal>,
+        accessor: &wasmtime::component::Accessor<T, Self>,
+        self_: Resource<crate::yosh::acp::client::Terminal>,
     ) -> impl ::core::future::Future<
         Output = Result<crate::yosh::acp::terminals::TerminalExitStatus, Error>,
     > + Send {
         async move {
-            Err(translate::internal_error(
-                "client.terminal.wait_for_exit not yet implemented; \
-                 no process is spawned by the host stub",
-            ))
+            enum Waiter {
+                Wait(watch::Receiver<Option<ExitInfo>>),
+                Disabled,
+                Failed(String),
+                Missing,
+            }
+            let waiter = accessor.with(|mut a| {
+                let key: Resource<HostTerminalEntry> = Resource::new_own(self_.rep());
+                match a.get().table.get(&key) {
+                    Ok(HostTerminalEntry::Running(proc)) => Waiter::Wait(proc.exit_rx.clone()),
+                    Ok(HostTerminalEntry::Disabled) => Waiter::Disabled,
+                    Ok(HostTerminalEntry::SpawnFailed(msg)) => Waiter::Failed(msg.clone()),
+                    Err(_) => Waiter::Missing,
+                }
+            });
+            match waiter {
+                Waiter::Disabled => Err(translate::internal_error(
+                    "terminal tools are disabled; enable the `terminal` session config option",
+                )),
+                Waiter::Failed(msg) => Err(translate::internal_error(&format!(
+                    "failed to start terminal command: {msg}"
+                ))),
+                Waiter::Missing => Err(translate::internal_error("terminal resource not found")),
+                Waiter::Wait(mut rx) => loop {
+                    if let Some(info) = rx.borrow_and_update().clone() {
+                        return Ok(crate::yosh::acp::terminals::TerminalExitStatus {
+                            exit_code: info.code,
+                            signal: info.signal,
+                        });
+                    }
+                    if rx.changed().await.is_err() {
+                        return Err(translate::internal_error(
+                            "terminal process ended without reporting an exit status",
+                        ));
+                    }
+                },
+            }
         }
     }
 }
@@ -1282,5 +1621,223 @@ impl layer_agent::HostSessionWithStore for HasSelf<HostState> {
             .await;
             flatten_downstream("session.set-config-option", res)
         }
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+
+    /// Build a minimal `create-terminal-request` for `command args...`
+    /// with no env, no cwd, and no output limit.
+    fn make_request(
+        command: &str,
+        args: &[&str],
+    ) -> crate::yosh::acp::terminals::CreateTerminalRequest {
+        crate::yosh::acp::terminals::CreateTerminalRequest {
+            session_id: "test-session".to_string(),
+            command: command.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            env: Vec::new(),
+            cwd: None,
+            output_byte_limit: None,
+        }
+    }
+
+    fn test_host_state() -> HostState {
+        let mut wasi = WasiCtxBuilder::new();
+        HostState {
+            wasi: wasi.build(),
+            http: WasiHttpCtx::new(),
+            table: ResourceTable::new(),
+            stages: Vec::new(),
+            stage_stack: Vec::new(),
+            secrets: Arc::new(SecretsRegistry::new("terminal-test")),
+            downstream_sessions: std::collections::HashMap::new(),
+            next_downstream_rep: 1,
+            editor_session_id: None,
+            terminal_enabled: false,
+        }
+    }
+
+    /// Spawn `req`, drain its combined output to EOF, then wait for and
+    /// return the collected bytes alongside the resolved exit info.
+    async fn run(req: &crate::yosh::acp::terminals::CreateTerminalRequest) -> (Vec<u8>, ExitInfo) {
+        let mut proc = spawn_terminal(req).expect("spawn");
+        let mut rx = proc.output_rx.take().expect("output stream present");
+        let mut out = Vec::new();
+        while let Some(chunk) = rx.recv().await {
+            out.extend_from_slice(&chunk);
+        }
+        let mut exit_rx = proc.exit_rx.clone();
+        let info = loop {
+            if let Some(info) = exit_rx.borrow_and_update().clone() {
+                break info;
+            }
+            exit_rx.changed().await.expect("exit status channel open");
+        };
+        (out, info)
+    }
+
+    #[tokio::test]
+    async fn echo_captures_stdout_and_zero_exit() {
+        let (out, info) = run(&make_request("echo", &["hello", "world"])).await;
+        assert_eq!(String::from_utf8_lossy(&out).trim_end(), "hello world");
+        assert_eq!(info.code, Some(0));
+        assert_eq!(info.signal, None);
+    }
+
+    #[tokio::test]
+    async fn terminal_config_toggle_controls_every_provider_spawn() {
+        let engine = Engine::default();
+        let (primary_cancel, _) = watch::channel(false);
+        let primary = Session::new(Store::new(&engine, test_host_state()), 0, primary_cancel);
+        let (secondary_cancel, _) = watch::channel(false);
+        let secondary = Session::new(Store::new(&engine, test_host_state()), 0, secondary_cancel);
+        let group = crate::group::SessionGroup::new(
+            "test-session".to_string(),
+            vec![
+                (
+                    "local:first-provider".to_string(),
+                    primary.clone(),
+                    Vec::new(),
+                ),
+                (
+                    "local:second-provider".to_string(),
+                    secondary.clone(),
+                    Vec::new(),
+                ),
+            ],
+            true,
+        );
+
+        assert_eq!(group.terminal_option(), Some(false));
+        let disabled = {
+            let mut store = primary.inner.store.lock().await;
+            <HostState as crate::yosh::acp::client::HostTerminal>::new(
+                store.data_mut(),
+                make_request("echo", &["must-not-run"]),
+            )
+            .await
+        };
+        {
+            let mut store = primary.inner.store.lock().await;
+            let key: Resource<HostTerminalEntry> = Resource::new_own(disabled.rep());
+            assert!(matches!(
+                store.data().table.get(&key),
+                Ok(HostTerminalEntry::Disabled)
+            ));
+            store
+                .data_mut()
+                .table
+                .delete(key)
+                .expect("delete disabled terminal resource");
+        }
+
+        group.set_terminal_enabled(true).await;
+        assert_eq!(group.terminal_option(), Some(true));
+        let (enabled, mut output_rx, mut exit_rx) = {
+            assert!(primary.inner.store.lock().await.data().terminal_enabled);
+            let mut store = secondary.inner.store.lock().await;
+            assert!(store.data().terminal_enabled);
+            let terminal = <HostState as crate::yosh::acp::client::HostTerminal>::new(
+                store.data_mut(),
+                make_request("echo", &["terminal-enabled"]),
+            )
+            .await;
+            let key: Resource<HostTerminalEntry> = Resource::new_own(terminal.rep());
+            let entry = store
+                .data_mut()
+                .table
+                .get_mut(&key)
+                .expect("enabled terminal resource");
+            let HostTerminalEntry::Running(proc) = entry else {
+                panic!("enabled terminal config did not spawn a process");
+            };
+            (
+                terminal,
+                proc.output_rx.take().expect("terminal output stream"),
+                proc.exit_rx.clone(),
+            )
+        };
+
+        let mut output = Vec::new();
+        while let Some(chunk) = output_rx.recv().await {
+            output.extend_from_slice(&chunk);
+        }
+        let exit = loop {
+            if let Some(exit) = exit_rx.borrow_and_update().clone() {
+                break exit;
+            }
+            exit_rx.changed().await.expect("exit status channel open");
+        };
+        assert_eq!(
+            String::from_utf8_lossy(&output).trim_end(),
+            "terminal-enabled"
+        );
+        assert_eq!(exit.code, Some(0));
+        assert_eq!(exit.signal, None);
+
+        {
+            let mut store = secondary.inner.store.lock().await;
+            let key: Resource<HostTerminalEntry> = Resource::new_own(enabled.rep());
+            store
+                .data_mut()
+                .table
+                .delete(key)
+                .expect("delete enabled terminal resource");
+        }
+
+        group.set_terminal_enabled(false).await;
+        assert_eq!(group.terminal_option(), Some(false));
+        assert!(!primary.inner.store.lock().await.data().terminal_enabled);
+        assert!(!secondary.inner.store.lock().await.data().terminal_enabled);
+    }
+
+    #[tokio::test]
+    async fn nonzero_exit_code_is_reported() {
+        let (_out, info) = run(&make_request("sh", &["-c", "exit 7"])).await;
+        assert_eq!(info.code, Some(7));
+        assert_eq!(info.signal, None);
+    }
+
+    #[tokio::test]
+    async fn stderr_is_merged_into_output() {
+        let (out, info) = run(&make_request("sh", &["-c", "echo out; echo err 1>&2"])).await;
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("out"), "stdout missing from {text:?}");
+        assert!(text.contains("err"), "stderr missing from {text:?}");
+        assert_eq!(info.code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn missing_command_fails_to_spawn() {
+        let req = make_request("definitely-not-a-real-command-xyz", &[]);
+        assert!(spawn_terminal(&req).is_err());
+    }
+
+    #[tokio::test]
+    async fn output_byte_limit_truncates_excess() {
+        let mut req = make_request("sh", &["-c", "printf abcdefghij"]);
+        req.output_byte_limit = Some(4);
+        let (out, _info) = run(&req).await;
+        assert!(out.len() <= 4, "expected <= 4 bytes, got {}", out.len());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn signal_termination_is_reported() {
+        let (_out, info) = run(&make_request("sh", &["-c", "kill -TERM $$"])).await;
+        assert_eq!(info.signal.as_deref(), Some("SIGTERM"));
+        assert_eq!(info.code, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_name_maps_common_and_falls_back() {
+        assert_eq!(signal_name(2), "SIGINT");
+        assert_eq!(signal_name(9), "SIGKILL");
+        assert_eq!(signal_name(15), "SIGTERM");
+        assert_eq!(signal_name(99), "SIG99");
     }
 }

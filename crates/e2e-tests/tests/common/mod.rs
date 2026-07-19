@@ -542,6 +542,20 @@ pub fn initialize_params() -> Value {
     })
 }
 
+/// Like [`initialize_params`] but also advertises support for boolean
+/// session config options (`session.configOptions.boolean`). Required for
+/// the host to expose the host-owned `terminal` toggle.
+pub fn initialize_params_with_boolean_config() -> Value {
+    json!({
+        "protocolVersion": 1,
+        "clientCapabilities": {
+            "fs": {"readTextFile": true, "writeTextFile": true},
+            "terminal": false,
+            "session": {"configOptions": {"boolean": {}}}
+        }
+    })
+}
+
 /// Build params for `session/new` rooted at `cwd`.
 pub fn new_session_params(cwd: &Path) -> Value {
     json!({

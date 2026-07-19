@@ -35,12 +35,29 @@ pub(super) async fn handle_initialize(
         .instantiate()
         .await
         .map_err(|e| translate::anyhow_to_acp("initialize: instantiate", e))?;
+    // Whether the client opted into boolean session config options
+    // (`session.configOptions.boolean`). The host-owned `terminal` toggle
+    // is a boolean config option, so per the ACP boolean-config-option
+    // RFD we only advertise it to clients that opted in (some clients
+    // break on unknown value shapes). Remember the decision on the shared
+    // factory for sessions created later. `clientCapabilities.terminal`
+    // itself is still passed through to the guest unchanged, but no longer
+    // gates host-side execution — the `terminal` config option does.
+    let boolean_config_supported = req
+        .client_capabilities
+        .session
+        .as_ref()
+        .and_then(|s| s.config_options.as_ref())
+        .and_then(|c| c.boolean.as_ref())
+        .is_some();
     tracing::info!(
         fs_read = req.client_capabilities.fs.read_text_file,
         fs_write = req.client_capabilities.fs.write_text_file,
         terminal = req.client_capabilities.terminal,
+        boolean_config_supported,
         "editor capabilities"
     );
+    factory.set_boolean_config_supported(boolean_config_supported);
     let wit_req = translate::init_request_schema_to_wit(req);
     let result = session
         .call_initialize(wit_req)
@@ -130,16 +147,28 @@ pub(super) async fn handle_new_session(
             (component_id, session, resp.config_options.unwrap_or_default())
         })
         .collect();
-    let group = crate::group::SessionGroup::new(session_id.clone(), group_entries);
+    let group = crate::group::SessionGroup::new(
+        session_id.clone(),
+        group_entries,
+        factory.boolean_config_supported(),
+    );
 
     let schema_resp = if group.is_multi_provider() {
         // Route every provider chain's outbound updates through the group id
         // so a switched (non-first) provider's notifications still reach the
         // editor. Single-provider stays a verbatim passthrough (not bound).
         group.bind_editor_session_ids().await;
-        translate::new_session_response_with_config_options(&session_id, group.config_options())?
+        translate::new_session_response_with_config_options(
+            &session_id,
+            group.config_options(),
+            group.terminal_option(),
+        )?
     } else {
-        translate::new_session_response_wit_to_schema(first_resp, factory.component_id())?
+        translate::new_session_response_wit_to_schema(
+            first_resp,
+            factory.component_id(),
+            group.terminal_option(),
+        )?
     };
     registry.insert(session_id.clone(), group);
     if let Ok(payload) = serde_json::to_string(&schema_resp) {
@@ -190,13 +219,24 @@ pub(super) async fn handle_load_session(
             (component_id, session, resp.config_options.unwrap_or_default())
         })
         .collect();
-    let group = crate::group::SessionGroup::new(session_key.clone(), group_entries);
+    let group = crate::group::SessionGroup::new(
+        session_key.clone(),
+        group_entries,
+        factory.boolean_config_supported(),
+    );
 
     let schema_resp = if group.is_multi_provider() {
         group.bind_editor_session_ids().await;
-        translate::load_session_response_with_config_options(group.config_options())?
+        translate::load_session_response_with_config_options(
+            group.config_options(),
+            group.terminal_option(),
+        )?
     } else {
-        translate::load_session_response_wit_to_schema(first_resp, factory.component_id())?
+        translate::load_session_response_wit_to_schema(
+            first_resp,
+            factory.component_id(),
+            group.terminal_option(),
+        )?
     };
     registry.insert(session_key.clone(), group);
     responder.respond(schema_resp)?;
@@ -307,6 +347,43 @@ pub(super) fn handle_set_session_config_option(
 
     let handle = require_session(registry, &session_key)?;
     let config_id = req.config_id.0.to_string();
+
+    // The `terminal` option is host-owned: the host enforces terminal
+    // execution and no guest provider may grant itself host CLI access, so
+    // intercept its setter here and never forward it to the guest. It is a
+    // boolean option, so require a boolean value.
+    if config_id == crate::group::TERMINAL_CONFIG_ID {
+        if handle.terminal_option().is_none() {
+            let mut e = AcpError::invalid_params();
+            e.message = "`terminal` is unavailable because the client did not advertise \
+                         session.configOptions.boolean support during initialize"
+                .to_string();
+            return Err(e);
+        }
+        let enabled = match &req.value {
+            schema::SessionConfigOptionValue::Boolean { value } => *value,
+            other => {
+                let mut e = AcpError::invalid_params();
+                e.message = format!(
+                    "`terminal` is a boolean config option; expected a boolean value, got {other:?}"
+                );
+                return Err(e);
+            }
+        };
+        cx.spawn(async move {
+            handle.set_terminal_enabled(enabled).await;
+            let resp = match translate::set_config_option_response(
+                handle.config_options(),
+                handle.terminal_option(),
+            ) {
+                Ok(r) => r,
+                Err(e) => return responder.respond_with_error(e),
+            };
+            responder.respond(resp)
+        })?;
+        return Ok(());
+    }
+
     let value = match &req.value {
         schema::SessionConfigOptionValue::ValueId { value } => value.0.to_string(),
         schema::SessionConfigOptionValue::Boolean { value } => value.to_string(),
@@ -321,10 +398,11 @@ pub(super) fn handle_set_session_config_option(
         let outcome = handle.set_config_option(config_id, value).await;
         match outcome {
             SetConfigOptionOutcome::Done(options) => {
-                let resp = match translate::set_config_option_response(options) {
-                    Ok(r) => r,
-                    Err(e) => return responder.respond_with_error(e),
-                };
+                let resp =
+                    match translate::set_config_option_response(options, handle.terminal_option()) {
+                        Ok(r) => r,
+                        Err(e) => return responder.respond_with_error(e),
+                    };
                 responder.respond(resp)
             }
             SetConfigOptionOutcome::Wit(e) => {
